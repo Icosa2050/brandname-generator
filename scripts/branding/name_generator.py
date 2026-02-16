@@ -177,6 +177,47 @@ SUGGESTIVE_ROOTS_GLOBAL = [
 
 SHORT_SUFFIXES = ['on', 'io', 'ra', 'ro', 'ly', 'eo', 'ex', 'a', 'o']
 
+# Curated Latin-script roots to broaden phonetic variation beyond crowded DACH patterns.
+# These are inspiration roots (not legal signals), intended to produce pronounceable candidates.
+GLOBAL_VARIATION_ROOTS = [
+    'amani',
+    'imara',
+    'nuru',
+    'safi',
+    'wazi',
+    'dira',
+    'faida',
+    'msingi',
+    'lengo',
+    'rafiki',
+    'jenga',
+    'nguvu',
+    'umoja',
+    'ayo',
+    'ire',
+    'zuri',
+    'kazi',
+    'vuna',
+    'soma',
+    'tamu',
+    'pendo',
+    'saha',
+    'moyo',
+    'hera',
+]
+
+GLOBAL_EXPRESSIONS = [
+    'clearflow',
+    'fairshare',
+    'trustline',
+    'trueledger',
+    'cleanalloc',
+    'goodsettle',
+    'calmledger',
+    'safebalance',
+    'brightbase',
+]
+
 USER_AGENT = 'kostula-name-generator/1.0'
 
 
@@ -232,7 +273,13 @@ def normalize_alpha(text: str) -> str:
     return re.sub(r'[^a-z]+', '', text.lower())
 
 
-def generate_candidates(scope: str, seeds: Iterable[str], min_len: int, max_len: int) -> list[str]:
+def generate_candidates(
+    scope: str,
+    seeds: Iterable[str],
+    min_len: int,
+    max_len: int,
+    variation_profile: str,
+) -> list[str]:
     names: set[str] = set()
 
     for p, s in itertools.product(COINED_PREFIXES, COINED_SUFFIXES):
@@ -244,6 +291,22 @@ def generate_candidates(scope: str, seeds: Iterable[str], min_len: int, max_len:
     roots = SUGGESTIVE_ROOTS_DACH if scope == 'dach' else SUGGESTIVE_ROOTS_GLOBAL
     for root, suf in itertools.product(roots, SHORT_SUFFIXES):
         names.add(f'{root}{suf}')
+
+    if variation_profile == 'expanded':
+        for root in GLOBAL_VARIATION_ROOTS:
+            names.add(root)
+            for suf in SHORT_SUFFIXES + BRAND_ENDINGS:
+                names.add(f'{root}{suf}')
+            for p in COINED_PREFIXES[:8]:
+                names.add(f'{p}{root[:4]}')
+            for stem in BRAND_STEMS[:8]:
+                names.add(f'{root[:4]}{stem[:3]}')
+        for left, right in itertools.product(GLOBAL_VARIATION_ROOTS[:16], GLOBAL_VARIATION_ROOTS[8:24]):
+            names.add(f'{left[:4]}{right[:3]}')
+        for expr in GLOBAL_EXPRESSIONS:
+            names.add(expr)
+            for end in BRAND_ENDINGS[:6]:
+                names.add(f'{expr[:7]}{end}')
 
     for seed in seeds:
         base = normalize_alpha(seed)
@@ -796,8 +859,10 @@ def run_external_checks(
     throttle_ms: int,
     gate: str,
     store_countries: list[str],
+    store_check: bool,
     web_check: bool,
     web_top: int,
+    domain_check: bool,
     require_base_com: bool,
     fail_on_unknown: bool,
     package_check: bool,
@@ -819,25 +884,39 @@ def run_external_checks(
             )
         exact_countries: list[str] = []
         unknown_countries: list[str] = []
-        for country in store_countries:
-            count, exact, ok = app_store_signal(c.name, country)
-            if country == 'de':
-                c.store_de_count, c.store_de_exact = count, exact
-            elif country == 'ch':
-                c.store_ch_count, c.store_ch_exact = count, exact
-            elif country == 'us':
-                c.store_us_count, c.store_us_exact = count, exact
-            if not ok:
-                unknown_countries.append(country)
-            if exact:
-                exact_countries.append(country)
-        c.store_exact_countries = ','.join(exact_countries)
-        c.store_unknown_countries = ','.join(unknown_countries)
+        if store_check:
+            for country in store_countries:
+                count, exact, ok = app_store_signal(c.name, country)
+                if country == 'de':
+                    c.store_de_count, c.store_de_exact = count, exact
+                elif country == 'ch':
+                    c.store_ch_count, c.store_ch_exact = count, exact
+                elif country == 'us':
+                    c.store_us_count, c.store_us_exact = count, exact
+                if not ok:
+                    unknown_countries.append(country)
+                if exact:
+                    exact_countries.append(country)
+            c.store_exact_countries = ','.join(exact_countries)
+            c.store_unknown_countries = ','.join(unknown_countries)
+        else:
+            c.store_de_count = -2
+            c.store_ch_count = -2
+            c.store_us_count = -2
+            c.store_exact_countries = ''
+            c.store_unknown_countries = ''
 
-        c.com_available = rdap_available(c.name, 'com')
-        c.de_available = rdap_available(c.name, 'de')
-        c.ch_available = rdap_available(c.name, 'ch')
-        c.com_fallback_available, c.com_fallback_domain = best_com_fallback(c.name)
+        if domain_check:
+            c.com_available = rdap_available(c.name, 'com')
+            c.de_available = rdap_available(c.name, 'de')
+            c.ch_available = rdap_available(c.name, 'ch')
+            c.com_fallback_available, c.com_fallback_domain = best_com_fallback(c.name)
+        else:
+            c.com_available = 'unknown'
+            c.de_available = 'unknown'
+            c.ch_available = 'unknown'
+            c.com_fallback_available = 'unknown'
+            c.com_fallback_domain = ''
 
         if web_check:
             (
@@ -886,7 +965,7 @@ def run_external_checks(
 
         apply_external_penalty(c)
 
-        if exact_countries:
+        if store_check and exact_countries:
             mark_fail(c, f'exact_app_store_collision_{"-".join(exact_countries)}')
 
         if web_check and c.web_exact_hits > 0:
@@ -901,32 +980,33 @@ def run_external_checks(
         if c.adversarial_risk >= adversarial_fail_threshold:
             mark_fail(c, 'adversarial_confusion_risk')
 
-        for tld in req_tlds:
-            avail = {'com': c.com_available, 'de': c.de_available, 'ch': c.ch_available}[tld]
-            if avail == 'unknown':
-                if degraded_network_mode:
+        if domain_check:
+            for tld in req_tlds:
+                avail = {'com': c.com_available, 'de': c.de_available, 'ch': c.ch_available}[tld]
+                if avail == 'unknown':
+                    if degraded_network_mode:
+                        continue
+                    if fail_on_unknown:
+                        mark_fail(c, f'required_domain_{tld}_unknown')
+                        break
+                    # In balanced mode, allow unknown domain state as soft signal.
                     continue
-                if fail_on_unknown:
-                    mark_fail(c, f'required_domain_{tld}_unknown')
+                # If .com is taken, allow viable fallback domain for global/eu naming exploration.
+                if tld == 'com' and not require_base_com and avail != 'yes' and c.com_fallback_available == 'yes':
+                    continue
+                if avail != 'yes':
+                    mark_fail(c, f'required_domain_{tld}_not_available')
                     break
-                # In balanced mode, allow unknown domain state as soft signal.
-                continue
-            # If .com is taken, allow viable fallback domain for global/eu naming exploration.
-            if tld == 'com' and not require_base_com and avail != 'yes' and c.com_fallback_available == 'yes':
-                continue
-            if avail != 'yes':
-                mark_fail(c, f'required_domain_{tld}_not_available')
-                break
 
-        if require_base_com:
-            if c.com_available == 'yes':
-                pass
-            elif c.com_available == 'unknown' and (degraded_network_mode or not fail_on_unknown):
-                pass
-            else:
-                mark_fail(c, 'base_com_not_available')
+            if require_base_com:
+                if c.com_available == 'yes':
+                    pass
+                elif c.com_available == 'unknown' and (degraded_network_mode or not fail_on_unknown):
+                    pass
+                else:
+                    mark_fail(c, 'base_com_not_available')
 
-        if fail_on_unknown and c.store_unknown_countries:
+        if store_check and fail_on_unknown and c.store_unknown_countries:
             mark_fail(c, 'app_store_check_unknown')
 
         if fail_on_unknown and web_check and not web_ok:
@@ -1102,6 +1182,54 @@ def write_json(path: Path, scope: str, gate: str, candidates: list[Candidate]) -
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 
+def append_run_history(
+    path: Path,
+    scope: str,
+    gate: str,
+    args: argparse.Namespace,
+    candidates: list[Candidate],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    counts = {'strong': 0, 'consider': 0, 'weak': 0, 'reject': 0}
+    for c in candidates:
+        counts[recommendation(c, gate)] += 1
+    top = []
+    for c in candidates:
+        rec = recommendation(c, gate)
+        if rec in {'strong', 'consider'} and not c.hard_fail:
+            top.append(
+                {
+                    'name': c.name,
+                    'recommendation': rec,
+                    'total_score': c.total_score,
+                    'challenge_risk': c.challenge_risk,
+                    'adversarial_risk': c.adversarial_risk,
+                    'fail_reason': c.fail_reason,
+                }
+            )
+        if len(top) >= 12:
+            break
+    entry = {
+        'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
+        'scope': scope,
+        'gate': gate,
+        'variation_profile': args.variation_profile,
+        'degraded_network_mode': bool(args.degraded_network_mode),
+        'store_check': bool(args.store_check),
+        'domain_check': bool(args.domain_check),
+        'web_check': bool(args.web_check),
+        'package_check': bool(args.package_check),
+        'social_check': bool(args.social_check),
+        'pool_size': int(args.pool_size),
+        'check_limit': int(args.check_limit),
+        'candidate_count': len(candidates),
+        'recommendation_counts': counts,
+        'top_candidates': top,
+    }
+    with path.open('a', encoding='utf-8') as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Generate and screen app name candidates.')
     parser.add_argument('--scope', choices=['dach', 'eu', 'global'], default='eu')
@@ -1122,10 +1250,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--min-len', type=int, default=6)
     parser.add_argument('--max-len', type=int, default=11)
     parser.add_argument(
+        '--variation-profile',
+        choices=['standard', 'expanded'],
+        default='expanded',
+        help='Candidate generation profile. expanded adds broader multilingual phonetic roots.',
+    )
+    parser.add_argument(
         '--store-countries',
         default='de,ch,us,gb,fr,it',
         help='Comma-separated country codes for App Store exact-match checks.',
     )
+    parser.add_argument('--store-check', dest='store_check', action='store_true', default=True)
+    parser.add_argument('--no-store-check', dest='store_check', action='store_false')
+    parser.add_argument('--domain-check', dest='domain_check', action='store_true', default=True)
+    parser.add_argument('--no-domain-check', dest='domain_check', action='store_false')
     parser.add_argument('--web-top', type=int, default=8, help='How many web search results to inspect.')
     parser.add_argument('--web-check', dest='web_check', action='store_true', default=True)
     parser.add_argument('--no-web-check', dest='web_check', action='store_false')
@@ -1155,6 +1293,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--throttle-ms', type=int, default=0, help='Sleep between candidate checks (ms).')
     parser.add_argument('--output', default='', help='Output CSV path.')
     parser.add_argument('--json-output', default='', help='Optional machine-readable JSON output path.')
+    parser.add_argument(
+        '--run-log',
+        default='docs/branding/name_generator_runs.jsonl',
+        help='Append run summary JSONL history to this path (set empty string to disable).',
+    )
     return parser.parse_args()
 
 
@@ -1174,7 +1317,13 @@ def main() -> int:
     if args.only_candidates:
         generated = explicit_candidates
     else:
-        generated = generate_candidates(args.scope, seeds, args.min_len, args.max_len)
+        generated = generate_candidates(
+            args.scope,
+            seeds,
+            args.min_len,
+            args.max_len,
+            args.variation_profile,
+        )
         generated.extend(explicit_candidates)
         generated = sorted(set(generated))
 
@@ -1206,8 +1355,10 @@ def main() -> int:
         args.throttle_ms,
         args.gate,
         store_countries,
+        args.store_check,
         args.web_check,
         args.web_top,
+        args.domain_check,
         require_base_com,
         fail_on_unknown,
         args.package_check,
@@ -1235,6 +1386,8 @@ def main() -> int:
     write_csv(output_file, args.scope, final_ranked, args.gate)
     if args.json_output:
         write_json(Path(args.json_output), args.scope, args.gate, final_ranked)
+    if args.run_log:
+        append_run_history(Path(args.run_log), args.scope, args.gate, args, final_ranked)
 
     print(f'Wrote {len(final_ranked)} screened candidates: {output_file}')
     print('Top candidates:')
