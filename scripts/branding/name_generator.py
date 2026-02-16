@@ -4,7 +4,8 @@
 Pipeline:
 1) Generate broad candidate pool (coined + suggestive + optional seeds)
 2) Score each candidate for brand quality and challenge risk
-3) Run external checks (App Store and RDAP domain availability)
+3) Run external checks (web collisions, App Store, RDAP domains, package namespaces,
+   social handles, adversarial similarity)
 4) Export ranked CSV and print best candidates
 
 This is a practical pre-screening tool, not legal advice.
@@ -21,7 +22,7 @@ import itertools
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable
@@ -43,6 +44,25 @@ PROTECTED_MARKS = [
     'saldeo',
     'saldio',
     'utilaro',
+]
+
+ADVERSARIAL_MARKS = [
+    'haufe',
+    'techem',
+    'ista',
+    'minol',
+    'bexio',
+    'klara',
+    'immoscout24',
+    'immoscout',
+    'immonet',
+    'immowelt',
+    'immocloud',
+    'immoware24',
+    'objego',
+    'scalara',
+    'wohnify',
+    'hausify',
 ]
 
 GENERIC_TOKENS = {
@@ -188,6 +208,21 @@ class Candidate:
     web_near_hits: int = -1
     web_sample_domains: str = ''
     web_source: str = ''
+    pypi_exists: str = 'unknown'
+    npm_exists: str = 'unknown'
+    social_github_available: str = 'unknown'
+    social_linkedin_available: str = 'unknown'
+    social_x_available: str = 'unknown'
+    social_instagram_available: str = 'unknown'
+    social_unavailable_count: int = 0
+    social_unknown_count: int = 0
+    adversarial_risk: int = 0
+    adversarial_top_hits: str = ''
+    psych_spelling_risk: int = 0
+    psych_trust_proxy: int = 0
+    trademark_dpma_url: str = ''
+    trademark_swissreg_url: str = ''
+    trademark_tmview_url: str = ''
     external_penalty: int = 0
     hard_fail: bool = False
     fail_reason: str = ''
@@ -327,6 +362,81 @@ def challenge_risk(name: str, scope: str) -> tuple[int, int, str, int, int]:
     return risk, sim_risk, closest, desc_risk, sc_pen
 
 
+def similarity_with_prefix_boost(name: str, mark: str) -> float:
+    ratio = SequenceMatcher(None, name, mark).ratio()
+    if len(name) >= 4 and len(mark) >= 4 and name[:4] == mark[:4]:
+        ratio = max(ratio, 0.82)
+    if len(name) >= 5 and len(mark) >= 5 and name[:5] == mark[:5]:
+        ratio = max(ratio, 0.88)
+    if len(name) >= 3 and len(mark) >= 3 and name[-3:] == mark[-3:]:
+        ratio = max(ratio, 0.76)
+    return min(1.0, ratio)
+
+
+def adversarial_similarity_signal(name: str) -> tuple[int, str]:
+    scored: list[tuple[str, int]] = []
+    for mark in ADVERSARIAL_MARKS:
+        ratio = int(similarity_with_prefix_boost(name, mark) * 100)
+        if ratio >= 68:
+            scored.append((mark, ratio))
+    scored.sort(key=lambda item: (-item[1], item[0]))
+    top = scored[:3]
+    if not top:
+        return 0, ''
+    top_str = ';'.join(f'{mark}:{score}' for mark, score in top)
+    risk = min(100, max(score for _, score in top))
+    return risk, top_str
+
+
+def psych_spelling_risk(name: str) -> int:
+    risk = 0
+    if any(ch in name for ch in ('q', 'x', 'y')):
+        risk += 8
+    if 'ph' in name:
+        risk += 6
+    if 'sch' in name and len(name) <= 7:
+        risk += 4
+    if any(token in name for token in ('ck', 'tz', 'th', 'gh')):
+        risk += 4
+    if re.search(r'[aeiou]{3,}', name):
+        risk += 6
+    if re.search(r'[^aeiou]{4,}', name):
+        risk += 6
+    if name.startswith(('c', 'k')) and 'c' in name and 'k' in name:
+        risk += 6
+    return min(100, risk)
+
+
+def psych_trust_proxy_score(name: str) -> int:
+    score = 70
+    if len(name) < 6 or len(name) > 11:
+        score -= 10
+    ratio = vowel_ratio(name)
+    if ratio < 0.28 or ratio > 0.62:
+        score -= 10
+    if any(token in name for token in ('easy', 'smart', 'cheap', 'quick', 'fun')):
+        score -= 14
+    if any(token in name for token in ('audit', 'legal', 'cert', 'secure', 'trust')):
+        score += 6
+    score -= int(psych_spelling_risk(name) * 0.4)
+    return max(0, min(100, score))
+
+
+def trademark_search_urls(name: str) -> tuple[str, str, str]:
+    dpma = (
+        'https://register.dpma.de/DPMAregister/marke/register/erweitert'
+        '?queryString='
+        + parse.quote(name)
+    )
+    swissreg = (
+        'https://www.swissreg.ch/srclient/faces/jsp/trademark/sr300.jsp'
+        '?language=de&searchText='
+        + parse.quote(name)
+    )
+    tmview = 'https://www.tmdn.org/tmview/#/tmsearch?page=1&criteria=' + parse.quote(name)
+    return dpma, swissreg, tmview
+
+
 def fetch_json(url: str, timeout: float = 8.0, retries: int = 2) -> dict | None:
     req = request.Request(url, headers={'User-Agent': USER_AGENT})
     for i in range(retries + 1):
@@ -352,6 +462,60 @@ def fetch_text(url: str, timeout: float = 8.0, retries: int = 2) -> str | None:
                 return None
             time.sleep(0.4 * (i + 1))
     return None
+
+
+def fetch_status(url: str, timeout: float = 8.0, retries: int = 1, method: str = 'GET') -> int | None:
+    req = request.Request(url, headers={'User-Agent': USER_AGENT}, method=method)
+    for i in range(retries + 1):
+        try:
+            with request.urlopen(req, timeout=timeout) as resp:
+                _ = resp.read(64)
+                return int(resp.status)
+        except error.HTTPError as e:
+            return int(e.code)
+        except Exception:
+            if i == retries:
+                return None
+            time.sleep(0.25 * (i + 1))
+    return None
+
+
+def package_exists_on_pypi(name: str) -> str:
+    status = fetch_status(f'https://pypi.org/pypi/{name}/json', timeout=8.0, retries=1)
+    if status == 200:
+        return 'yes'
+    if status == 404:
+        return 'no'
+    return 'unknown'
+
+
+def package_exists_on_npm(name: str) -> str:
+    status = fetch_status(f'https://registry.npmjs.org/{name}', timeout=8.0, retries=1)
+    if status == 200:
+        return 'yes'
+    if status == 404:
+        return 'no'
+    return 'unknown'
+
+
+def handle_available(url: str) -> str:
+    status = fetch_status(url, timeout=8.0, retries=1, method='GET')
+    if status in {404, 410}:
+        return 'yes'
+    if status in {200, 301, 302, 307, 308, 401, 403, 429}:
+        return 'no'
+    return 'unknown'
+
+
+def social_handle_signal(name: str) -> tuple[str, str, str, str, int, int]:
+    github = handle_available(f'https://github.com/{name}')
+    linkedin = handle_available(f'https://www.linkedin.com/company/{name}')
+    x_handle = handle_available(f'https://x.com/{name}')
+    instagram = handle_available(f'https://www.instagram.com/{name}/')
+    states = [github, linkedin, x_handle, instagram]
+    unavailable_count = sum(1 for s in states if s == 'no')
+    unknown_count = sum(1 for s in states if s == 'unknown')
+    return github, linkedin, x_handle, instagram, unavailable_count, unknown_count
 
 
 def app_store_signal(name: str, country: str) -> tuple[int, bool, bool]:
@@ -558,7 +722,12 @@ def evaluate_candidates(scope: str, names: list[str], similarity_fail_threshold:
     for n in names:
         q = quality_score(n)
         risk, sim_risk, closest, desc_risk, sc_pen = challenge_risk(n, scope)
+        adv_risk, adv_hits = adversarial_similarity_signal(n)
+        risk = min(100, risk + int(0.25 * adv_risk))
         total = max(0, min(100, int(q - (risk * 0.55))))
+        spell_risk = psych_spelling_risk(n)
+        trust_proxy = psych_trust_proxy_score(n)
+        dpma_url, swissreg_url, tmview_url = trademark_search_urls(n)
         c = Candidate(
             name=n,
             quality_score=q,
@@ -568,10 +737,21 @@ def evaluate_candidates(scope: str, names: list[str], similarity_fail_threshold:
             similarity_risk=sim_risk,
             closest_mark=closest,
             scope_penalty=sc_pen,
+            adversarial_risk=adv_risk,
+            adversarial_top_hits=adv_hits,
+            psych_spelling_risk=spell_risk,
+            psych_trust_proxy=trust_proxy,
+            trademark_dpma_url=dpma_url,
+            trademark_swissreg_url=swissreg_url,
+            trademark_tmview_url=tmview_url,
         )
         if sim_risk >= similarity_fail_threshold:
             c.hard_fail = True
             c.fail_reason = f'similar_to_{closest}'
+        if adv_risk >= max(82, similarity_fail_threshold):
+            c.hard_fail = True
+            if not c.fail_reason:
+                c.fail_reason = 'adversarial_similarity_risk'
         results.append(c)
     return results
 
@@ -588,6 +768,20 @@ def apply_external_penalty(c: Candidate) -> None:
         penalty += min(30, c.web_exact_hits * 12)
     if c.web_near_hits > 0:
         penalty += min(14, c.web_near_hits * 4)
+    if c.pypi_exists == 'yes':
+        penalty += 8
+    if c.npm_exists == 'yes':
+        penalty += 8
+    if c.social_unavailable_count > 0:
+        penalty += min(10, c.social_unavailable_count * 3)
+    if c.social_unknown_count > 0:
+        penalty += min(8, c.social_unknown_count * 2)
+    if c.adversarial_risk >= 70:
+        penalty += min(16, int((c.adversarial_risk - 65) * 0.6))
+    # Lower trust/spelling robustness should reduce rank before user tests.
+    if c.psych_trust_proxy < 55:
+        penalty += int((55 - c.psych_trust_proxy) * 0.35)
+    penalty += int(min(10, c.psych_spelling_risk * 0.25))
     unknown_store_count = len([p for p in c.store_unknown_countries.split(',') if p.strip()])
     if unknown_store_count > 0:
         penalty += min(8, unknown_store_count * 2)
@@ -606,6 +800,9 @@ def run_external_checks(
     web_top: int,
     require_base_com: bool,
     fail_on_unknown: bool,
+    package_check: bool,
+    social_check: bool,
+    adversarial_fail_threshold: int,
 ) -> None:
     req_tlds = required_tlds(scope)
     for c in candidates:
@@ -650,6 +847,32 @@ def run_external_checks(
                 'disabled',
             )
 
+        if package_check:
+            c.pypi_exists = package_exists_on_pypi(c.name)
+            c.npm_exists = package_exists_on_npm(c.name)
+        else:
+            c.pypi_exists = 'unknown'
+            c.npm_exists = 'unknown'
+
+        if social_check:
+            (
+                c.social_github_available,
+                c.social_linkedin_available,
+                c.social_x_available,
+                c.social_instagram_available,
+                c.social_unavailable_count,
+                c.social_unknown_count,
+            ) = social_handle_signal(c.name)
+        else:
+            (
+                c.social_github_available,
+                c.social_linkedin_available,
+                c.social_x_available,
+                c.social_instagram_available,
+            ) = ('unknown', 'unknown', 'unknown', 'unknown')
+            c.social_unavailable_count = 0
+            c.social_unknown_count = 4
+
         apply_external_penalty(c)
 
         if exact_countries:
@@ -660,6 +883,12 @@ def run_external_checks(
 
         if gate == 'strict' and web_check and c.web_near_hits >= 2:
             mark_fail(c, 'web_near_collision')
+
+        if gate == 'strict' and package_check and (c.pypi_exists == 'yes' or c.npm_exists == 'yes'):
+            mark_fail(c, 'package_namespace_collision')
+
+        if c.adversarial_risk >= adversarial_fail_threshold:
+            mark_fail(c, 'adversarial_confusion_risk')
 
         for tld in req_tlds:
             avail = {'com': c.com_available, 'de': c.de_available, 'ch': c.ch_available}[tld]
@@ -681,6 +910,12 @@ def run_external_checks(
 
         if fail_on_unknown and web_check and not web_ok:
             mark_fail(c, 'web_check_unknown')
+
+        if fail_on_unknown and package_check and ('unknown' in {c.pypi_exists, c.npm_exists}):
+            mark_fail(c, 'package_check_unknown')
+
+        if fail_on_unknown and social_check and c.social_unknown_count > 0:
+            mark_fail(c, 'social_check_unknown')
 
         if throttle_ms > 0:
             time.sleep(throttle_ms / 1000.0)
@@ -736,6 +971,21 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                 'web_near_hits',
                 'web_sample_domains',
                 'web_source',
+                'pypi_exists',
+                'npm_exists',
+                'social_github_available',
+                'social_linkedin_available',
+                'social_x_available',
+                'social_instagram_available',
+                'social_unavailable_count',
+                'social_unknown_count',
+                'adversarial_risk',
+                'adversarial_top_hits',
+                'psych_spelling_risk',
+                'psych_trust_proxy',
+                'trademark_dpma_url',
+                'trademark_swissreg_url',
+                'trademark_tmview_url',
                 'external_penalty',
                 'hard_fail',
                 'fail_reason',
@@ -773,12 +1023,46 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                     c.web_near_hits,
                     c.web_sample_domains,
                     c.web_source,
+                    c.pypi_exists,
+                    c.npm_exists,
+                    c.social_github_available,
+                    c.social_linkedin_available,
+                    c.social_x_available,
+                    c.social_instagram_available,
+                    c.social_unavailable_count,
+                    c.social_unknown_count,
+                    c.adversarial_risk,
+                    c.adversarial_top_hits,
+                    c.psych_spelling_risk,
+                    c.psych_trust_proxy,
+                    c.trademark_dpma_url,
+                    c.trademark_swissreg_url,
+                    c.trademark_tmview_url,
                     c.external_penalty,
                     c.hard_fail,
                     c.fail_reason,
                     recommendation(c, gate),
                 ]
             )
+
+
+def write_json(path: Path, scope: str, gate: str, candidates: list[Candidate]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        'generated_at': dt.datetime.now().isoformat(timespec='seconds'),
+        'scope': scope,
+        'gate': gate,
+        'disclaimer': (
+            'Automated screening only; not legal advice. '
+            'Use qualified trademark counsel before adopting a name.'
+        ),
+        'candidates': [],
+    }
+    for c in candidates:
+        item = asdict(c)
+        item['recommendation'] = recommendation(c, gate)
+        payload['candidates'].append(item)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 
 def parse_args() -> argparse.Namespace:
@@ -808,6 +1092,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--web-top', type=int, default=8, help='How many web search results to inspect.')
     parser.add_argument('--web-check', dest='web_check', action='store_true', default=True)
     parser.add_argument('--no-web-check', dest='web_check', action='store_false')
+    parser.add_argument('--package-check', dest='package_check', action='store_true', default=True)
+    parser.add_argument('--no-package-check', dest='package_check', action='store_false')
+    parser.add_argument('--social-check', dest='social_check', action='store_true', default=True)
+    parser.add_argument('--no-social-check', dest='social_check', action='store_false')
+    parser.add_argument(
+        '--adversarial-fail-threshold',
+        type=int,
+        default=82,
+        help='Hard-fail threshold for adversarial similarity risk (0-100).',
+    )
     parser.add_argument('--require-base-com', action='store_true', help='Require base <name>.com availability.')
     parser.add_argument(
         '--fail-on-unknown',
@@ -816,6 +1110,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--throttle-ms', type=int, default=0, help='Sleep between candidate checks (ms).')
     parser.add_argument('--output', default='', help='Output CSV path.')
+    parser.add_argument('--json-output', default='', help='Optional machine-readable JSON output path.')
     return parser.parse_args()
 
 
@@ -871,6 +1166,9 @@ def main() -> int:
         args.web_top,
         require_base_com,
         fail_on_unknown,
+        args.package_check,
+        args.social_check,
+        max(0, min(100, args.adversarial_fail_threshold)),
     )
     final_ranked = sorted(
         to_check,
@@ -889,6 +1187,8 @@ def main() -> int:
         out_path = f'docs/branding/generated_name_candidates_{args.scope}_{args.gate}_{ts}.csv'
     output_file = Path(out_path)
     write_csv(output_file, args.scope, final_ranked, args.gate)
+    if args.json_output:
+        write_json(Path(args.json_output), args.scope, args.gate, final_ranked)
 
     print(f'Wrote {len(final_ranked)} screened candidates: {output_file}')
     print('Top candidates:')
@@ -902,7 +1202,9 @@ def main() -> int:
                 f'{c.com_available}/{c.de_available}/{c.ch_available} | '
                 f'fallback={c.com_fallback_domain or "-"} | '
                 f'store(de/ch/us)={c.store_de_count}/{c.store_ch_count}/{c.store_us_count} | '
-                f'web(exact/near)={c.web_exact_hits}/{c.web_near_hits}'
+                f'web(exact/near)={c.web_exact_hits}/{c.web_near_hits} | '
+                f'pkg(pypi/npm)={c.pypi_exists}/{c.npm_exists} | '
+                f'adv={c.adversarial_risk}'
             )
             shown += 1
         if shown >= 15:
