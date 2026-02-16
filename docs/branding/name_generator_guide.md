@@ -101,6 +101,8 @@ Important flags:
 - `--no-web-check`: disable web collision checks (not recommended).
 - `--no-package-check`: disable PyPI/npm collision checks.
 - `--no-social-check`: disable social-handle checks.
+- `--no-progress`: disable live per-candidate progress output.
+- `--degraded-network-mode`: keep `unknown` external checks as soft warnings (useful with flaky network/bot throttling).
 - `--adversarial-fail-threshold=82`: tune hard-fail threshold for challenger similarity.
 - `--json-output=<path>`: write machine-readable JSON artifact.
 

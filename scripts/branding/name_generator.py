@@ -803,9 +803,20 @@ def run_external_checks(
     package_check: bool,
     social_check: bool,
     adversarial_fail_threshold: int,
+    show_progress: bool,
+    degraded_network_mode: bool,
 ) -> None:
+    total = len(candidates)
+    batch_start = time.monotonic()
     req_tlds = required_tlds(scope)
-    for c in candidates:
+    for idx, c in enumerate(candidates, start=1):
+        candidate_start = time.monotonic()
+        if show_progress:
+            elapsed = time.monotonic() - batch_start
+            print(
+                f'[{idx}/{total}] checking {c.name} (elapsed={elapsed:.1f}s)',
+                flush=True,
+            )
         exact_countries: list[str] = []
         unknown_countries: list[str] = []
         for country in store_countries:
@@ -892,18 +903,28 @@ def run_external_checks(
 
         for tld in req_tlds:
             avail = {'com': c.com_available, 'de': c.de_available, 'ch': c.ch_available}[tld]
+            if avail == 'unknown':
+                if degraded_network_mode:
+                    continue
+                if fail_on_unknown:
+                    mark_fail(c, f'required_domain_{tld}_unknown')
+                    break
+                # In balanced mode, allow unknown domain state as soft signal.
+                continue
             # If .com is taken, allow viable fallback domain for global/eu naming exploration.
             if tld == 'com' and not require_base_com and avail != 'yes' and c.com_fallback_available == 'yes':
                 continue
-            if fail_on_unknown and avail == 'unknown':
-                mark_fail(c, f'required_domain_{tld}_unknown')
-                break
             if avail != 'yes':
                 mark_fail(c, f'required_domain_{tld}_not_available')
                 break
 
-        if require_base_com and c.com_available != 'yes':
-            mark_fail(c, 'base_com_not_available')
+        if require_base_com:
+            if c.com_available == 'yes':
+                pass
+            elif c.com_available == 'unknown' and (degraded_network_mode or not fail_on_unknown):
+                pass
+            else:
+                mark_fail(c, 'base_com_not_available')
 
         if fail_on_unknown and c.store_unknown_countries:
             mark_fail(c, 'app_store_check_unknown')
@@ -917,8 +938,24 @@ def run_external_checks(
         if fail_on_unknown and social_check and c.social_unknown_count > 0:
             mark_fail(c, 'social_check_unknown')
 
+        if show_progress:
+            duration = time.monotonic() - candidate_start
+            status = 'FAIL' if c.hard_fail else 'PASS'
+            print(
+                f'  -> {status} {c.name} | t={duration:.1f}s | '
+                f'domain(com/de/ch)={c.com_available}/{c.de_available}/{c.ch_available} | '
+                f'web={c.web_exact_hits}/{c.web_near_hits} | '
+                f'pkg={c.pypi_exists}/{c.npm_exists} | '
+                f'adv={c.adversarial_risk} | reason={c.fail_reason or "-"}',
+                flush=True,
+            )
+
         if throttle_ms > 0:
             time.sleep(throttle_ms / 1000.0)
+
+    if show_progress:
+        total_duration = time.monotonic() - batch_start
+        print(f'Completed external checks for {total} candidates in {total_duration:.1f}s', flush=True)
 
 
 def recommendation(c: Candidate, gate: str) -> str:
@@ -1096,6 +1133,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--no-package-check', dest='package_check', action='store_false')
     parser.add_argument('--social-check', dest='social_check', action='store_true', default=True)
     parser.add_argument('--no-social-check', dest='social_check', action='store_false')
+    parser.add_argument('--progress', dest='progress', action='store_true', default=True)
+    parser.add_argument('--no-progress', dest='progress', action='store_false')
+    parser.add_argument(
+        '--degraded-network-mode',
+        action='store_true',
+        help='Treat unknown external-check states as soft warnings to keep local screening useful.',
+    )
     parser.add_argument(
         '--adversarial-fail-threshold',
         type=int,
@@ -1125,7 +1169,7 @@ def main() -> int:
 
     similarity_fail_threshold = 80 if args.gate == 'strict' else 88
     require_base_com = args.require_base_com or args.gate == 'strict'
-    fail_on_unknown = args.fail_on_unknown or args.gate == 'strict'
+    fail_on_unknown = (args.fail_on_unknown or args.gate == 'strict') and not args.degraded_network_mode
 
     if args.only_candidates:
         generated = explicit_candidates
@@ -1169,6 +1213,8 @@ def main() -> int:
         args.package_check,
         args.social_check,
         max(0, min(100, args.adversarial_fail_threshold)),
+        args.progress,
+        args.degraded_network_mode,
     )
     final_ranked = sorted(
         to_check,
