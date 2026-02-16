@@ -1,0 +1,16 @@
+name,scope,quality_score,challenge_risk,total_score,descriptive_risk,similarity_risk,closest_mark,scope_penalty,itunes_de_count,itunes_de_exact,itunes_ch_count,itunes_ch_exact,itunes_us_count,itunes_us_exact,domain_com_available,domain_de_available,domain_ch_available,hard_fail,fail_reason,recommendation
+kostula,global,93,45,68,0,82,kostal,0,0,False,0,False,7,False,yes,yes,unknown,False,,consider
+nebensaldo,global,86,50,58,48,62,saldeo,12,0,False,0,False,1,False,yes,yes,unknown,False,,weak
+objektsaldo,global,71,50,43,18,82,objego,0,0,False,0,False,8,False,yes,yes,unknown,False,,weak
+domaro,global,88,25,74,0,46,utilaro,0,0,False,0,False,5,False,no,no,unknown,True,required_domain_com_not_available,reject
+valtero,global,93,33,74,0,61,saldeo,0,0,False,0,False,4,False,no,no,unknown,True,required_domain_com_not_available,reject
+lumaro,global,88,33,69,0,61,utilaro,0,0,False,0,False,7,False,no,no,unknown,True,required_domain_com_not_available,reject
+nivaro,global,88,33,69,0,61,utilaro,0,0,False,0,False,4,False,no,no,unknown,True,required_domain_com_not_available,reject
+relaro,global,88,33,69,0,61,utilaro,0,0,False,0,False,8,False,no,yes,unknown,True,required_domain_com_not_available,reject
+salvaro,global,93,39,71,0,71,scalara,0,4,False,4,False,6,False,no,no,unknown,True,required_domain_com_not_available,reject
+saldaro,global,93,45,68,0,82,saldeo,0,0,False,0,False,4,False,no,yes,unknown,True,required_domain_com_not_available,reject
+utilora,global,88,45,63,0,82,utilaro,0,0,False,0,False,4,False,no,yes,unknown,True,required_domain_com_not_available,reject
+saldora,global,93,50,65,18,82,saldeo,0,0,False,-1,False,3,False,no,no,unknown,True,required_domain_com_not_available,reject
+saldio,global,88,55,57,0,100,saldio,0,0,False,0,False,4,False,no,no,unknown,True,similar_to_saldio,reject
+utilaro,global,88,55,57,0,100,utilaro,0,0,False,0,False,8,False,no,yes,unknown,True,similar_to_utilaro,reject
+immosaldo,global,94,60,61,36,88,immoscout24,6,0,False,0,False,5,False,no,yes,unknown,True,similar_to_immoscout24,reject

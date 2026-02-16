@@ -1,0 +1,11 @@
+name,scope,quality_score,challenge_risk,total_score,descriptive_risk,similarity_risk,closest_mark,scope_penalty,itunes_de_count,itunes_de_exact,itunes_ch_count,itunes_ch_exact,itunes_us_count,itunes_us_exact,domain_com_available,domain_com_fallback_available,domain_com_fallback_domain,domain_de_available,domain_ch_available,hard_fail,fail_reason,recommendation
+numeris,global,93,15,84,0,28,immonet,0,-1,False,-1,False,-1,False,no,yes,usenumeris.com,no,unknown,False,,strong
+exactis,global,93,16,84,0,30,saldio,0,-1,False,-1,False,-1,False,no,yes,getexactis.com,no,unknown,False,,strong
+fluenta,global,93,16,84,0,30,kostal,0,-1,False,-1,False,-1,False,no,yes,fluentahq.com,no,unknown,False,,strong
+funduso,global,93,16,84,0,30,saldeo,0,-1,False,-1,False,-1,False,no,yes,getfunduso.com,yes,unknown,False,,strong
+nexiora,global,88,16,79,0,30,objego,0,-1,False,-1,False,-1,False,no,yes,usenexiora.com,yes,unknown,False,,strong
+elementa,global,98,20,87,0,37,immowelt,0,-1,False,-1,False,-1,False,no,yes,useelementa.com,no,unknown,False,,strong
+dominium,global,98,22,85,0,40,wohnify,0,-1,False,-1,False,-1,False,no,yes,getdominium.com,no,unknown,False,,strong
+accurata,global,98,23,85,0,42,costal,0,-1,False,-1,False,-1,False,no,yes,getaccurata.com,no,unknown,False,,strong
+quantis,global,93,23,80,0,42,utilaro,0,-1,False,-1,False,-1,False,no,yes,usequantis.com,no,unknown,False,,strong
+paritos,global,93,25,79,0,46,saldio,0,-1,False,-1,False,-1,False,no,yes,getparitos.com,yes,unknown,False,,strong

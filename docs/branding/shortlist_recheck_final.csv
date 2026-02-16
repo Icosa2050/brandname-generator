@@ -1,0 +1,11 @@
+name,itunes_de_count,itunes_de_exact,itunes_ch_count,itunes_ch_exact,itunes_us_count,itunes_us_exact,domain_com_available,domain_com_fallback_available,domain_com_fallback_domain,domain_de_available,domain_ch_available,similarity_risk,closest_mark,total_score,hard_fail,fail_reason
+numeris,10,False,10,False,9,False,no,yes,usenumeris.com,no,no,28,immonet,80,False,
+exactis,0,False,0,False,9,False,no,yes,getexactis.com,no,no,30,saldio,79,False,
+funduso,0,False,0,False,10,False,no,yes,getfunduso.com,yes,yes,30,saldeo,79,False,
+nexiora,0,False,0,False,2,False,no,yes,usenexiora.com,yes,yes,30,objego,79,False,
+dominium,3,False,3,False,8,False,no,yes,getdominium.com,no,no,40,wohnify,77,False,
+accurata,7,False,8,False,10,False,no,yes,getaccurata.com,no,no,42,costal,77,False,
+quantis,8,False,9,False,10,False,no,yes,usequantis.com,no,no,42,utilaro,77,False,
+paritos,0,False,0,False,9,False,no,yes,getparitos.com,yes,yes,46,saldio,76,False,
+fluenta,4,False,5,True,10,False,no,yes,fluentahq.com,no,no,30,kostal,79,True,exact_app_store_collision
+elementa,7,False,8,True,8,False,no,yes,useelementa.com,no,no,37,immowelt,78,True,exact_app_store_collision

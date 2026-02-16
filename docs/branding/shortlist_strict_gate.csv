@@ -1,0 +1,9 @@
+name,scope,gate,quality_score,challenge_risk,total_score,descriptive_risk,similarity_risk,closest_mark,scope_penalty,itunes_de_count,itunes_de_exact,itunes_ch_count,itunes_ch_exact,itunes_us_count,itunes_us_exact,itunes_exact_countries,itunes_unknown_countries,domain_com_available,domain_com_fallback_available,domain_com_fallback_domain,domain_de_available,domain_ch_available,web_result_count,web_exact_hits,web_near_hits,web_sample_domains,external_penalty,hard_fail,fail_reason,recommendation
+funduso,global,strict,93,16,84,0,30,saldeo,0,0,False,0,False,8,False,,,no,yes,getfunduso.com,yes,yes,0,0,0,,0,True,required_domain_com_not_available,reject
+nexiora,global,strict,88,16,79,0,30,objego,0,0,False,0,False,2,False,,,no,yes,usenexiora.com,yes,yes,0,0,0,,0,True,required_domain_com_not_available,reject
+quantis,global,strict,93,23,80,0,42,utilaro,0,7,False,8,False,8,False,,,no,yes,usequantis.com,no,no,0,0,0,,0,True,required_domain_com_not_available,reject
+paritos,global,strict,93,27,79,0,46,saldio,0,0,False,0,False,7,False,,fr,no,yes,getparitos.com,yes,yes,0,0,0,,2,True,required_domain_com_not_available,reject
+exactis,global,strict,93,46,71,0,30,saldio,0,0,False,0,False,7,False,,,no,yes,getexactis.com,no,no,10,8,0,mcafee.com;en.wikipedia.org;marketwatch.com;dataprise.com,30,True,web_exact_collision,reject
+numeris,global,strict,93,49,69,0,28,immonet,0,8,False,8,False,8,False,,,no,yes,usenumeris.com,no,no,10,7,1,numerisfootwear.com;trendsmask.com;en.wikipedia.org;numeris.ca,34,True,web_exact_collision,reject
+dominium,global,strict,98,52,72,0,40,wohnify,0,3,False,3,False,6,False,,,no,yes,getdominium.com,no,no,10,8,0,dominiumapartments.com;linkedin.com;merriam-webster.com;en.wikipedia.org,30,True,web_exact_collision,reject
+accurata,global,strict,98,53,72,0,42,costal,0,5,False,6,False,8,False,,,no,yes,getaccurata.com,no,no,9,8,0,accurata.ca;en.bab.la;accurata.us;dictionary.reverso.net,30,True,web_exact_collision,reject

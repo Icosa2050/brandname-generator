@@ -1,0 +1,16 @@
+name,scope,gate,quality_score,challenge_risk,total_score,descriptive_risk,similarity_risk,closest_mark,scope_penalty,itunes_de_count,itunes_de_exact,itunes_ch_count,itunes_ch_exact,itunes_us_count,itunes_us_exact,itunes_exact_countries,itunes_unknown_countries,domain_com_available,domain_com_fallback_available,domain_com_fallback_domain,domain_de_available,domain_ch_available,web_result_count,web_exact_hits,web_near_hits,web_sample_domains,external_penalty,hard_fail,fail_reason,recommendation
+properva,global,strict,95,15,86,0,28,objego,0,0,False,0,False,7,False,,,yes,yes,getproperva.com,yes,unknown,0,0,0,,0,False,,strong
+propervia,global,strict,94,14,86,0,26,objego,0,0,False,0,False,0,False,,,no,yes,getpropervia.com,yes,yes,0,0,0,,0,True,required_domain_com_not_available,reject
+ledgerex,global,strict,95,15,86,0,28,objego,0,0,False,0,False,8,False,,,no,yes,getledgerex.com,yes,yes,0,0,0,,0,True,required_domain_com_not_available,reject
+ledgerla,global,strict,95,15,86,0,28,objego,0,0,False,0,False,2,False,,,no,yes,getledgerla.com,yes,yes,0,0,0,,0,True,required_domain_com_not_available,reject
+ledgerly,global,strict,95,15,86,0,28,objego,0,7,False,7,False,8,False,,,no,yes,ledgerlycloud.com,no,yes,0,0,0,,0,True,required_domain_com_not_available,reject
+properna,global,strict,95,15,86,0,28,objego,0,0,False,0,False,1,False,,,no,yes,getproperna.com,yes,unknown,0,0,0,,0,True,required_domain_com_not_available,reject
+properra,global,strict,95,15,86,0,28,objego,0,0,False,0,False,6,False,,,no,yes,getproperra.com,yes,unknown,0,0,0,,0,True,required_domain_com_not_available,reject
+domusex,global,strict,93,16,84,0,30,objego,0,0,False,0,False,8,False,,,no,yes,getdomusex.com,yes,unknown,0,0,0,,0,True,required_domain_com_not_available,reject
+terraex,global,strict,93,16,84,0,30,kostal,0,0,False,0,False,8,False,,,no,yes,getterraex.com,no,unknown,0,0,0,,0,True,required_domain_com_not_available,reject
+vantano,global,strict,93,16,84,0,30,kostal,0,0,False,0,False,2,False,,,no,yes,getvantano.com,no,unknown,0,0,0,,0,True,required_domain_com_not_available,reject
+veraset,global,strict,93,17,84,0,28,immonet,0,-1,False,0,False,2,False,,de,no,yes,getveraset.com,no,unknown,0,0,0,,2,True,required_domain_com_not_available,reject
+nexaren,global,strict,93,19,82,0,35,immoware24,0,0,False,0,False,2,False,,,no,yes,getnexaren.com,yes,unknown,0,0,0,,0,True,required_domain_com_not_available,reject
+vantavia,global,strict,98,22,85,0,40,scalara,0,0,False,0,False,7,False,,,no,yes,getvantavia.com,yes,unknown,0,0,0,,0,True,required_domain_com_not_available,reject
+properla,global,strict,95,22,84,0,37,immowelt,0,0,False,0,False,-1,False,,us,no,yes,getproperla.com,yes,unknown,0,0,0,,2,True,required_domain_com_not_available,reject
+vantaneo,global,strict,98,27,84,0,42,saldeo,0,-1,False,-1,False,3,False,,"de,ch",no,yes,getvantaneo.com,yes,unknown,0,0,0,,4,True,required_domain_com_not_available,reject
