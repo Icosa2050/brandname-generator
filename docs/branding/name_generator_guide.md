@@ -85,6 +85,44 @@ python3 scripts/branding/name_generator.py \
   --run-log=docs/branding/name_generator_runs.jsonl
 ```
 
+### 6) Initialize candidate lake DB
+```zsh
+python3 scripts/branding/naming_db.py --db docs/branding/naming_pipeline.db init
+```
+
+### 7) Import historical artifacts into candidate lake
+```zsh
+python3 scripts/branding/naming_db.py \
+  --db docs/branding/naming_pipeline.db \
+  import \
+  --inputs "docs/branding/generated_name_candidates_*.csv" "docs/branding/generated_name_candidates_*.json" \
+  --source-type=import
+```
+
+### 8) Ingest AI-generated batches with provenance
+```zsh
+python3 scripts/branding/name_ideation_ingest.py \
+  --db docs/branding/naming_pipeline.db \
+  --names="Amaniro,Imarvia,Nuruvia" \
+  --scope=global \
+  --gate=balanced \
+  --model="google/gemini-3-pro-preview" \
+  --provider="pal" \
+  --prompt="latin-script catchy names with trust tone" \
+  --source-label="gemini_batch_01"
+```
+
+### 9) Run async validator orchestration on candidate lake
+```zsh
+python3 scripts/branding/naming_validate_async.py \
+  --db docs/branding/naming_pipeline.db \
+  --state-filter="new,checked" \
+  --checks="adversarial,psych,descriptive,domain,web,app_store,package,social" \
+  --candidate-limit=200 \
+  --concurrency=16 \
+  --max-retries=2
+```
+
 ## Output
 The script writes a CSV to:
 - default: `docs/branding/generated_name_candidates_<scope>_<timestamp>.csv`
@@ -128,6 +166,13 @@ Important flags:
 - `--adversarial-fail-threshold=82`: tune hard-fail threshold for challenger similarity.
 - `--json-output=<path>`: write machine-readable JSON artifact.
 - `--run-log=<path>`: append per-run summary JSONL for longitudinal tracking.
+- `--persist-db --db=<path>`: store scored candidates into SQLite candidate lake.
+- `scripts/branding/naming_db.py`: initialize/import/stats for candidate lake.
+- `scripts/branding/name_ideation_ingest.py`: import AI ideation batches with provenance metadata.
+- `scripts/branding/naming_validate_async.py`: async job orchestration and persisted validator lifecycle states.
+- `--progress-every=<N>`: progress snapshot cadence for async validator.
+- `--progress-interval-s=<seconds>`: time-based progress fallback.
+- `--no-progress`: disable async validator progress output.
 
 ## Recommended Workflow
 1. Run `--scope=dach` and `--scope=global`.

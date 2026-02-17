@@ -1,0 +1,23 @@
+{
+  "source": "docs/branding/candidate_batch_v1.csv",
+  "output": "docs/branding/candidate_batch_screened_v1.csv",
+  "thresholds": {
+    "recommendation": [
+      "strong",
+      "consider"
+    ],
+    "hard_fail": "False",
+    "max_challenge_risk": 31,
+    "max_external_penalty": 16,
+    "shortlist_limit": 20
+  },
+  "counts": {
+    "input_rows": 80,
+    "eligible_rows": 31,
+    "shortlist_rows": 20,
+    "excluded_rows": 60
+  },
+  "notes": [
+    "External checks returned many unknown values in this runtime; shortlist remains provisional until live registry/domain/store verification."
+  ]
+}

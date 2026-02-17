@@ -21,6 +21,7 @@ import html
 import itertools
 import json
 import re
+import sqlite3
 import time
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
@@ -1230,6 +1231,83 @@ def append_run_history(
         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
+def persist_to_db(
+    *,
+    db_path: Path,
+    scope: str,
+    gate: str,
+    variation_profile: str,
+    args: argparse.Namespace,
+    candidates: list[Candidate],
+) -> tuple[int, int]:
+    # Keep import local to avoid dependency coupling for users who only want CSV/JSON output.
+    import naming_db as ndb
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        ndb.ensure_schema(conn)
+        run_id = ndb.create_run(
+            conn,
+            source_path=str(db_path),
+            scope=scope,
+            gate_mode=gate,
+            variation_profile=variation_profile,
+            status='completed',
+            config={
+                'scope': scope,
+                'gate': gate,
+                'variation_profile': variation_profile,
+                'seeds': args.seeds,
+                'candidates': args.candidates,
+                'only_candidates': bool(args.only_candidates),
+                'pool_size': int(args.pool_size),
+                'check_limit': int(args.check_limit),
+                'degraded_network_mode': bool(args.degraded_network_mode),
+            },
+            summary={
+                'candidate_count': len(candidates),
+                'strong_or_consider_count': sum(
+                    1 for c in candidates if recommendation(c, gate) in {'strong', 'consider'} and not c.hard_fail
+                ),
+            },
+        )
+
+        for c in candidates:
+            candidate_id = ndb.upsert_candidate(
+                conn,
+                name_display=c.name,
+                total_score=float(c.total_score),
+                risk_score=float(c.challenge_risk),
+                recommendation=recommendation(c, gate),
+            )
+            ndb.add_source(
+                conn,
+                candidate_id=candidate_id,
+                run_id=run_id,
+                source_type='rule',
+                source_label='name_generator',
+                metadata={
+                    'scope': scope,
+                    'gate': gate,
+                    'variation_profile': variation_profile,
+                },
+            )
+            ndb.add_score_snapshot(
+                conn,
+                candidate_id=candidate_id,
+                run_id=run_id,
+                quality_score=float(c.quality_score),
+                risk_score=float(c.challenge_risk),
+                external_penalty=float(c.external_penalty),
+                total_score=float(c.total_score),
+                recommendation=recommendation(c, gate),
+                hard_fail=bool(c.hard_fail),
+                reason=str(c.fail_reason or ''),
+            )
+        conn.commit()
+    return run_id, len(candidates)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Generate and screen app name candidates.')
     parser.add_argument('--scope', choices=['dach', 'eu', 'global'], default='eu')
@@ -1293,6 +1371,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--throttle-ms', type=int, default=0, help='Sleep between candidate checks (ms).')
     parser.add_argument('--output', default='', help='Output CSV path.')
     parser.add_argument('--json-output', default='', help='Optional machine-readable JSON output path.')
+    parser.add_argument(
+        '--persist-db',
+        action='store_true',
+        help='Persist scored candidates into SQLite candidate lake.',
+    )
+    parser.add_argument(
+        '--db',
+        default='docs/branding/naming_pipeline.db',
+        help='SQLite DB path used when --persist-db is enabled.',
+    )
     parser.add_argument(
         '--run-log',
         default='docs/branding/name_generator_runs.jsonl',
@@ -1386,6 +1474,16 @@ def main() -> int:
     write_csv(output_file, args.scope, final_ranked, args.gate)
     if args.json_output:
         write_json(Path(args.json_output), args.scope, args.gate, final_ranked)
+    if args.persist_db:
+        run_id, persisted_count = persist_to_db(
+            db_path=Path(args.db),
+            scope=args.scope,
+            gate=args.gate,
+            variation_profile=args.variation_profile,
+            args=args,
+            candidates=final_ranked,
+        )
+        print(f'Persisted {persisted_count} candidates to DB: {args.db} (run_id={run_id})')
     if args.run_log:
         append_run_history(Path(args.run_log), args.scope, args.gate, args, final_ranked)
 
