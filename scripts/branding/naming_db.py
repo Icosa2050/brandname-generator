@@ -73,6 +73,20 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           FOREIGN KEY(run_id) REFERENCES naming_runs(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS source_atoms (
+          id INTEGER PRIMARY KEY,
+          atom_display TEXT NOT NULL,
+          atom_normalized TEXT NOT NULL UNIQUE,
+          language_hint TEXT,
+          semantic_category TEXT,
+          source_label TEXT,
+          confidence_weight REAL,
+          metadata_json TEXT,
+          active INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS validation_results (
           id INTEGER PRIMARY KEY,
           candidate_id INTEGER NOT NULL,
@@ -104,6 +118,20 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           UNIQUE(run_id, candidate_id, check_type),
           FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
           FOREIGN KEY(run_id) REFERENCES naming_runs(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS candidate_lineage (
+          id INTEGER PRIMARY KEY,
+          candidate_id INTEGER NOT NULL,
+          run_id INTEGER NOT NULL,
+          generator_family TEXT NOT NULL,
+          source_atom_id INTEGER,
+          contribution_weight REAL,
+          note TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+          FOREIGN KEY(run_id) REFERENCES naming_runs(id) ON DELETE CASCADE,
+          FOREIGN KEY(source_atom_id) REFERENCES source_atoms(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS candidate_scores (
@@ -143,6 +171,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           ON validation_jobs(candidate_id, check_type);
         CREATE INDEX IF NOT EXISTS idx_candidate_scores_run
           ON candidate_scores(run_id);
+        CREATE INDEX IF NOT EXISTS idx_source_atoms_category
+          ON source_atoms(semantic_category, language_hint);
+        CREATE INDEX IF NOT EXISTS idx_candidate_lineage_candidate
+          ON candidate_lineage(candidate_id, run_id);
+        CREATE INDEX IF NOT EXISTS idx_candidate_lineage_source
+          ON candidate_lineage(source_atom_id);
         """
     )
 
@@ -239,6 +273,158 @@ def add_source(
             source_label,
             '',
             json.dumps(metadata, ensure_ascii=False),
+            now_iso(),
+        ),
+    )
+
+
+def upsert_source_atom(
+    conn: sqlite3.Connection,
+    *,
+    atom_display: str,
+    language_hint: str = '',
+    semantic_category: str = '',
+    source_label: str = '',
+    confidence_weight: float | None = None,
+    metadata: dict | None = None,
+    active: bool = True,
+) -> int:
+    atom_normalized = normalize_name(atom_display)
+    if not atom_normalized:
+        raise ValueError('Source atom is empty after normalization')
+
+    ts = now_iso()
+    conn.execute(
+        """
+        INSERT INTO source_atoms(
+          atom_display, atom_normalized, language_hint, semantic_category,
+          source_label, confidence_weight, metadata_json, active, created_at, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(atom_normalized) DO UPDATE SET
+          atom_display = excluded.atom_display,
+          language_hint = CASE
+            WHEN excluded.language_hint IS NOT NULL AND excluded.language_hint <> '' THEN excluded.language_hint
+            ELSE source_atoms.language_hint
+          END,
+          semantic_category = CASE
+            WHEN excluded.semantic_category IS NOT NULL AND excluded.semantic_category <> '' THEN excluded.semantic_category
+            ELSE source_atoms.semantic_category
+          END,
+          source_label = CASE
+            WHEN excluded.source_label IS NOT NULL AND excluded.source_label <> '' THEN excluded.source_label
+            ELSE source_atoms.source_label
+          END,
+          confidence_weight = COALESCE(excluded.confidence_weight, source_atoms.confidence_weight),
+          metadata_json = CASE
+            WHEN excluded.metadata_json IS NOT NULL AND excluded.metadata_json <> '' THEN excluded.metadata_json
+            ELSE source_atoms.metadata_json
+          END,
+          active = excluded.active,
+          updated_at = excluded.updated_at
+        """,
+        (
+            atom_display,
+            atom_normalized,
+            language_hint.strip(),
+            semantic_category.strip(),
+            source_label.strip(),
+            confidence_weight,
+            json.dumps(metadata or {}, ensure_ascii=False),
+            1 if active else 0,
+            ts,
+            ts,
+        ),
+    )
+    row = conn.execute('SELECT id FROM source_atoms WHERE atom_normalized = ?', (atom_normalized,)).fetchone()
+    if not row:
+        raise RuntimeError(f'Failed to upsert source atom: {atom_display}')
+    return int(row[0])
+
+
+def list_source_atoms(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 500,
+    language_hint: str | None = None,
+    semantic_category: str | None = None,
+    min_confidence: float = 0.0,
+    include_inactive: bool = False,
+) -> list[dict]:
+    where: list[str] = []
+    params: list[object] = []
+
+    if not include_inactive:
+        where.append('active = 1')
+    if language_hint:
+        where.append('LOWER(language_hint) = ?')
+        params.append(language_hint.strip().lower())
+    if semantic_category:
+        where.append('LOWER(semantic_category) = ?')
+        params.append(semantic_category.strip().lower())
+    if min_confidence > 0.0:
+        where.append('COALESCE(confidence_weight, 0) >= ?')
+        params.append(float(min_confidence))
+
+    where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
+    query = f"""
+        SELECT id, atom_display, atom_normalized, language_hint, semantic_category,
+               source_label, confidence_weight, metadata_json, active
+        FROM source_atoms
+        {where_sql}
+        ORDER BY COALESCE(confidence_weight, 0) DESC, atom_display ASC
+        LIMIT ?
+    """
+    params.append(max(1, int(limit)))
+    rows = conn.execute(query, tuple(params)).fetchall()
+
+    out: list[dict] = []
+    for row in rows:
+        metadata_json = str(row[7] or '')
+        try:
+            metadata = json.loads(metadata_json) if metadata_json else {}
+        except json.JSONDecodeError:
+            metadata = {}
+        out.append(
+            {
+                'id': int(row[0]),
+                'atom_display': str(row[1]),
+                'atom_normalized': str(row[2]),
+                'language_hint': str(row[3] or ''),
+                'semantic_category': str(row[4] or ''),
+                'source_label': str(row[5] or ''),
+                'confidence_weight': float(row[6] or 0.0),
+                'metadata': metadata,
+                'active': bool(int(row[8] or 0)),
+            }
+        )
+    return out
+
+
+def add_candidate_lineage(
+    conn: sqlite3.Connection,
+    *,
+    candidate_id: int,
+    run_id: int,
+    generator_family: str,
+    source_atom_id: int | None = None,
+    contribution_weight: float | None = None,
+    note: str = '',
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO candidate_lineage(
+          candidate_id, run_id, generator_family, source_atom_id, contribution_weight, note, created_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            candidate_id,
+            run_id,
+            generator_family,
+            source_atom_id,
+            contribution_weight,
+            note,
             now_iso(),
         ),
     )
@@ -529,6 +715,8 @@ def print_stats(conn: sqlite3.Connection) -> None:
     runs = conn.execute('SELECT COUNT(*) FROM naming_runs').fetchone()[0]
     scores = conn.execute('SELECT COUNT(*) FROM candidate_scores').fetchone()[0]
     jobs = conn.execute('SELECT COUNT(*) FROM validation_jobs').fetchone()[0]
+    source_atoms = conn.execute('SELECT COUNT(*) FROM source_atoms').fetchone()[0]
+    lineage_rows = conn.execute('SELECT COUNT(*) FROM candidate_lineage').fetchone()[0]
     states = conn.execute(
         'SELECT state, COUNT(*) FROM candidates GROUP BY state ORDER BY state'
     ).fetchall()
@@ -536,7 +724,11 @@ def print_stats(conn: sqlite3.Connection) -> None:
         'SELECT status, COUNT(*) FROM validation_jobs GROUP BY status ORDER BY status'
     ).fetchall()
 
-    print(f'db_stats candidates={candidates} runs={runs} score_rows={scores} validation_jobs={jobs}')
+    print(
+        'db_stats '
+        f'candidates={candidates} runs={runs} score_rows={scores} validation_jobs={jobs} '
+        f'source_atoms={source_atoms} lineage_rows={lineage_rows}'
+    )
     if states:
         print('state_counts:')
         for state, count in states:
@@ -545,6 +737,50 @@ def print_stats(conn: sqlite3.Connection) -> None:
         print('validation_job_status_counts:')
         for state, count in job_states:
             print(f'- {state}: {count}')
+
+
+def print_source_stats(conn: sqlite3.Connection) -> None:
+    total = conn.execute('SELECT COUNT(*) FROM source_atoms').fetchone()[0]
+    active = conn.execute('SELECT COUNT(*) FROM source_atoms WHERE active = 1').fetchone()[0]
+    with_conf = conn.execute('SELECT COUNT(*) FROM source_atoms WHERE confidence_weight IS NOT NULL').fetchone()[0]
+    categories = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(semantic_category, ''), '(none)') AS cat, COUNT(*)
+        FROM source_atoms
+        GROUP BY cat
+        ORDER BY COUNT(*) DESC, cat ASC
+        """
+    ).fetchall()
+    langs = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(language_hint, ''), '(none)') AS lang, COUNT(*)
+        FROM source_atoms
+        GROUP BY lang
+        ORDER BY COUNT(*) DESC, lang ASC
+        """
+    ).fetchall()
+    labels = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(source_label, ''), '(none)') AS label, COUNT(*)
+        FROM source_atoms
+        GROUP BY label
+        ORDER BY COUNT(*) DESC, label ASC
+        """
+    ).fetchall()
+
+    print(f'source_stats total={total} active={active} with_confidence={with_conf}')
+    if categories:
+        print('source_categories:')
+        for cat, count in categories:
+            print(f'- {cat}: {count}')
+    if langs:
+        print('source_languages:')
+        for lang, count in langs:
+            print(f'- {lang}: {count}')
+    if labels:
+        print('source_labels:')
+        for label, count in labels:
+            print(f'- {label}: {count}')
 
 
 def parse_args() -> argparse.Namespace:
@@ -564,6 +800,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     sub.add_parser('stats', help='Print simple DB stats.')
+    sub.add_parser('source-stats', help='Print source-atom stats.')
     return parser.parse_args()
 
 
@@ -582,6 +819,9 @@ def main() -> int:
 
         if args.command == 'stats':
             print_stats(conn)
+            return 0
+        if args.command == 'source-stats':
+            print_source_stats(conn)
             return 0
 
         if args.command == 'import':

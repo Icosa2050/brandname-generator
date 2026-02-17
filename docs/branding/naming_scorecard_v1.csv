@@ -1,0 +1,7 @@
+candidate,legal_defensibility_30,distinctiveness_20,trust_signal_15,pronunciation_typo_15,portability_10,seo_uniqueness_10,total_score_100,hard_legal_gate,adversarial_gate,score_threshold_gate,status,notes
+certorio,25,16,12,11,8,10,82,pass,pass,pass,advance,Best overall balance with low confusion profile
+certono,24,15,11,12,8,10,80,pass,pass,pass,advance,Good backup profile with similar strengths
+verorio,23,15,11,10,8,9,76,pass,pass,pass,advance,Passes threshold but slightly weaker typo robustness
+verobil,22,14,10,10,8,9,73,pass,pass,fail,hold,Below numeric threshold
+fidemen,22,14,10,9,8,8,71,pass,pass,fail,hold,Below numeric threshold
+trueledva,18,13,10,8,7,7,63,pass,fail,fail,reject,Semantic similarity attack surface too high

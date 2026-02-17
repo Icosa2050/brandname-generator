@@ -23,6 +23,7 @@ import json
 import re
 import sqlite3
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -219,12 +220,74 @@ GLOBAL_EXPRESSIONS = [
     'brightbase',
 ]
 
+DEFAULT_GENERATOR_FAMILIES = [
+    'coined',
+    'stem',
+    'suggestive',
+    'seed',
+    'expression',
+    'source_pool',
+    'blend',
+]
+
+DEFAULT_FAMILY_QUOTAS = {
+    'coined': 180,
+    'stem': 140,
+    'suggestive': 120,
+    'seed': 120,
+    'expression': 80,
+    'source_pool': 220,
+    'blend': 220,
+}
+
+FALSE_FRIEND_RULES: dict[str, tuple[int, str]] = {
+    'mist': (18, 'negative_meaning_de'),
+    'gift': (20, 'false_friend_de'),
+    'assi': (30, 'negative_association_de'),
+    'nazi': (100, 'prohibited_association'),
+    'blod': (16, 'negative_association_scandi'),
+    'dumm': (24, 'negative_association_de'),
+    'schlecht': (24, 'negative_association_de'),
+    'faux': (12, 'negative_association_fr'),
+    'foul': (16, 'negative_association_en'),
+    'toxic': (24, 'negative_association_en'),
+    'poop': (18, 'negative_association_en'),
+    'crud': (18, 'negative_association_en'),
+    'fail': (14, 'failure_association_en'),
+    'pain': (16, 'negative_association_en'),
+    'risk': (10, 'negative_association_en'),
+    'debt': (14, 'negative_association_en'),
+}
+
+GIBBERISH_BIGRAMS = {
+    'qx',
+    'xq',
+    'qj',
+    'jq',
+    'vv',
+    'zx',
+    'xz',
+    'wq',
+    'qw',
+}
+
 USER_AGENT = 'kostula-name-generator/1.0'
+
+
+@dataclass
+class GeneratedCandidate:
+    name: str
+    generator_family: str
+    lineage_atoms: list[str]
+    source_confidence: float = 0.0
 
 
 @dataclass
 class Candidate:
     name: str
+    generator_family: str
+    lineage_atoms: str
+    source_confidence: float
     quality_score: int
     challenge_risk: int
     total_score: int
@@ -266,6 +329,10 @@ class Candidate:
     trademark_swissreg_url: str = ''
     trademark_tmview_url: str = ''
     external_penalty: int = 0
+    gibberish_penalty: int = 0
+    gibberish_flags: str = ''
+    false_friend_risk: int = 0
+    false_friend_hits: str = ''
     hard_fail: bool = False
     fail_reason: str = ''
 
@@ -274,67 +341,300 @@ def normalize_alpha(text: str) -> str:
     return re.sub(r'[^a-z]+', '', text.lower())
 
 
+def parse_csv_set(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(',') if part.strip()]
+
+
+def parse_family_quotas(raw: str) -> dict[str, int]:
+    if not raw.strip():
+        return dict(DEFAULT_FAMILY_QUOTAS)
+    out = dict(DEFAULT_FAMILY_QUOTAS)
+    for chunk in raw.split(','):
+        item = chunk.strip()
+        if not item or ':' not in item:
+            continue
+        family, value = item.split(':', 1)
+        family = family.strip()
+        value = value.strip()
+        if not family or not value:
+            continue
+        try:
+            quota = int(value)
+        except ValueError:
+            continue
+        out[family] = max(0, quota)
+    return out
+
+
+def load_source_atoms(
+    *,
+    db_path: str,
+    limit: int,
+    min_confidence: float,
+    languages: list[str],
+    categories: list[str],
+) -> list[dict]:
+    try:
+        import naming_db as ndb
+    except Exception:
+        return []
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    with sqlite3.connect(path) as conn:
+        ndb.ensure_schema(conn)
+        atoms = ndb.list_source_atoms(
+            conn,
+            limit=max(1, limit),
+            min_confidence=max(0.0, min(1.0, min_confidence)),
+            include_inactive=False,
+        )
+
+    if languages:
+        want = {item.lower() for item in languages}
+        atoms = [atom for atom in atoms if str(atom.get('language_hint') or '').lower() in want]
+    if categories:
+        want = {item.lower() for item in categories}
+        atoms = [atom for atom in atoms if str(atom.get('semantic_category') or '').lower() in want]
+    return atoms
+
+
+def merge_generated(
+    out: dict[str, GeneratedCandidate],
+    *,
+    name: str,
+    family: str,
+    lineage_atoms: list[str],
+    source_confidence: float = 0.0,
+) -> None:
+    normalized = normalize_alpha(name)
+    if not normalized:
+        return
+    existing = out.get(normalized)
+    if existing is None or source_confidence > existing.source_confidence:
+        out[normalized] = GeneratedCandidate(
+            name=normalized,
+            generator_family=family,
+            lineage_atoms=[normalize_alpha(part) for part in lineage_atoms if normalize_alpha(part)],
+            source_confidence=source_confidence,
+        )
+
+
+def collect_family_candidates(
+    *,
+    scope: str,
+    seeds: Iterable[str],
+    variation_profile: str,
+    source_atoms: list[dict],
+    active_families: list[str],
+) -> dict[str, list[GeneratedCandidate]]:
+    families: dict[str, dict[str, GeneratedCandidate]] = {}
+    active = set(active_families)
+
+    if 'coined' in active:
+        generated: dict[str, GeneratedCandidate] = {}
+        for p, s in itertools.product(COINED_PREFIXES, COINED_SUFFIXES):
+            merge_generated(generated, name=f'{p}{s}', family='coined', lineage_atoms=[p, s])
+        families['coined'] = list(generated.values())
+
+    if 'stem' in active:
+        generated = {}
+        for stem, end in itertools.product(BRAND_STEMS, BRAND_ENDINGS):
+            merge_generated(generated, name=f'{stem}{end}', family='stem', lineage_atoms=[stem, end])
+        families['stem'] = list(generated.values())
+
+    if 'suggestive' in active:
+        generated = {}
+        roots = SUGGESTIVE_ROOTS_DACH if scope == 'dach' else SUGGESTIVE_ROOTS_GLOBAL
+        for root, suf in itertools.product(roots, SHORT_SUFFIXES):
+            merge_generated(generated, name=f'{root}{suf}', family='suggestive', lineage_atoms=[root, suf])
+        families['suggestive'] = list(generated.values())
+
+    if 'seed' in active:
+        generated = {}
+        for seed in seeds:
+            base = normalize_alpha(seed)
+            if not base:
+                continue
+            merge_generated(generated, name=base, family='seed', lineage_atoms=[base], source_confidence=0.6)
+            for suf in SHORT_SUFFIXES:
+                merge_generated(generated, name=f'{base}{suf}', family='seed', lineage_atoms=[base, suf], source_confidence=0.6)
+            for end in BRAND_ENDINGS:
+                merge_generated(
+                    generated,
+                    name=f'{base[:6]}{end}',
+                    family='seed',
+                    lineage_atoms=[base[:6], end],
+                    source_confidence=0.6,
+                )
+            for p in COINED_PREFIXES[:8]:
+                merge_generated(generated, name=f'{p}{base[:3]}', family='seed', lineage_atoms=[p, base[:3]], source_confidence=0.6)
+        families['seed'] = list(generated.values())
+
+    if 'expression' in active and variation_profile == 'expanded':
+        generated = {}
+        for expr in GLOBAL_EXPRESSIONS:
+            merge_generated(generated, name=expr, family='expression', lineage_atoms=[expr], source_confidence=0.55)
+            for end in BRAND_ENDINGS[:6]:
+                merge_generated(
+                    generated,
+                    name=f'{expr[:7]}{end}',
+                    family='expression',
+                    lineage_atoms=[expr[:7], end],
+                    source_confidence=0.55,
+                )
+        families['expression'] = list(generated.values())
+
+    if 'source_pool' in active:
+        generated = {}
+        normalized_atoms: list[tuple[str, float]] = []
+        for atom in source_atoms:
+            value = normalize_alpha(str(atom.get('atom_display') or atom.get('atom_normalized') or ''))
+            if not value:
+                continue
+            normalized_atoms.append((value, float(atom.get('confidence_weight') or 0.0)))
+
+        for atom, conf in normalized_atoms:
+            merge_generated(
+                generated,
+                name=atom,
+                family='source_pool',
+                lineage_atoms=[atom],
+                source_confidence=conf,
+            )
+            for end in BRAND_ENDINGS + SHORT_SUFFIXES[:5]:
+                merge_generated(
+                    generated,
+                    name=f'{atom[:8]}{end}',
+                    family='source_pool',
+                    lineage_atoms=[atom, end],
+                    source_confidence=conf,
+                )
+        families['source_pool'] = list(generated.values())
+
+    if 'blend' in active:
+        generated = {}
+        base_roots = GLOBAL_VARIATION_ROOTS if variation_profile == 'expanded' else GLOBAL_VARIATION_ROOTS[:10]
+        atoms_for_blend: list[tuple[str, float]] = []
+        for atom in source_atoms:
+            value = normalize_alpha(str(atom.get('atom_display') or atom.get('atom_normalized') or ''))
+            if value:
+                atoms_for_blend.append((value, float(atom.get('confidence_weight') or 0.0)))
+        if not atoms_for_blend:
+            atoms_for_blend = [(root, 0.5) for root in base_roots]
+
+        for (left, l_conf), (right, r_conf) in itertools.product(atoms_for_blend[:36], atoms_for_blend[:36]):
+            if left == right:
+                continue
+            blend = f'{left[:4]}{right[-3:]}'
+            merge_generated(
+                generated,
+                name=blend,
+                family='blend',
+                lineage_atoms=[left, right],
+                source_confidence=(l_conf + r_conf) / 2.0,
+            )
+        families['blend'] = list(generated.values())
+
+    return families
+
+
+def pattern_shape(name: str) -> str:
+    return ''.join('v' if ch in 'aeiouy' else 'c' for ch in name)
+
+
+def diversity_filter(
+    generated: list[GeneratedCandidate],
+    *,
+    max_per_prefix2: int,
+    max_per_suffix2: int,
+    max_per_shape: int,
+    max_per_family: int,
+) -> list[GeneratedCandidate]:
+    out: list[GeneratedCandidate] = []
+    prefix_counts: Counter[str] = Counter()
+    suffix_counts: Counter[str] = Counter()
+    shape_counts: Counter[str] = Counter()
+    family_counts: Counter[str] = Counter()
+
+    ordered = sorted(
+        generated,
+        key=lambda item: (-item.source_confidence, len(item.name), item.name),
+    )
+    for item in ordered:
+        prefix = item.name[:2]
+        suffix = item.name[-2:]
+        shape = pattern_shape(item.name)
+        if family_counts[item.generator_family] >= max_per_family:
+            continue
+        if prefix_counts[prefix] >= max_per_prefix2:
+            continue
+        if suffix_counts[suffix] >= max_per_suffix2:
+            continue
+        if shape_counts[shape] >= max_per_shape:
+            continue
+        out.append(item)
+        family_counts[item.generator_family] += 1
+        prefix_counts[prefix] += 1
+        suffix_counts[suffix] += 1
+        shape_counts[shape] += 1
+    return out
+
+
 def generate_candidates(
     scope: str,
     seeds: Iterable[str],
     min_len: int,
     max_len: int,
     variation_profile: str,
-) -> list[str]:
-    names: set[str] = set()
+    generator_families: list[str],
+    family_quotas: dict[str, int],
+    source_atoms: list[dict],
+    max_per_prefix2: int,
+    max_per_suffix2: int,
+    max_per_shape: int,
+    max_per_family: int,
+) -> list[GeneratedCandidate]:
+    families = collect_family_candidates(
+        scope=scope,
+        seeds=seeds,
+        variation_profile=variation_profile,
+        source_atoms=source_atoms,
+        active_families=generator_families,
+    )
 
-    for p, s in itertools.product(COINED_PREFIXES, COINED_SUFFIXES):
-        names.add(f'{p}{s}')
+    selected: list[GeneratedCandidate] = []
+    seen: set[str] = set()
+    for family in generator_families:
+        members = families.get(family, [])
+        quota = max(0, family_quotas.get(family, DEFAULT_FAMILY_QUOTAS.get(family, 120)))
+        for item in members[:quota]:
+            n = normalize_alpha(item.name)
+            if not n or n in seen:
+                continue
+            if len(n) < min_len or len(n) > max_len:
+                continue
+            if not re.fullmatch(r'[a-z]+', n):
+                continue
+            if len(n) > 2 and n[0] == n[1] == n[2]:
+                continue
+            selected.append(
+                GeneratedCandidate(
+                    name=n,
+                    generator_family=item.generator_family,
+                    lineage_atoms=item.lineage_atoms,
+                    source_confidence=item.source_confidence,
+                )
+            )
+            seen.add(n)
 
-    for stem, end in itertools.product(BRAND_STEMS, BRAND_ENDINGS):
-        names.add(f'{stem}{end}')
-
-    roots = SUGGESTIVE_ROOTS_DACH if scope == 'dach' else SUGGESTIVE_ROOTS_GLOBAL
-    for root, suf in itertools.product(roots, SHORT_SUFFIXES):
-        names.add(f'{root}{suf}')
-
-    if variation_profile == 'expanded':
-        for root in GLOBAL_VARIATION_ROOTS:
-            names.add(root)
-            for suf in SHORT_SUFFIXES + BRAND_ENDINGS:
-                names.add(f'{root}{suf}')
-            for p in COINED_PREFIXES[:8]:
-                names.add(f'{p}{root[:4]}')
-            for stem in BRAND_STEMS[:8]:
-                names.add(f'{root[:4]}{stem[:3]}')
-        for left, right in itertools.product(GLOBAL_VARIATION_ROOTS[:16], GLOBAL_VARIATION_ROOTS[8:24]):
-            names.add(f'{left[:4]}{right[:3]}')
-        for expr in GLOBAL_EXPRESSIONS:
-            names.add(expr)
-            for end in BRAND_ENDINGS[:6]:
-                names.add(f'{expr[:7]}{end}')
-
-    for seed in seeds:
-        base = normalize_alpha(seed)
-        if not base:
-            continue
-        names.add(base)
-        for suf in SHORT_SUFFIXES:
-            names.add(f'{base}{suf}')
-        for end in BRAND_ENDINGS:
-            names.add(f'{base[:6]}{end}')
-        for p in COINED_PREFIXES[:8]:
-            names.add(f'{p}{base[:3]}')
-
-    cleaned = []
-    for raw in names:
-        n = normalize_alpha(raw)
-        if not n:
-            continue
-        if len(n) < min_len or len(n) > max_len:
-            continue
-        if not re.fullmatch(r'[a-z]+', n):
-            continue
-        if len(n) > 2 and n[0] == n[1] == n[2]:
-            continue
-        cleaned.append(n)
-
-    return sorted(set(cleaned))
+    return diversity_filter(
+        selected,
+        max_per_prefix2=max_per_prefix2,
+        max_per_suffix2=max_per_suffix2,
+        max_per_shape=max_per_shape,
+        max_per_family=max_per_family,
+    )
 
 
 def vowel_ratio(name: str) -> float:
@@ -484,6 +784,97 @@ def psych_trust_proxy_score(name: str) -> int:
         score += 6
     score -= int(psych_spelling_risk(name) * 0.4)
     return max(0, min(100, score))
+
+
+def gibberish_signal(name: str) -> tuple[int, str]:
+    penalty = 0
+    flags: list[str] = []
+
+    cons_runs = re.findall(r'[^aeiouy]+', name)
+    vow_runs = re.findall(r'[aeiouy]+', name)
+    max_cons = max((len(run) for run in cons_runs), default=0)
+    max_vow = max((len(run) for run in vow_runs), default=0)
+
+    if max_cons >= 5:
+        penalty += 30
+        flags.append('cons_run_5plus')
+    elif max_cons == 4:
+        penalty += 18
+        flags.append('cons_run_4')
+
+    if max_vow >= 4:
+        penalty += 16
+        flags.append('vowel_run_4plus')
+
+    if len(name) >= 7 and name[:3] == name[3:6]:
+        penalty += 22
+        flags.append('repeated_trigram')
+
+    if re.search(r'(aa|ee|ii|oo|uu|yyy)', name):
+        penalty += 12
+        flags.append('double_vowel_repeat')
+
+    if re.search(r'([a-z]{2})\1', name):
+        penalty += 14
+        flags.append('repeated_bigram')
+
+    if name.endswith(('oon', 'oto')):
+        penalty += 16
+        flags.append('synthetic_suffix')
+
+    unique_ratio = len(set(name)) / max(1, len(name))
+    if unique_ratio < 0.45:
+        penalty += 14
+        flags.append('low_char_diversity')
+
+    for bigram in GIBBERISH_BIGRAMS:
+        if bigram in name:
+            penalty += 8
+            flags.append(f'odd_bigram_{bigram}')
+
+    if len(name) >= 4 and not re.search(r'[aeiouy]', name[:4]):
+        penalty += 10
+        flags.append('no_early_vowel')
+
+    return min(100, penalty), ';'.join(sorted(set(flags)))
+
+
+def load_false_friend_rules(path: str) -> dict[str, tuple[int, str]]:
+    rules = dict(FALSE_FRIEND_RULES)
+    p = Path(path)
+    if not p.exists():
+        return rules
+    for raw in p.read_text(encoding='utf-8').splitlines():
+        line = raw.strip()
+        if not line.startswith('|'):
+            continue
+        parts = [part.strip() for part in line.strip('|').split('|')]
+        if len(parts) < 3:
+            continue
+        token = normalize_alpha(parts[0])
+        if token in {'token', 'name'} or not token:
+            continue
+        try:
+            weight = int(parts[1])
+        except ValueError:
+            continue
+        reason = parts[2] or 'lexicon_rule'
+        rules[token] = (max(1, min(100, weight)), reason)
+    return rules
+
+
+def false_friend_signal(name: str, rules: dict[str, tuple[int, str]] | None = None) -> tuple[int, str]:
+    active_rules = rules or FALSE_FRIEND_RULES
+    total = 0
+    hits: list[str] = []
+    for token, (weight, reason) in active_rules.items():
+        if token in name:
+            total += weight
+            hits.append(f'{token}:{reason}:{weight}')
+    if re.search(r'(sex|xxx|porn)', name):
+        total += 40
+        hits.append('explicit_content:blocked:40')
+    return min(100, total), ';'.join(hits[:6])
 
 
 def trademark_search_urls(name: str) -> tuple[str, str, str]:
@@ -781,19 +1172,33 @@ def required_tlds(scope: str) -> list[str]:
     return ['com']
 
 
-def evaluate_candidates(scope: str, names: list[str], similarity_fail_threshold: int) -> list[Candidate]:
+def evaluate_candidates(
+    scope: str,
+    generated_items: list[GeneratedCandidate],
+    similarity_fail_threshold: int,
+    false_friend_fail_threshold: int,
+    gibberish_fail_threshold: int,
+    false_friend_rules: dict[str, tuple[int, str]],
+) -> list[Candidate]:
     results: list[Candidate] = []
-    for n in names:
+    for item in generated_items:
+        n = item.name
         q = quality_score(n)
         risk, sim_risk, closest, desc_risk, sc_pen = challenge_risk(n, scope)
         adv_risk, adv_hits = adversarial_similarity_signal(n)
+        gib_penalty, gib_flags = gibberish_signal(n)
+        false_friend_risk, false_friend_hits = false_friend_signal(n, false_friend_rules)
         risk = min(100, risk + int(0.25 * adv_risk))
+        risk = min(100, risk + int(gib_penalty * 0.4) + int(false_friend_risk * 0.65))
         total = max(0, min(100, int(q - (risk * 0.55))))
         spell_risk = psych_spelling_risk(n)
         trust_proxy = psych_trust_proxy_score(n)
         dpma_url, swissreg_url, tmview_url = trademark_search_urls(n)
         c = Candidate(
             name=n,
+            generator_family=item.generator_family,
+            lineage_atoms=';'.join(item.lineage_atoms),
+            source_confidence=float(item.source_confidence),
             quality_score=q,
             challenge_risk=risk,
             total_score=total,
@@ -808,6 +1213,10 @@ def evaluate_candidates(scope: str, names: list[str], similarity_fail_threshold:
             trademark_dpma_url=dpma_url,
             trademark_swissreg_url=swissreg_url,
             trademark_tmview_url=tmview_url,
+            gibberish_penalty=gib_penalty,
+            gibberish_flags=gib_flags,
+            false_friend_risk=false_friend_risk,
+            false_friend_hits=false_friend_hits,
         )
         if sim_risk >= similarity_fail_threshold:
             c.hard_fail = True
@@ -816,6 +1225,14 @@ def evaluate_candidates(scope: str, names: list[str], similarity_fail_threshold:
             c.hard_fail = True
             if not c.fail_reason:
                 c.fail_reason = 'adversarial_similarity_risk'
+        if gib_penalty >= gibberish_fail_threshold:
+            c.hard_fail = True
+            if not c.fail_reason:
+                c.fail_reason = 'gibberish_pattern_risk'
+        if false_friend_risk >= false_friend_fail_threshold:
+            c.hard_fail = True
+            if not c.fail_reason:
+                c.fail_reason = 'false_friend_risk'
         results.append(c)
     return results
 
@@ -846,6 +1263,8 @@ def apply_external_penalty(c: Candidate) -> None:
     if c.psych_trust_proxy < 55:
         penalty += int((55 - c.psych_trust_proxy) * 0.35)
     penalty += int(min(10, c.psych_spelling_risk * 0.25))
+    penalty += int(min(12, c.gibberish_penalty * 0.25))
+    penalty += int(min(16, c.false_friend_risk * 0.45))
     unknown_store_count = len([p for p in c.store_unknown_countries.split(',') if p.strip()])
     if unknown_store_count > 0:
         penalty += min(8, unknown_store_count * 2)
@@ -1062,6 +1481,9 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
         w.writerow(
             [
                 'name',
+                'generator_family',
+                'lineage_atoms',
+                'source_confidence',
                 'scope',
                 'gate',
                 'quality_score',
@@ -1101,6 +1523,10 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                 'adversarial_top_hits',
                 'psych_spelling_risk',
                 'psych_trust_proxy',
+                'gibberish_penalty',
+                'gibberish_flags',
+                'false_friend_risk',
+                'false_friend_hits',
                 'trademark_dpma_url',
                 'trademark_swissreg_url',
                 'trademark_tmview_url',
@@ -1114,6 +1540,9 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
             w.writerow(
                 [
                     c.name,
+                    c.generator_family,
+                    c.lineage_atoms,
+                    f'{c.source_confidence:.2f}',
                     scope,
                     gate,
                     c.quality_score,
@@ -1153,6 +1582,10 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                     c.adversarial_top_hits,
                     c.psych_spelling_risk,
                     c.psych_trust_proxy,
+                    c.gibberish_penalty,
+                    c.gibberish_flags,
+                    c.false_friend_risk,
+                    c.false_friend_hits,
                     c.trademark_dpma_url,
                     c.trademark_swissreg_url,
                     c.trademark_tmview_url,
@@ -1192,8 +1625,10 @@ def append_run_history(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     counts = {'strong': 0, 'consider': 0, 'weak': 0, 'reject': 0}
+    family_counts: Counter[str] = Counter()
     for c in candidates:
         counts[recommendation(c, gate)] += 1
+        family_counts[c.generator_family] += 1
     top = []
     for c in candidates:
         rec = recommendation(c, gate)
@@ -1215,6 +1650,16 @@ def append_run_history(
         'scope': scope,
         'gate': gate,
         'variation_profile': args.variation_profile,
+        'generator_families': parse_csv_set(args.generator_families),
+        'family_quotas': parse_family_quotas(args.family_quotas),
+        'source_pool_db': args.source_pool_db,
+        'source_pool_limit': int(args.source_pool_limit),
+        'source_min_confidence': float(args.source_min_confidence),
+        'source_languages': parse_csv_set(args.source_languages),
+        'source_categories': parse_csv_set(args.source_categories),
+        'false_friend_lexicon': args.false_friend_lexicon,
+        'false_friend_fail_threshold': int(args.false_friend_fail_threshold),
+        'gibberish_fail_threshold': int(args.gibberish_fail_threshold),
         'degraded_network_mode': bool(args.degraded_network_mode),
         'store_check': bool(args.store_check),
         'domain_check': bool(args.domain_check),
@@ -1225,6 +1670,7 @@ def append_run_history(
         'check_limit': int(args.check_limit),
         'candidate_count': len(candidates),
         'recommendation_counts': counts,
+        'generator_family_counts': dict(sorted(family_counts.items(), key=lambda item: (-item[1], item[0]))),
         'top_candidates': top,
     }
     with path.open('a', encoding='utf-8') as f:
@@ -1263,6 +1709,16 @@ def persist_to_db(
                 'pool_size': int(args.pool_size),
                 'check_limit': int(args.check_limit),
                 'degraded_network_mode': bool(args.degraded_network_mode),
+                'generator_families': parse_csv_set(args.generator_families),
+                'family_quotas': parse_family_quotas(args.family_quotas),
+                'source_pool_db': args.source_pool_db,
+                'source_pool_limit': int(args.source_pool_limit),
+                'source_min_confidence': float(args.source_min_confidence),
+                'source_languages': parse_csv_set(args.source_languages),
+                'source_categories': parse_csv_set(args.source_categories),
+                'false_friend_lexicon': args.false_friend_lexicon,
+                'false_friend_fail_threshold': int(args.false_friend_fail_threshold),
+                'gibberish_fail_threshold': int(args.gibberish_fail_threshold),
             },
             summary={
                 'candidate_count': len(candidates),
@@ -1285,13 +1741,36 @@ def persist_to_db(
                 candidate_id=candidate_id,
                 run_id=run_id,
                 source_type='rule',
-                source_label='name_generator',
+                source_label=f'name_generator:{c.generator_family}',
                 metadata={
                     'scope': scope,
                     'gate': gate,
                     'variation_profile': variation_profile,
+                    'generator_family': c.generator_family,
+                    'lineage_atoms': c.lineage_atoms,
+                    'source_confidence': c.source_confidence,
                 },
             )
+            lineage_parts = [part.strip() for part in c.lineage_atoms.split(';') if part.strip()]
+            for part in lineage_parts:
+                source_atom_id = None
+                atom_norm = ndb.normalize_name(part)
+                if atom_norm:
+                    row = conn.execute(
+                        'SELECT id FROM source_atoms WHERE atom_normalized = ?',
+                        (atom_norm,),
+                    ).fetchone()
+                    if row:
+                        source_atom_id = int(row[0])
+                ndb.add_candidate_lineage(
+                    conn,
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    generator_family=c.generator_family,
+                    source_atom_id=source_atom_id,
+                    contribution_weight=float(c.source_confidence or 0.0),
+                    note=part,
+                )
             ndb.add_score_snapshot(
                 conn,
                 candidate_id=candidate_id,
@@ -1332,6 +1811,84 @@ def parse_args() -> argparse.Namespace:
         choices=['standard', 'expanded'],
         default='expanded',
         help='Candidate generation profile. expanded adds broader multilingual phonetic roots.',
+    )
+    parser.add_argument(
+        '--generator-families',
+        default=','.join(DEFAULT_GENERATOR_FAMILIES),
+        help='Comma-separated generator families (coined,stem,suggestive,seed,expression,source_pool,blend).',
+    )
+    parser.add_argument(
+        '--family-quotas',
+        default='',
+        help='Optional comma list like coined:120,source_pool:220,blend:180.',
+    )
+    parser.add_argument(
+        '--source-pool-db',
+        default='docs/branding/naming_pipeline_v1.db',
+        help='SQLite DB path used to load curated source atoms for source_pool/blend families.',
+    )
+    parser.add_argument(
+        '--source-pool-limit',
+        type=int,
+        default=500,
+        help='Maximum source atoms to load from source pool DB.',
+    )
+    parser.add_argument(
+        '--source-min-confidence',
+        type=float,
+        default=0.60,
+        help='Minimum confidence for source atoms loaded into generation.',
+    )
+    parser.add_argument(
+        '--source-languages',
+        default='',
+        help='Optional comma-separated language filters for source atoms.',
+    )
+    parser.add_argument(
+        '--source-categories',
+        default='',
+        help='Optional comma-separated semantic category filters for source atoms.',
+    )
+    parser.add_argument(
+        '--max-per-prefix2',
+        type=int,
+        default=24,
+        help='Diversity guard: max candidates sharing same first 2 letters.',
+    )
+    parser.add_argument(
+        '--max-per-suffix2',
+        type=int,
+        default=24,
+        help='Diversity guard: max candidates sharing same last 2 letters.',
+    )
+    parser.add_argument(
+        '--max-per-shape',
+        type=int,
+        default=18,
+        help='Diversity guard: max candidates sharing same vowel/consonant shape.',
+    )
+    parser.add_argument(
+        '--max-per-family',
+        type=int,
+        default=280,
+        help='Diversity guard: hard cap per generator family before scoring.',
+    )
+    parser.add_argument(
+        '--false-friend-fail-threshold',
+        type=int,
+        default=28,
+        help='Hard-fail threshold for false-friend/negative-association risk.',
+    )
+    parser.add_argument(
+        '--false-friend-lexicon',
+        default='docs/branding/naming_false_friend_lexicon_v1.md',
+        help='Markdown lexicon table file for false-friend and negative-association checks.',
+    )
+    parser.add_argument(
+        '--gibberish-fail-threshold',
+        type=int,
+        default=35,
+        help='Hard-fail threshold for gibberish penalty.',
     )
     parser.add_argument(
         '--store-countries',
@@ -1394,6 +1951,17 @@ def main() -> int:
     seeds = [s.strip() for s in args.seeds.split(',') if s.strip()]
     explicit_candidates = [normalize_alpha(s.strip()) for s in args.candidates.split(',') if s.strip()]
     explicit_candidates = [c for c in explicit_candidates if c]
+    active_families = parse_csv_set(args.generator_families) or list(DEFAULT_GENERATOR_FAMILIES)
+    family_quotas = parse_family_quotas(args.family_quotas)
+    source_languages = parse_csv_set(args.source_languages)
+    source_categories = parse_csv_set(args.source_categories)
+    source_atoms = load_source_atoms(
+        db_path=args.source_pool_db,
+        limit=max(1, args.source_pool_limit),
+        min_confidence=max(0.0, min(1.0, args.source_min_confidence)),
+        languages=source_languages,
+        categories=source_categories,
+    )
     store_countries = [s.strip().lower() for s in args.store_countries.split(',') if re.fullmatch(r'[a-z]{2}', s.strip().lower())]
     if not store_countries:
         store_countries = ['de', 'ch', 'us']
@@ -1401,25 +1969,53 @@ def main() -> int:
     similarity_fail_threshold = 80 if args.gate == 'strict' else 88
     require_base_com = args.require_base_com or args.gate == 'strict'
     fail_on_unknown = (args.fail_on_unknown or args.gate == 'strict') and not args.degraded_network_mode
+    false_friend_rules = load_false_friend_rules(args.false_friend_lexicon)
+
+    explicit_generated = [
+        GeneratedCandidate(name=name, generator_family='explicit', lineage_atoms=[name], source_confidence=0.95)
+        for name in explicit_candidates
+    ]
 
     if args.only_candidates:
-        generated = explicit_candidates
+        generated_items = explicit_generated
     else:
-        generated = generate_candidates(
+        generated_items = generate_candidates(
             args.scope,
             seeds,
             args.min_len,
             args.max_len,
             args.variation_profile,
+            active_families,
+            family_quotas,
+            source_atoms,
+            max(1, args.max_per_prefix2),
+            max(1, args.max_per_suffix2),
+            max(1, args.max_per_shape),
+            max(1, args.max_per_family),
         )
-        generated.extend(explicit_candidates)
-        generated = sorted(set(generated))
+        by_name = {item.name: item for item in generated_items}
+        for item in explicit_generated:
+            by_name[item.name] = item
+        generated_items = sorted(by_name.values(), key=lambda item: item.name)
 
-    if not generated:
+    if args.progress:
+        print(
+            f'generation_config families={",".join(active_families)} '
+            f'source_atoms={len(source_atoms)} source_db={args.source_pool_db}'
+        )
+
+    if not generated_items:
         print('No candidates to evaluate. Provide --candidates and/or generation inputs.')
         return 1
 
-    evaluated = evaluate_candidates(args.scope, generated, similarity_fail_threshold)
+    evaluated = evaluate_candidates(
+        args.scope,
+        generated_items,
+        similarity_fail_threshold,
+        max(1, args.false_friend_fail_threshold),
+        max(1, args.gibberish_fail_threshold),
+        false_friend_rules,
+    )
 
     ranked = sorted(
         evaluated,
@@ -1462,6 +2058,7 @@ def main() -> int:
             {'strong': 0, 'consider': 1, 'weak': 2, 'reject': 3}[recommendation(c, args.gate)],
             c.challenge_risk,
             -c.total_score,
+            -c.source_confidence,
             c.name,
         ),
     )
@@ -1494,14 +2091,14 @@ def main() -> int:
         rec = recommendation(c, args.gate)
         if rec in {'strong', 'consider'} and not c.hard_fail:
             print(
-                f'- {c.name:12s} | rec={rec:8s} | total={c.total_score:3d} | '
+                f'- {c.name:12s} | fam={c.generator_family:10s} | rec={rec:8s} | total={c.total_score:3d} | '
                 f'risk={c.challenge_risk:3d} | domains(com/de/ch)='
                 f'{c.com_available}/{c.de_available}/{c.ch_available} | '
                 f'fallback={c.com_fallback_domain or "-"} | '
                 f'store(de/ch/us)={c.store_de_count}/{c.store_ch_count}/{c.store_us_count} | '
                 f'web(exact/near)={c.web_exact_hits}/{c.web_near_hits} | '
                 f'pkg(pypi/npm)={c.pypi_exists}/{c.npm_exists} | '
-                f'adv={c.adversarial_risk}'
+                f'adv={c.adversarial_risk} | ff={c.false_friend_risk} | gib={c.gibberish_penalty}'
             )
             shown += 1
         if shown >= 15:

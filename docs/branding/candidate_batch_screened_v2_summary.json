@@ -1,0 +1,77 @@
+{
+  "source": "docs/branding/candidate_batch_v2.csv",
+  "output": "docs/branding/candidate_batch_screened_v2.csv",
+  "thresholds": {
+    "recommendation": [
+      "strong",
+      "consider"
+    ],
+    "hard_fail": "False",
+    "max_challenge_risk": 30,
+    "max_external_penalty": 16,
+    "max_gibberish_penalty": 20,
+    "max_false_friend_risk": 20,
+    "max_psych_spelling_risk": 20,
+    "shortlist_limit": 20
+  },
+  "diversity": {
+    "max_per_prefix4": 3,
+    "max_per_suffix3": 2,
+    "root5_cap_stage1": 2,
+    "family_caps": {
+      "source_pool": 8,
+      "blend": 4,
+      "expression": 3,
+      "suggestive": 3,
+      "coined": 2,
+      "seed": 2,
+      "stem": 2
+    }
+  },
+  "counts": {
+    "input_rows": 120,
+    "eligible_pre_diversity": 52,
+    "shortlist_rows": 20,
+    "excluded_rows": 100
+  },
+  "exclusion_reasons": {
+    "backfill_used": 1,
+    "challenge_risk": 68,
+    "diversity_family_cap": 22,
+    "diversity_root5_cap_stage1": 8,
+    "diversity_suffix3_cap": 3
+  },
+  "generator_family_distribution": {
+    "blend": 4,
+    "coined": 2,
+    "expression": 3,
+    "source_pool": 8,
+    "suggestive": 3
+  },
+  "shortlist_names": [
+    "certorio",
+    "lumenvia",
+    "terravia",
+    "trueledva",
+    "ledgerla",
+    "ledgerex",
+    "certono",
+    "fidemen",
+    "fiderum",
+    "lumenna",
+    "terrana",
+    "verobil",
+    "veromen",
+    "fairshava",
+    "trueledla",
+    "verorio",
+    "domuso",
+    "nexava",
+    "nexaza",
+    "terraex"
+  ],
+  "notes": [
+    "External checks were disabled for v2 generation run in degraded mode; shortlist is provisional for legal and availability checks.",
+    "Stage-2 backfill is deterministic and score-ordered to reach the shortlist size target while preserving family/prefix/suffix caps."
+  ]
+}

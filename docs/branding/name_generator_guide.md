@@ -1,13 +1,15 @@
 ---
 owner: product
 status: draft
-last_validated: 2026-02-16
+last_validated: 2026-02-17
 ---
 
 # Name Generator Guide
 
 ## Purpose
 `scripts/branding/name_generator.py` creates brand-name candidates and pre-screens them for:
+- generator-family mixing (`coined`, `stem`, `suggestive`, `seed`, `expression`, `source_pool`, `blend`),
+- curated source-pool based generation with lineage tracking (`source_atoms` in SQLite),
 - challenge risk (similarity to protected names + descriptiveness),
 - App Store collisions (DE/CH/US quick signal),
 - domain availability via RDAP (`.com`, `.de`, `.ch`).
@@ -15,6 +17,8 @@ last_validated: 2026-02-16
 - social-handle signal (`GitHub`, `LinkedIn`, `X`, `Instagram`),
 - adversarial challenger similarity and confusion risk,
 - expanded multilingual phonetic variation roots for less-crowded naming space,
+- anti-gibberish gates and diversity controls (prefix/suffix/shape family balancing),
+- false-friend and negative-association risk filtering,
 - generated trademark lookup links (DPMA, Swissreg, TMview) for manual legal checks.
 - run-history logging (`JSONL`) for long-term iterative search.
 - strict gate checks:
@@ -123,12 +127,58 @@ python3 scripts/branding/naming_validate_async.py \
   --max-retries=2
 ```
 
+### 10) Ingest curated source atoms for generator v2
+```zsh
+python3 scripts/branding/name_input_ingest.py \
+  --db docs/branding/naming_pipeline_v1.db \
+  --inputs docs/branding/source_inputs_v2.csv \
+  --source-label=curated_lexicon_v2 \
+  --scope=global \
+  --gate=balanced \
+  --also-candidates
+```
+
+### 11) Run v2 generation using source-pool and blend families
+```zsh
+python3 scripts/branding/name_generator.py \
+  --scope=global \
+  --gate=balanced \
+  --variation-profile=expanded \
+  --generator-families=source_pool,blend,seed,suggestive,coined \
+  --family-quotas=source_pool:260,blend:220,seed:120,suggestive:90,coined:90 \
+  --source-pool-db=docs/branding/naming_pipeline_v1.db \
+  --source-pool-limit=600 \
+  --source-min-confidence=0.58 \
+  --false-friend-lexicon=docs/branding/naming_false_friend_lexicon_v1.md \
+  --degraded-network-mode \
+  --pool-size=500 \
+  --check-limit=120 \
+  --output=docs/branding/candidate_batch_v2.csv \
+  --json-output=docs/branding/candidate_batch_v2.json \
+  --persist-db --db=docs/branding/naming_pipeline_v1.db
+```
+
+### 12) One-command test runner (smoke/full)
+```zsh
+# fast smoke run (writes to /tmp)
+zsh scripts/branding/test_naming_pipeline_v2.sh smoke
+
+# full run (writes canonical docs/branding outputs)
+zsh scripts/branding/test_naming_pipeline_v2.sh full
+
+# optional black format check (ruff runs by default)
+USE_BLACK=1 zsh scripts/branding/test_naming_pipeline_v2.sh smoke
+```
+
 ## Output
 The script writes a CSV to:
 - default: `docs/branding/generated_name_candidates_<scope>_<timestamp>.csv`
 - or your custom `--output` path.
 
 Key columns:
+- `generator_family`: generation family producing the candidate.
+- `lineage_atoms`: source atoms used to construct candidate.
+- `source_confidence`: source confidence proxy from input corpus.
 - `quality_score`: pronounceability/length/memorability quality.
 - `challenge_risk`: similarity + descriptiveness + scope penalty.
 - `total_score`: quality adjusted by risk.
@@ -144,6 +194,8 @@ Key columns:
 - `social_*`: best-effort availability signal for key handles.
 - `adversarial_*`: confusion signal versus likely challenger/incumbent marks.
 - `psych_*`: spelling risk and trust-proxy heuristics for early filtering.
+- `gibberish_*`: low-humanity pattern penalties and reasons.
+- `false_friend_*`: negative-association and false-friend risk evidence.
 - `trademark_*_url`: prebuilt lookup URLs for DPMA/Swissreg/TMview checks.
 - `external_penalty`: extra risk applied from web/store signals.
 - `hard_fail` / `fail_reason`: automatic rejection reason.
@@ -162,6 +214,17 @@ Important flags:
 - `--no-social-check`: disable social-handle checks.
 - `--no-progress`: disable live per-candidate progress output.
 - `--variation-profile=expanded`: adds broader multilingual phonetic roots.
+- `--generator-families=<list>`: select generator families.
+- `--family-quotas=<family:count,...>`: control family contribution.
+- `--source-pool-db=<path>`: DB path for curated source atoms.
+- `--source-pool-limit=<n>`: cap source atoms loaded for generation.
+- `--source-min-confidence=<0..1>`: minimum source confidence.
+- `--source-languages=<list>`: optional language filters for source atoms.
+- `--source-categories=<list>`: optional semantic category filters.
+- `--max-per-prefix2/--max-per-suffix2/--max-per-shape/--max-per-family`: diversity gates.
+- `--false-friend-lexicon=<path>`: markdown lexicon for semantic safety checks.
+- `--false-friend-fail-threshold=<n>`: fail threshold for false-friend risk.
+- `--gibberish-fail-threshold=<n>`: fail threshold for gibberish penalty.
 - `--degraded-network-mode`: keep `unknown` external checks as soft warnings (useful with flaky network/bot throttling).
 - `--adversarial-fail-threshold=82`: tune hard-fail threshold for challenger similarity.
 - `--json-output=<path>`: write machine-readable JSON artifact.
@@ -169,21 +232,23 @@ Important flags:
 - `--persist-db --db=<path>`: store scored candidates into SQLite candidate lake.
 - `scripts/branding/naming_db.py`: initialize/import/stats for candidate lake.
 - `scripts/branding/name_ideation_ingest.py`: import AI ideation batches with provenance metadata.
+- `scripts/branding/name_input_ingest.py`: ingest curated source atoms into `source_atoms`.
 - `scripts/branding/naming_validate_async.py`: async job orchestration and persisted validator lifecycle states.
 - `--progress-every=<N>`: progress snapshot cadence for async validator.
 - `--progress-interval-s=<seconds>`: time-based progress fallback.
 - `--no-progress`: disable async validator progress output.
 
 ## Recommended Workflow
-1. Run `--scope=dach` and `--scope=global`.
-2. Keep names with:
+1. Ingest curated source atoms (`name_input_ingest.py`) before generation.
+2. Run `--scope=dach` and `--scope=global` with mixed generator families.
+3. Keep names with:
 - `recommendation in {strong, consider}`
 - `hard_fail=false`
 - required domains available for target scope.
-3. Use generated trademark URLs for manual registry pre-screen (DPMA, IGE/Swissreg, EUIPO/TMview, Zefix).
-4. Merge top 10 into the naming framework shortlist.
-5. Run 5-second user trust/comprehension test before final choice.
-6. Track every run in `docs/branding/name_generator_runs.jsonl` to monitor drift and avoid repeating dead-end candidate clusters.
+4. Use generated trademark URLs for manual registry pre-screen (DPMA, IGE/Swissreg, EUIPO/TMview, Zefix).
+5. Merge top candidates into the naming framework shortlist.
+6. Run 5-second user trust/comprehension test before final choice.
+7. Track every run in `docs/branding/name_generator_runs.jsonl` to monitor drift and avoid repeating dead-end candidate clusters.
 
 ## Notes
 - The built-in protected list is heuristic and intentionally conservative.

@@ -1,0 +1,104 @@
+name,language_hint,semantic_category,confidence_weight,source_label,note
+vero,it,trust,0.90,curated_lexicon_v2,truth signal
+verum,la,trust,0.82,curated_lexicon_v2,latin truth root
+certo,it,trust,0.86,curated_lexicon_v2,certainty
+certa,it,trust,0.82,curated_lexicon_v2,certainty feminine
+claro,es,clarity,0.90,curated_lexicon_v2,clear meaning
+clara,es,clarity,0.88,curated_lexicon_v2,clear meaning
+klar,de,clarity,0.80,curated_lexicon_v2,german clear
+lucid,en,clarity,0.78,curated_lexicon_v2,clear understanding
+lumen,la,clarity,0.86,curated_lexicon_v2,light metaphor
+lumina,la,clarity,0.80,curated_lexicon_v2,light plural
+solid,en,stability,0.82,curated_lexicon_v2,stable signal
+solido,it,stability,0.76,curated_lexicon_v2,solid root
+stabil,la,stability,0.84,curated_lexicon_v2,stability root
+stead,en,stability,0.78,curated_lexicon_v2,steady signal
+fidel,la,trust,0.82,curated_lexicon_v2,faithful root
+fida,it,trust,0.76,curated_lexicon_v2,trust root
+equa,la,fairness,0.80,curated_lexicon_v2,equity root
+equity,en,fairness,0.74,curated_lexicon_v2,fairness
+fair,en,fairness,0.75,curated_lexicon_v2,fair signal
+recta,la,governance,0.70,curated_lexicon_v2,correctness
+ordine,it,governance,0.72,curated_lexicon_v2,order signal
+ordo,la,governance,0.74,curated_lexicon_v2,order root
+ratio,la,finance,0.86,curated_lexicon_v2,calculation root
+ledger,en,finance,0.80,curated_lexicon_v2,accounting term
+folio,la,finance,0.82,curated_lexicon_v2,portfolio root
+saldo,it,finance,0.68,curated_lexicon_v2,balance root high descriptive risk
+nova,la,progress,0.76,curated_lexicon_v2,newness root
+alto,it,quality,0.78,curated_lexicon_v2,elevated quality
+alta,it,quality,0.72,curated_lexicon_v2,elevated quality
+prime,en,quality,0.70,curated_lexicon_v2,quality signal
+merit,en,quality,0.74,curated_lexicon_v2,quality signal
+civis,la,property,0.76,curated_lexicon_v2,civic/residential root
+civica,it,property,0.72,curated_lexicon_v2,civic property vibe
+urban,la,property,0.74,curated_lexicon_v2,urban context
+terra,la,property,0.82,curated_lexicon_v2,land root
+domo,la,property,0.78,curated_lexicon_v2,house root
+domus,la,property,0.72,curated_lexicon_v2,household root
+casa,es,property,0.78,curated_lexicon_v2,home root
+habita,la,property,0.76,curated_lexicon_v2,dwelling root
+habit,en,property,0.62,curated_lexicon_v2,habitual/dwelling overlap
+nexus,la,operations,0.82,curated_lexicon_v2,connection root
+nexo,es,operations,0.78,curated_lexicon_v2,connection root
+vanta,en,operations,0.60,curated_lexicon_v2,coined stable sounding
+axia,la,operations,0.68,curated_lexicon_v2,axis/structure signal
+metra,gr,operations,0.74,curated_lexicon_v2,measurement root
+meter,en,operations,0.70,curated_lexicon_v2,measurement root
+scope,en,operations,0.70,curated_lexicon_v2,boundary/scope
+axis,en,operations,0.66,curated_lexicon_v2,structural axis
+anchor,en,stability,0.70,curated_lexicon_v2,stability metaphor
+harbor,en,stability,0.62,curated_lexicon_v2,safety metaphor
+signal,en,clarity,0.70,curated_lexicon_v2,signal clarity
+beacon,en,clarity,0.68,curated_lexicon_v2,guidance metaphor
+order,en,governance,0.68,curated_lexicon_v2,order signal
+trust,en,trust,0.66,curated_lexicon_v2,generic trust token
+secure,en,trust,0.64,curated_lexicon_v2,security token
+sure,en,trust,0.60,curated_lexicon_v2,sureness
+valid,en,trust,0.66,curated_lexicon_v2,validation signal
+proof,en,trust,0.64,curated_lexicon_v2,evidence signal
+plain,en,clarity,0.62,curated_lexicon_v2,plain/simple
+clear,en,clarity,0.64,curated_lexicon_v2,clear token
+bright,en,clarity,0.58,curated_lexicon_v2,bright metaphor
+calm,en,stability,0.62,curated_lexicon_v2,calm reliability
+steady,en,stability,0.68,curated_lexicon_v2,stable token
+faira,coined,fairness,0.58,curated_lexicon_v2,coined fairness atom
+truva,coined,trust,0.56,curated_lexicon_v2,coined trust atom
+claris,la,clarity,0.76,curated_lexicon_v2,clarity root
+veris,la,trust,0.72,curated_lexicon_v2,truth root
+regula,la,governance,0.72,curated_lexicon_v2,rule/order root
+norma,la,governance,0.72,curated_lexicon_v2,standard root
+audit,la,governance,0.70,curated_lexicon_v2,auditability signal
+saldox,coined,finance,0.50,curated_lexicon_v2,exploratory only
+amani,sw,trust,0.66,curated_lexicon_v2,peace-inspired root
+imara,sw,stability,0.68,curated_lexicon_v2,strong-inspired root
+nuru,sw,clarity,0.70,curated_lexicon_v2,light-inspired root
+safi,sw,clarity,0.66,curated_lexicon_v2,clean-inspired root
+wazi,sw,clarity,0.64,curated_lexicon_v2,open clear-inspired root
+msingi,sw,stability,0.62,curated_lexicon_v2,foundation-inspired root
+rafiki,sw,trust,0.60,curated_lexicon_v2,friendliness-inspired root
+umoja,sw,governance,0.58,curated_lexicon_v2,unity-inspired root
+nguvu,sw,stability,0.60,curated_lexicon_v2,strength-inspired root
+pendo,sw,humanity,0.54,curated_lexicon_v2,warmth-inspired root
+moyo,sw,humanity,0.52,curated_lexicon_v2,heart-inspired root
+jenga,sw,progress,0.56,curated_lexicon_v2,build-inspired root
+kazi,sw,operations,0.55,curated_lexicon_v2,work-inspired root
+zuri,sw,quality,0.58,curated_lexicon_v2,good-inspired root
+terrax,coined,property,0.52,curated_lexicon_v2,exploratory
+domera,coined,property,0.60,curated_lexicon_v2,house-derived blend
+clarivo,coined,clarity,0.64,curated_lexicon_v2,clarity+voice style
+verivo,coined,trust,0.62,curated_lexicon_v2,trust blend
+folivo,coined,finance,0.60,curated_lexicon_v2,folio blend
+nexora,coined,operations,0.64,curated_lexicon_v2,nexus blend
+civora,coined,property,0.62,curated_lexicon_v2,civic blend
+ordivo,coined,governance,0.60,curated_lexicon_v2,order blend
+stavera,coined,stability,0.58,curated_lexicon_v2,stable blend
+lumera,coined,clarity,0.60,curated_lexicon_v2,light blend
+altora,coined,quality,0.58,curated_lexicon_v2,elevated blend
+fidora,coined,trust,0.58,curated_lexicon_v2,trust blend
+equora,coined,fairness,0.56,curated_lexicon_v2,equity blend
+metora,coined,operations,0.56,curated_lexicon_v2,measurement blend
+harva,coined,stability,0.54,curated_lexicon_v2,safe sounding atom
+briva,coined,clarity,0.52,curated_lexicon_v2,clean sounding atom
+norva,coined,governance,0.54,curated_lexicon_v2,norm-derived blend
+regiva,coined,governance,0.54,curated_lexicon_v2,rule-derived blend
