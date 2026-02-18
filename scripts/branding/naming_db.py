@@ -31,6 +31,16 @@ def normalize_name(value: str) -> str:
     return re.sub(r'[^a-z]+', '', value.lower())
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column_name: str, definition_sql: str) -> None:
+    if column_name in _table_columns(conn, table):
+        return
+    conn.execute(f'ALTER TABLE {table} ADD COLUMN {column_name} {definition_sql}')
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -150,6 +160,20 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           FOREIGN KEY(run_id) REFERENCES naming_runs(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS shortlist_decisions (
+          id INTEGER PRIMARY KEY,
+          candidate_id INTEGER NOT NULL,
+          run_id INTEGER NOT NULL,
+          selected INTEGER NOT NULL,
+          shortlist_rank INTEGER,
+          bucket_key TEXT,
+          reason TEXT,
+          score REAL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+          FOREIGN KEY(run_id) REFERENCES naming_runs(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS state_transitions (
           id INTEGER PRIMARY KEY,
           candidate_id INTEGER NOT NULL,
@@ -177,6 +201,33 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           ON candidate_lineage(candidate_id, run_id);
         CREATE INDEX IF NOT EXISTS idx_candidate_lineage_source
           ON candidate_lineage(source_atom_id);
+        CREATE INDEX IF NOT EXISTS idx_shortlist_run_candidate
+          ON shortlist_decisions(run_id, candidate_id, selected);
+        """
+    )
+
+    # Lightweight schema evolution for v3 candidate fields while preserving v2 compatibility.
+    _ensure_column(conn, 'candidates', 'engine_id', "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, 'candidates', 'parent_ids', "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, 'candidates', 'status', "TEXT NOT NULL DEFAULT 'new'")
+    _ensure_column(conn, 'candidates', 'rejection_reason', "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, 'candidates', 'score_quality', 'REAL')
+    _ensure_column(conn, 'candidates', 'score_total', 'REAL')
+    conn.execute(
+        """
+        UPDATE candidates
+        SET status = state
+        WHERE (status IS NULL OR status = '')
+          AND state IS NOT NULL
+          AND state <> ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE candidates
+        SET score_total = current_score
+        WHERE score_total IS NULL
+          AND current_score IS NOT NULL
         """
     )
 
@@ -212,25 +263,46 @@ def upsert_candidate(
     total_score: float | None,
     risk_score: float | None,
     recommendation: str | None,
+    quality_score: float | None = None,
+    engine_id: str | None = None,
+    parent_ids: str | None = None,
+    status: str | None = None,
+    rejection_reason: str | None = None,
 ) -> int:
     normalized = normalize_name(name_display)
     if not normalized:
         raise ValueError('Candidate name is empty after normalization')
 
     ts = now_iso()
+    status_insert = (status or '').strip() or 'new'
+    engine_insert = (engine_id or '').strip()
+    parent_insert = (parent_ids or '').strip()
+    rejection_insert = (rejection_reason or '').strip()
     conn.execute(
         """
         INSERT INTO candidates(
           name_display, name_normalized, first_seen_at, last_seen_at,
-          current_score, current_risk, current_recommendation, state, state_updated_at
+          current_score, current_risk, current_recommendation, state, state_updated_at,
+          engine_id, parent_ids, status, rejection_reason, score_quality, score_total
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name_normalized) DO UPDATE SET
           name_display = excluded.name_display,
           last_seen_at = excluded.last_seen_at,
           current_score = COALESCE(excluded.current_score, candidates.current_score),
           current_risk = COALESCE(excluded.current_risk, candidates.current_risk),
-          current_recommendation = COALESCE(excluded.current_recommendation, candidates.current_recommendation)
+          current_recommendation = COALESCE(excluded.current_recommendation, candidates.current_recommendation),
+          engine_id = CASE
+            WHEN excluded.engine_id IS NOT NULL AND excluded.engine_id <> '' THEN excluded.engine_id
+            ELSE candidates.engine_id
+          END,
+          parent_ids = CASE
+            WHEN excluded.parent_ids IS NOT NULL AND excluded.parent_ids <> '' THEN excluded.parent_ids
+            ELSE candidates.parent_ids
+          END,
+          rejection_reason = excluded.rejection_reason,
+          score_quality = COALESCE(excluded.score_quality, candidates.score_quality),
+          score_total = COALESCE(excluded.score_total, candidates.score_total)
         """,
         (
             name_display,
@@ -242,6 +314,12 @@ def upsert_candidate(
             recommendation,
             'new',
             ts,
+            engine_insert,
+            parent_insert,
+            status_insert,
+            rejection_insert,
+            quality_score,
+            total_score,
         ),
     )
     row = conn.execute('SELECT id FROM candidates WHERE name_normalized = ?', (normalized,)).fetchone()
@@ -466,6 +544,37 @@ def add_score_snapshot(
     )
 
 
+def add_shortlist_decision(
+    conn: sqlite3.Connection,
+    *,
+    candidate_id: int,
+    run_id: int,
+    selected: bool,
+    shortlist_rank: int,
+    bucket_key: str,
+    reason: str,
+    score: float | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO shortlist_decisions(
+          candidate_id, run_id, selected, shortlist_rank, bucket_key, reason, score, created_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            candidate_id,
+            run_id,
+            1 if selected else 0,
+            shortlist_rank if shortlist_rank > 0 else None,
+            bucket_key,
+            reason,
+            score,
+            now_iso(),
+        ),
+    )
+
+
 def add_validation_result(
     conn: sqlite3.Connection,
     *,
@@ -663,6 +772,11 @@ def import_file(conn: sqlite3.Connection, path: Path, source_type: str) -> tuple
         total_score = to_float(row.get('total_score'))
         risk_score = to_float(row.get('challenge_risk') or row.get('risk_score'))
         recommendation = str(row.get('recommendation') or '').strip() or None
+        quality_score = to_float(row.get('quality_score'))
+        engine_id = str(row.get('engine_id') or row.get('generator_family') or '').strip() or None
+        parent_ids = str(row.get('parent_ids') or row.get('lineage_atoms') or '').strip() or None
+        status = str(row.get('status') or '').strip() or None
+        rejection_reason = str(row.get('rejection_reason') or row.get('fail_reason') or '').strip() or None
 
         candidate_id = upsert_candidate(
             conn,
@@ -670,6 +784,11 @@ def import_file(conn: sqlite3.Connection, path: Path, source_type: str) -> tuple
             total_score=total_score,
             risk_score=risk_score,
             recommendation=recommendation,
+            quality_score=quality_score,
+            engine_id=engine_id,
+            parent_ids=parent_ids,
+            status=status,
+            rejection_reason=rejection_reason,
         )
         add_source(
             conn,
@@ -714,6 +833,7 @@ def print_stats(conn: sqlite3.Connection) -> None:
     candidates = conn.execute('SELECT COUNT(*) FROM candidates').fetchone()[0]
     runs = conn.execute('SELECT COUNT(*) FROM naming_runs').fetchone()[0]
     scores = conn.execute('SELECT COUNT(*) FROM candidate_scores').fetchone()[0]
+    shortlist_rows = conn.execute('SELECT COUNT(*) FROM shortlist_decisions').fetchone()[0]
     jobs = conn.execute('SELECT COUNT(*) FROM validation_jobs').fetchone()[0]
     source_atoms = conn.execute('SELECT COUNT(*) FROM source_atoms').fetchone()[0]
     lineage_rows = conn.execute('SELECT COUNT(*) FROM candidate_lineage').fetchone()[0]
@@ -726,7 +846,8 @@ def print_stats(conn: sqlite3.Connection) -> None:
 
     print(
         'db_stats '
-        f'candidates={candidates} runs={runs} score_rows={scores} validation_jobs={jobs} '
+        f'candidates={candidates} runs={runs} score_rows={scores} shortlist_rows={shortlist_rows} '
+        f'validation_jobs={jobs} '
         f'source_atoms={source_atoms} lineage_rows={lineage_rows}'
     )
     if states:
@@ -783,6 +904,116 @@ def print_source_stats(conn: sqlite3.Connection) -> None:
             print(f'- {label}: {count}')
 
 
+def assert_run_contract(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int | None,
+    min_candidates: int,
+    require_shortlist: bool,
+) -> tuple[bool, dict[str, object]]:
+    resolved_run_id = run_id
+    if resolved_run_id is None:
+        row = conn.execute(
+            """
+            SELECT nr.id
+            FROM naming_runs nr
+            WHERE EXISTS (
+              SELECT 1 FROM candidate_sources cs WHERE cs.run_id = nr.id
+            )
+            ORDER BY nr.id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            return False, {'error': 'no_runs_found'}
+        resolved_run_id = int(row[0])
+
+    candidate_count = int(
+        conn.execute(
+            'SELECT COUNT(*) FROM candidate_sources WHERE run_id = ?',
+            (resolved_run_id,),
+        ).fetchone()[0]
+    )
+    score_count = int(
+        conn.execute(
+            'SELECT COUNT(*) FROM candidate_scores WHERE run_id = ?',
+            (resolved_run_id,),
+        ).fetchone()[0]
+    )
+    lineage_count = int(
+        conn.execute(
+            'SELECT COUNT(*) FROM candidate_lineage WHERE run_id = ?',
+            (resolved_run_id,),
+        ).fetchone()[0]
+    )
+    shortlist_total = int(
+        conn.execute(
+            'SELECT COUNT(*) FROM shortlist_decisions WHERE run_id = ?',
+            (resolved_run_id,),
+        ).fetchone()[0]
+    )
+    shortlist_selected = int(
+        conn.execute(
+            'SELECT COUNT(*) FROM shortlist_decisions WHERE run_id = ? AND selected = 1',
+            (resolved_run_id,),
+        ).fetchone()[0]
+    )
+    missing_engine = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM candidate_sources cs
+            JOIN candidates c ON c.id = cs.candidate_id
+            WHERE cs.run_id = ? AND COALESCE(TRIM(c.engine_id), '') = ''
+            """,
+            (resolved_run_id,),
+        ).fetchone()[0]
+    )
+    missing_parent_ids = int(
+        conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM candidate_sources cs
+            JOIN candidates c ON c.id = cs.candidate_id
+            WHERE cs.run_id = ? AND COALESCE(TRIM(c.parent_ids), '') = ''
+            """,
+            (resolved_run_id,),
+        ).fetchone()[0]
+    )
+
+    details = {
+        'run_id': resolved_run_id,
+        'candidate_count': candidate_count,
+        'score_count': score_count,
+        'lineage_count': lineage_count,
+        'shortlist_total': shortlist_total,
+        'shortlist_selected': shortlist_selected,
+        'missing_engine': missing_engine,
+        'missing_parent_ids': missing_parent_ids,
+        'require_shortlist': require_shortlist,
+    }
+
+    if candidate_count < max(1, min_candidates):
+        details['error'] = 'candidate_count_below_threshold'
+        return False, details
+    if score_count < candidate_count:
+        details['error'] = 'missing_score_snapshots'
+        return False, details
+    if lineage_count == 0:
+        details['error'] = 'missing_lineage_rows'
+        return False, details
+    if missing_engine > 0:
+        details['error'] = 'missing_engine_id'
+        return False, details
+    if missing_parent_ids > 0:
+        details['error'] = 'missing_parent_ids'
+        return False, details
+    if require_shortlist and shortlist_selected == 0:
+        details['error'] = 'missing_shortlist_selection'
+        return False, details
+    return True, details
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='SQLite candidate lake for naming pipeline.')
     parser.add_argument('--db', default='docs/branding/naming_pipeline.db', help='SQLite DB path.')
@@ -801,6 +1032,20 @@ def parse_args() -> argparse.Namespace:
 
     sub.add_parser('stats', help='Print simple DB stats.')
     sub.add_parser('source-stats', help='Print source-atom stats.')
+    p_assert = sub.add_parser('assert-contract', help='Assert deterministic run contract/provenance.')
+    p_assert.add_argument('--run-id', type=int, default=0, help='Run ID to validate (default latest run).')
+    p_assert.add_argument('--min-candidates', type=int, default=5, help='Minimum candidate rows expected.')
+    p_assert.add_argument(
+        '--require-shortlist',
+        action='store_true',
+        default=True,
+        help='Require at least one shortlisted candidate in shortlist_decisions.',
+    )
+    p_assert.add_argument(
+        '--no-require-shortlist',
+        dest='require_shortlist',
+        action='store_false',
+    )
     return parser.parse_args()
 
 
@@ -823,6 +1068,15 @@ def main() -> int:
         if args.command == 'source-stats':
             print_source_stats(conn)
             return 0
+        if args.command == 'assert-contract':
+            ok, details = assert_run_contract(
+                conn,
+                run_id=args.run_id if args.run_id > 0 else None,
+                min_candidates=max(1, int(args.min_candidates)),
+                require_shortlist=bool(args.require_shortlist),
+            )
+            print(f'contract_assertion={json.dumps(details, ensure_ascii=False)}')
+            return 0 if ok else 1
 
         if args.command == 'import':
             files = expand_inputs(args.inputs)

@@ -20,7 +20,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Protocol
 
 import name_generator as ng
 import naming_db as ndb
@@ -31,6 +31,8 @@ class CandidateRow:
     candidate_id: int
     name_display: str
     state: str
+    current_score: float
+    current_recommendation: str
 
 
 @dataclass
@@ -53,10 +55,57 @@ class ProgressState:
     last_report_monotonic: float = 0.0
 
 
+@dataclass(frozen=True)
+class ValidationFeatureFlags:
+    pipeline_version: str
+    v3_enabled: bool
+    validation_tier: str
+
+
+class ValidationRunner(Protocol):
+    def __call__(self, name: str, args: argparse.Namespace) -> dict:
+        """Run a single validation check and return structured result payload."""
+
+
+@dataclass(frozen=True)
+class ValidationCheckSpec:
+    check_type: str
+    tier: str
+    runner: ValidationRunner
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Async validator orchestration for naming pipeline.')
     parser.add_argument('--db', default='docs/branding/naming_pipeline.db', help='SQLite DB path.')
+    parser.add_argument(
+        '--pipeline-version',
+        choices=['v2', 'v3'],
+        default='v2',
+        help='Validation contract version toggle. Default v2 preserves existing flow.',
+    )
+    parser.add_argument(
+        '--enable-v3',
+        action='store_true',
+        help='Feature flag enabling v3 validator behavior and tier filtering.',
+    )
+    parser.add_argument(
+        '--validation-tier',
+        choices=['all', 'cheap', 'expensive'],
+        default='all',
+        help='When v3 is enabled, select check tier set to run.',
+    )
     parser.add_argument('--candidate-limit', type=int, default=100, help='Max candidates to validate in this run.')
+    parser.add_argument(
+        '--expensive-finalist-limit',
+        type=int,
+        default=30,
+        help='When tiered (v3+all), expensive checks run only on top finalists.',
+    )
+    parser.add_argument(
+        '--finalist-recommendations',
+        default='strong,consider',
+        help='Comma-separated recommendations prioritized for expensive tier in v3.',
+    )
     parser.add_argument('--concurrency', type=int, default=12, help='Max concurrent jobs.')
     parser.add_argument('--max-retries', type=int, default=2, help='Retry attempts per job.')
     parser.add_argument('--retry-backoff-ms', type=int, default=300, help='Base retry backoff (ms).')
@@ -101,11 +150,73 @@ def parse_args() -> argparse.Namespace:
         default=10.0,
         help='Emit progress when this many seconds elapsed since last report.',
     )
+    parser.add_argument(
+        '--stage-events',
+        dest='stage_events',
+        action='store_true',
+        default=True,
+        help='Emit structured JSON stage events for monitoring/triage.',
+    )
+    parser.add_argument(
+        '--no-stage-events',
+        dest='stage_events',
+        action='store_false',
+    )
     return parser.parse_args()
 
 
 def parse_csv_set(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(',') if part.strip()]
+
+
+def resolve_feature_flags(args: argparse.Namespace) -> ValidationFeatureFlags:
+    pipeline_version = str(getattr(args, 'pipeline_version', 'v2') or 'v2').strip().lower()
+    if pipeline_version not in {'v2', 'v3'}:
+        pipeline_version = 'v2'
+    v3_enabled = bool(getattr(args, 'enable_v3', False) or pipeline_version == 'v3')
+    validation_tier = str(getattr(args, 'validation_tier', 'all') or 'all').strip().lower()
+    if validation_tier not in {'all', 'cheap', 'expensive'}:
+        validation_tier = 'all'
+    if not v3_enabled:
+        validation_tier = 'all'
+    return ValidationFeatureFlags(
+        pipeline_version=pipeline_version,
+        v3_enabled=v3_enabled,
+        validation_tier=validation_tier,
+    )
+
+
+def emit_stage_event(enabled: bool, stage: str, **fields: object) -> None:
+    if not enabled:
+        return
+    payload = {
+        'event': 'naming_validation_stage',
+        'timestamp': ndb.now_iso(),
+        'stage': stage,
+        **fields,
+    }
+    print(f'stage_event={json.dumps(payload, ensure_ascii=False)}', flush=True)
+
+
+def select_expensive_finalists(
+    rows: list[CandidateRow],
+    *,
+    recommendations: list[str],
+    limit: int,
+) -> list[CandidateRow]:
+    if not rows:
+        return []
+    rec_set = {item.strip().lower() for item in recommendations if item.strip()}
+    prioritized = [row for row in rows if row.current_recommendation.strip().lower() in rec_set]
+    fallback = [row for row in rows if row.current_recommendation.strip().lower() not in rec_set]
+
+    ranked = sorted(
+        prioritized,
+        key=lambda row: (-row.current_score, row.candidate_id),
+    )
+    if len(ranked) < limit:
+        ranked.extend(sorted(fallback, key=lambda row: (-row.current_score, row.candidate_id)))
+    return ranked[: max(1, limit)]
 
 
 def load_candidates(conn: sqlite3.Connection, states: list[str], limit: int) -> list[CandidateRow]:
@@ -114,7 +225,7 @@ def load_candidates(conn: sqlite3.Connection, states: list[str], limit: int) -> 
     placeholders = ','.join('?' for _ in states)
     rows = conn.execute(
         f"""
-        SELECT id, name_display, state
+        SELECT id, name_display, state, COALESCE(current_score, 0), COALESCE(current_recommendation, '')
         FROM candidates
         WHERE state IN ({placeholders})
         ORDER BY id ASC
@@ -122,7 +233,16 @@ def load_candidates(conn: sqlite3.Connection, states: list[str], limit: int) -> 
         """,
         (*states, limit),
     ).fetchall()
-    return [CandidateRow(candidate_id=int(row[0]), name_display=str(row[1]), state=str(row[2])) for row in rows]
+    return [
+        CandidateRow(
+            candidate_id=int(row[0]),
+            name_display=str(row[1]),
+            state=str(row[2]),
+            current_score=float(row[3] or 0.0),
+            current_recommendation=str(row[4] or ''),
+        )
+        for row in rows
+    ]
 
 
 def check_adversarial(name: str, args: argparse.Namespace) -> dict:
@@ -454,16 +574,36 @@ def check_social(name: str, args: argparse.Namespace) -> dict:
     }
 
 
-CHECK_RUNNERS: dict[str, Callable[[str, argparse.Namespace], dict]] = {
-    'adversarial': check_adversarial,
-    'psych': check_psych,
-    'descriptive': check_descriptive,
-    'domain': check_domain,
-    'web': check_web,
-    'app_store': check_app_store,
-    'package': check_package,
-    'social': check_social,
+CHECK_SPECS: dict[str, ValidationCheckSpec] = {
+    'adversarial': ValidationCheckSpec('adversarial', 'cheap', check_adversarial),
+    'psych': ValidationCheckSpec('psych', 'cheap', check_psych),
+    'descriptive': ValidationCheckSpec('descriptive', 'cheap', check_descriptive),
+    'domain': ValidationCheckSpec('domain', 'expensive', check_domain),
+    'web': ValidationCheckSpec('web', 'expensive', check_web),
+    'app_store': ValidationCheckSpec('app_store', 'expensive', check_app_store),
+    'package': ValidationCheckSpec('package', 'expensive', check_package),
+    'social': ValidationCheckSpec('social', 'expensive', check_social),
 }
+
+CHECK_RUNNERS: dict[str, ValidationRunner] = {check_type: spec.runner for check_type, spec in CHECK_SPECS.items()}
+
+
+def select_checks(args: argparse.Namespace) -> tuple[list[str], ValidationFeatureFlags]:
+    checks = parse_csv_set(args.checks)
+    flags = resolve_feature_flags(args)
+    unknown = [check for check in checks if check not in CHECK_SPECS]
+    if unknown:
+        raise ValueError(f'Unknown checks: {", ".join(unknown)}')
+
+    if flags.validation_tier == 'all':
+        return checks, flags
+
+    filtered: list[str] = []
+    for check in checks:
+        spec = CHECK_SPECS[check]
+        if spec.tier == flags.validation_tier:
+            filtered.append(check)
+    return filtered, flags
 
 
 async def run_single_job(
@@ -592,6 +732,41 @@ def summarize_run(conn: sqlite3.Connection, run_id: int) -> dict:
     return summary
 
 
+def summarize_results_by_tier(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    cheap_checks: list[str],
+    expensive_checks: list[str],
+) -> dict[str, dict[str, int]]:
+    rows = conn.execute(
+        """
+        SELECT check_type, status, COUNT(*)
+        FROM validation_results
+        WHERE run_id = ?
+        GROUP BY check_type, status
+        """,
+        (run_id,),
+    ).fetchall()
+
+    cheap_set = set(cheap_checks)
+    expensive_set = set(expensive_checks)
+    summary = {
+        'cheap': {'pass': 0, 'warn': 0, 'fail': 0, 'error': 0},
+        'expensive': {'pass': 0, 'warn': 0, 'fail': 0, 'error': 0},
+    }
+    for check_type, status, count in rows:
+        status_key = str(status).strip().lower()
+        if status_key not in {'pass', 'warn', 'fail', 'error'}:
+            status_key = 'error'
+        check = str(check_type)
+        if check in cheap_set:
+            summary['cheap'][status_key] += int(count)
+        elif check in expensive_set:
+            summary['expensive'][status_key] += int(count)
+    return summary
+
+
 def mark_candidates_checked(conn: sqlite3.Connection, rows: list[CandidateRow], actor: str) -> None:
     ts = ndb.now_iso()
     for row in rows:
@@ -600,10 +775,10 @@ def mark_candidates_checked(conn: sqlite3.Connection, rows: list[CandidateRow], 
         conn.execute(
             """
             UPDATE candidates
-            SET state = ?, state_updated_at = ?
+            SET state = ?, status = ?, state_updated_at = ?
             WHERE id = ?
             """,
-            ('checked', ts, row.candidate_id),
+            ('checked', 'checked', ts, row.candidate_id),
         )
         conn.execute(
             """
@@ -615,14 +790,21 @@ def mark_candidates_checked(conn: sqlite3.Connection, rows: list[CandidateRow], 
 
 
 async def orchestrate(args: argparse.Namespace) -> int:
+    started_monotonic = time.monotonic()
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    checks = parse_csv_set(args.checks)
-    unknown = [check for check in checks if check not in CHECK_RUNNERS]
-    if unknown:
-        print(f'Unknown checks: {", ".join(unknown)}')
+    try:
+        checks, flags = select_checks(args)
+    except ValueError as exc:
+        print(str(exc))
         return 1
+    if not checks:
+        print(
+            f'No checks selected after tier filter '
+            f'(pipeline={flags.pipeline_version} tier={flags.validation_tier}).'
+        )
+        return 0
 
     states = parse_csv_set(args.state_filter)
 
@@ -632,6 +814,51 @@ async def orchestrate(args: argparse.Namespace) -> int:
         if not candidates:
             print('No candidates found for selected state filter.')
             return 0
+
+        cheap_checks = [check for check in checks if CHECK_SPECS[check].tier == 'cheap']
+        expensive_checks = [check for check in checks if CHECK_SPECS[check].tier == 'expensive']
+        tiered_split = bool(
+            flags.v3_enabled
+            and flags.validation_tier == 'all'
+            and cheap_checks
+            and expensive_checks
+        )
+        finalist_recommendations = parse_csv_set(args.finalist_recommendations)
+        expensive_finalists = (
+            select_expensive_finalists(
+                candidates,
+                recommendations=finalist_recommendations,
+                limit=max(1, args.expensive_finalist_limit),
+            )
+            if tiered_split
+            else candidates
+        )
+        expensive_ids = {row.candidate_id for row in expensive_finalists}
+        job_plan: list[tuple[CandidateRow, str]] = []
+        if tiered_split:
+            for row in candidates:
+                for check_type in cheap_checks:
+                    job_plan.append((row, check_type))
+            for row in expensive_finalists:
+                for check_type in expensive_checks:
+                    job_plan.append((row, check_type))
+        else:
+            for row in candidates:
+                for check_type in checks:
+                    job_plan.append((row, check_type))
+
+        emit_stage_event(
+            args.stage_events,
+            'candidate_load',
+            candidate_count=len(candidates),
+            checks=checks,
+            cheap_checks=cheap_checks,
+            expensive_checks=expensive_checks,
+            tiered_split=tiered_split,
+            expensive_finalist_count=len(expensive_finalists),
+            expensive_finalist_ids=sorted(expensive_ids)[:20],
+            validation_tier=flags.validation_tier,
+        )
 
         run_id = ndb.create_run(
             conn,
@@ -646,31 +873,39 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'concurrency': args.concurrency,
                 'max_retries': args.max_retries,
                 'state_filter': states,
+                'pipeline_version': flags.pipeline_version,
+                'v3_enabled': flags.v3_enabled,
+                'validation_tier': flags.validation_tier,
+                'cheap_checks': cheap_checks,
+                'expensive_checks': expensive_checks,
+                'tiered_split': tiered_split,
+                'expensive_finalist_limit': int(args.expensive_finalist_limit),
+                'finalist_recommendations': finalist_recommendations,
+                'planned_job_count': len(job_plan),
             },
             summary={},
         )
         conn.commit()
 
         jobs: list[ValidationJobSpec] = []
-        for row in candidates:
-            for check_type in checks:
-                job_id = ndb.create_validation_job(
-                    conn,
+        for row, check_type in job_plan:
+            job_id = ndb.create_validation_job(
+                conn,
+                run_id=run_id,
+                candidate_id=row.candidate_id,
+                check_type=check_type,
+                status='pending',
+            )
+            jobs.append(
+                ValidationJobSpec(
+                    job_id=job_id,
                     run_id=run_id,
                     candidate_id=row.candidate_id,
+                    candidate_name=row.name_display,
+                    candidate_prev_state=row.state,
                     check_type=check_type,
-                    status='pending',
                 )
-                jobs.append(
-                    ValidationJobSpec(
-                        job_id=job_id,
-                        run_id=run_id,
-                        candidate_id=row.candidate_id,
-                        candidate_name=row.name_display,
-                        candidate_prev_state=row.state,
-                        check_type=check_type,
-                    )
-                )
+            )
         conn.commit()
 
         db_lock = asyncio.Lock()
@@ -717,7 +952,10 @@ async def orchestrate(args: argparse.Namespace) -> int:
         if args.progress:
             print(
                 f'async_validation_start run_id={run_id} candidates={len(candidates)} '
-                f'jobs={len(jobs)} checks={",".join(checks)}',
+                f'jobs={len(jobs)} checks={",".join(checks)} '
+                f'pipeline={flags.pipeline_version} v3_enabled={flags.v3_enabled} '
+                f'tier={flags.validation_tier} tiered_split={tiered_split} '
+                f'expensive_finalists={len(expensive_finalists)}',
                 flush=True,
             )
 
@@ -741,13 +979,58 @@ async def orchestrate(args: argparse.Namespace) -> int:
 
         mark_candidates_checked(conn, candidates, actor='naming_validate_async')
         summary = summarize_run(conn, run_id)
+        tier_summary = summarize_results_by_tier(
+            conn,
+            run_id=run_id,
+            cheap_checks=cheap_checks,
+            expensive_checks=expensive_checks,
+        )
+        emit_stage_event(
+            args.stage_events,
+            'cheap_gate',
+            result_counts=tier_summary['cheap'],
+            dropoff_count=tier_summary['cheap'].get('fail', 0) + tier_summary['cheap'].get('error', 0),
+            checks=cheap_checks,
+        )
+        emit_stage_event(
+            args.stage_events,
+            'expensive_gate',
+            result_counts=tier_summary['expensive'],
+            dropoff_count=tier_summary['expensive'].get('fail', 0) + tier_summary['expensive'].get('error', 0),
+            checks=expensive_checks,
+            finalist_count=len(expensive_finalists),
+        )
+        latency_ms = int((time.monotonic() - started_monotonic) * 1000)
+        emit_stage_event(
+            args.stage_events,
+            'complete',
+            run_id=run_id,
+            candidate_count=len(candidates),
+            planned_job_count=len(job_plan),
+            executed_job_count=len(jobs),
+            status_counts=summary.get('status_counts', {}),
+            tier_result_counts=tier_summary,
+            latency_ms=latency_ms,
+        )
         conn.execute(
             """
             UPDATE naming_runs
             SET status = ?, summary_json = ?
             WHERE id = ?
             """,
-            ('completed', json.dumps(summary, ensure_ascii=False), run_id),
+            (
+                'completed',
+                json.dumps(
+                    {
+                        **summary,
+                        'tier_result_counts': tier_summary,
+                        'tiered_split': tiered_split,
+                        'expensive_finalist_count': len(expensive_finalists),
+                    },
+                    ensure_ascii=False,
+                ),
+                run_id,
+            ),
         )
         conn.commit()
 
@@ -755,7 +1038,18 @@ async def orchestrate(args: argparse.Namespace) -> int:
         f'async_validation_complete run_id={run_id} candidates={len(candidates)} '
         f'jobs={len(jobs)} db={db_path}'
     )
-    print(f'run_summary={json.dumps(summary, ensure_ascii=False)}')
+    print(
+        'run_summary='
+        + json.dumps(
+            {
+                **summary,
+                'tier_result_counts': tier_summary,
+                'tiered_split': tiered_split,
+                'expensive_finalist_count': len(expensive_finalists),
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 

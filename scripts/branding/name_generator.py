@@ -27,7 +27,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Protocol
 from urllib import error, parse, request
 
 PROTECTED_MARKS = [
@@ -220,10 +220,55 @@ GLOBAL_EXPRESSIONS = [
     'brightbase',
 ]
 
+MORPH_PREFIX_DEFAULTS = [
+    'ver',
+    'clar',
+    'lumi',
+    'sol',
+    'civ',
+    'dom',
+    'ter',
+    'nor',
+    'equi',
+    'aman',
+    'nuru',
+    'imar',
+]
+
+MORPH_ROOT_DEFAULTS = [
+    'vera',
+    'claro',
+    'lumina',
+    'doma',
+    'terra',
+    'saldo',
+    'ratio',
+    'folio',
+    'nexa',
+    'safi',
+    'wazi',
+    'umoja',
+]
+
+MORPH_SUFFIX_DEFAULTS = [
+    'ra',
+    'ro',
+    'rio',
+    'via',
+    'na',
+    'la',
+    'ta',
+    'neo',
+    'lo',
+    'um',
+    'is',
+]
+
 DEFAULT_GENERATOR_FAMILIES = [
     'coined',
     'stem',
     'suggestive',
+    'morphology',
     'seed',
     'expression',
     'source_pool',
@@ -234,6 +279,7 @@ DEFAULT_FAMILY_QUOTAS = {
     'coined': 180,
     'stem': 140,
     'suggestive': 120,
+    'morphology': 200,
     'seed': 120,
     'expression': 80,
     'source_pool': 220,
@@ -333,8 +379,195 @@ class Candidate:
     gibberish_flags: str = ''
     false_friend_risk: int = 0
     false_friend_hits: str = ''
+    shortlist_selected: bool = False
+    shortlist_rank: int = 0
+    shortlist_bucket: str = ''
+    shortlist_reason: str = ''
     hard_fail: bool = False
     fail_reason: str = ''
+
+
+@dataclass(frozen=True)
+class PipelineFeatureFlags:
+    pipeline_version: str
+    v3_enabled: bool
+    use_engine_interfaces: bool
+    use_tiered_validation: bool
+
+
+@dataclass(frozen=True)
+class GenerationRequest:
+    scope: str
+    seeds: tuple[str, ...]
+    min_len: int
+    max_len: int
+    variation_profile: str
+    generator_families: tuple[str, ...]
+    family_quotas: dict[str, int]
+    source_atoms: list[dict]
+    max_per_prefix2: int
+    max_per_suffix2: int
+    max_per_shape: int
+    max_per_family: int
+
+
+@dataclass(frozen=True)
+class FilterRequest:
+    generated: list[GeneratedCandidate]
+    max_per_prefix2: int
+    max_per_suffix2: int
+    max_per_shape: int
+    max_per_family: int
+
+
+@dataclass(frozen=True)
+class ScoringRequest:
+    scope: str
+    generated_items: list[GeneratedCandidate]
+    similarity_fail_threshold: int
+    false_friend_fail_threshold: int
+    gibberish_fail_threshold: int
+    false_friend_rules: dict[str, tuple[int, str]]
+
+
+@dataclass(frozen=True)
+class ExternalValidationRequest:
+    candidates: list[Candidate]
+    scope: str
+    throttle_ms: int
+    gate: str
+    store_countries: list[str]
+    store_check: bool
+    web_check: bool
+    web_top: int
+    domain_check: bool
+    require_base_com: bool
+    fail_on_unknown: bool
+    package_check: bool
+    social_check: bool
+    adversarial_fail_threshold: int
+    show_progress: bool
+    degraded_network_mode: bool
+
+
+class CandidateGeneratorEngine(Protocol):
+    engine_id: str
+
+    def generate(self, request: GenerationRequest) -> list[GeneratedCandidate]:
+        """Generate candidates from the request."""
+
+
+class CandidateFilter(Protocol):
+    filter_id: str
+
+    def apply(self, request: FilterRequest) -> list[GeneratedCandidate]:
+        """Apply diversity constraints to generated candidates."""
+
+
+class CandidateScorerEngine(Protocol):
+    scorer_id: str
+
+    def score(self, request: ScoringRequest) -> list[Candidate]:
+        """Score and pre-screen generated candidates."""
+
+
+class CandidateValidatorEngine(Protocol):
+    validator_id: str
+
+    def validate(self, request: ExternalValidationRequest) -> None:
+        """Run expensive external checks and mutate candidates in place."""
+
+
+@dataclass(frozen=True)
+class PrefixSuffixShapeFilter:
+    filter_id: str = 'prefix_suffix_shape_v2'
+
+    def apply(self, request: FilterRequest) -> list[GeneratedCandidate]:
+        return diversity_filter(
+            request.generated,
+            max_per_prefix2=request.max_per_prefix2,
+            max_per_suffix2=request.max_per_suffix2,
+            max_per_shape=request.max_per_shape,
+            max_per_family=request.max_per_family,
+        )
+
+
+@dataclass(frozen=True)
+class FamilyRuleGeneratorEngine:
+    engine_id: str = 'family_rules_v2'
+    diversity_filter_engine: CandidateFilter | None = None
+
+    def generate(self, request: GenerationRequest) -> list[GeneratedCandidate]:
+        return generate_candidates(
+            request.scope,
+            request.seeds,
+            request.min_len,
+            request.max_len,
+            request.variation_profile,
+            list(request.generator_families),
+            request.family_quotas,
+            request.source_atoms,
+            request.max_per_prefix2,
+            request.max_per_suffix2,
+            request.max_per_shape,
+            request.max_per_family,
+            filter_engine=self.diversity_filter_engine,
+        )
+
+
+@dataclass(frozen=True)
+class RuleScorerEngine:
+    scorer_id: str = 'rule_scorer_v2'
+
+    def score(self, request: ScoringRequest) -> list[Candidate]:
+        return evaluate_candidates(
+            request.scope,
+            request.generated_items,
+            request.similarity_fail_threshold,
+            request.false_friend_fail_threshold,
+            request.gibberish_fail_threshold,
+            request.false_friend_rules,
+        )
+
+
+@dataclass(frozen=True)
+class ExternalCheckValidatorEngine:
+    validator_id: str = 'external_checks_v2'
+
+    def validate(self, request: ExternalValidationRequest) -> None:
+        run_external_checks(
+            request.candidates,
+            request.scope,
+            request.throttle_ms,
+            request.gate,
+            request.store_countries,
+            request.store_check,
+            request.web_check,
+            request.web_top,
+            request.domain_check,
+            request.require_base_com,
+            request.fail_on_unknown,
+            request.package_check,
+            request.social_check,
+            request.adversarial_fail_threshold,
+            request.show_progress,
+            request.degraded_network_mode,
+        )
+
+
+def resolve_feature_flags(args: argparse.Namespace) -> PipelineFeatureFlags:
+    pipeline_version = str(getattr(args, 'pipeline_version', 'v2') or 'v2').strip().lower()
+    if pipeline_version not in {'v2', 'v3'}:
+        pipeline_version = 'v2'
+    v3_enabled = bool(getattr(args, 'enable_v3', False) or pipeline_version == 'v3')
+    use_engine_interfaces = bool(getattr(args, 'use_engine_interfaces', False) or v3_enabled)
+    use_tiered_validation = bool(getattr(args, 'use_tiered_validation', False) or v3_enabled)
+    return PipelineFeatureFlags(
+        pipeline_version=pipeline_version,
+        v3_enabled=v3_enabled,
+        use_engine_interfaces=use_engine_interfaces,
+        use_tiered_validation=use_tiered_validation,
+    )
 
 
 def normalize_alpha(text: str) -> str:
@@ -364,6 +597,109 @@ def parse_family_quotas(raw: str) -> dict[str, int]:
             continue
         out[family] = max(0, quota)
     return out
+
+
+def emit_stage_event(enabled: bool, stage: str, **fields: object) -> None:
+    if not enabled:
+        return
+    payload = {
+        'event': 'naming_pipeline_stage',
+        'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
+        'stage': stage,
+        **fields,
+    }
+    print(f'stage_event={json.dumps(payload, ensure_ascii=False)}', flush=True)
+
+
+def extract_json_object(raw: str) -> str | None:
+    start = raw.find('{')
+    if start < 0:
+        return None
+    depth = 0
+    for idx in range(start, len(raw)):
+        ch = raw[idx]
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return raw[start : idx + 1]
+    return None
+
+
+def parse_llm_candidate_payload(raw_text: str) -> list[str]:
+    names: list[str] = []
+    cleaned = raw_text.strip()
+    if not cleaned:
+        return names
+
+    data: object
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        extracted = extract_json_object(cleaned)
+        if not extracted:
+            return names
+        try:
+            data = json.loads(extracted)
+        except json.JSONDecodeError:
+            return names
+
+    source: list[object] = []
+    if isinstance(data, dict):
+        if isinstance(data.get('candidates'), list):
+            source = list(data['candidates'])
+        elif isinstance(data.get('names'), list):
+            source = list(data['names'])
+    elif isinstance(data, list):
+        source = list(data)
+
+    for item in source:
+        if isinstance(item, str):
+            normalized = normalize_alpha(item)
+            if normalized:
+                names.append(normalized)
+            continue
+        if isinstance(item, dict):
+            raw_name = item.get('name') or item.get('candidate')
+            if isinstance(raw_name, str):
+                normalized = normalize_alpha(raw_name)
+                if normalized:
+                    names.append(normalized)
+    return names
+
+
+def load_llm_fallback_candidates(
+    *,
+    path: str,
+    max_attempts: int,
+    backoff_ms: int,
+    allow_text_fallback: bool,
+) -> list[str]:
+    p = Path(path)
+    if not path or not p.exists():
+        return []
+    raw = p.read_text(encoding='utf-8')
+    attempts = max(1, max_attempts)
+    for idx in range(attempts):
+        names = parse_llm_candidate_payload(raw)
+        if names:
+            return sorted(set(names))
+        if idx < attempts - 1:
+            time.sleep(max(0, backoff_ms) / 1000.0 * (idx + 1))
+
+    if not allow_text_fallback:
+        return []
+
+    fallback_names: list[str] = []
+    for line in raw.splitlines():
+        text = line.strip().strip('-*').strip()
+        if not text:
+            continue
+        normalized = normalize_alpha(text)
+        if 5 <= len(normalized) <= 12:
+            fallback_names.append(normalized)
+    return sorted(set(fallback_names))
 
 
 def load_source_atoms(
@@ -420,6 +756,66 @@ def merge_generated(
         )
 
 
+def source_atom_role(atom: dict) -> str:
+    metadata = atom.get('metadata') if isinstance(atom.get('metadata'), dict) else {}
+    metadata_role = normalize_alpha(str(metadata.get('morph_role') or metadata.get('role') or ''))
+    if metadata_role in {'prefix', 'suffix', 'root'}:
+        return metadata_role
+    category = normalize_alpha(str(atom.get('semantic_category') or ''))
+    if category.endswith('prefix'):
+        return 'prefix'
+    if category.endswith('suffix'):
+        return 'suffix'
+    if category in {'root', 'stem'}:
+        return 'root'
+    return ''
+
+
+def build_morphology_pools(
+    source_atoms: list[dict],
+    *,
+    variation_profile: str,
+) -> tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]:
+    prefixes: list[tuple[str, float]] = []
+    roots: list[tuple[str, float]] = []
+    suffixes: list[tuple[str, float]] = []
+
+    for atom in source_atoms:
+        token = normalize_alpha(str(atom.get('atom_display') or atom.get('atom_normalized') or ''))
+        if not token:
+            continue
+        conf = float(atom.get('confidence_weight') or 0.0)
+        role = source_atom_role(atom)
+        if role == 'prefix':
+            prefixes.append((token[:5], conf))
+        elif role == 'suffix':
+            suffixes.append((token[-5:], conf))
+        elif role == 'root':
+            roots.append((token, conf))
+        else:
+            roots.append((token, conf))
+            if len(token) >= 4:
+                prefixes.append((token[:4], conf * 0.7))
+                suffixes.append((token[-4:], conf * 0.7))
+
+    if not prefixes:
+        prefixes = [(token, 0.52) for token in MORPH_PREFIX_DEFAULTS]
+    if not roots:
+        roots = [(token, 0.56) for token in MORPH_ROOT_DEFAULTS]
+    if not suffixes:
+        suffixes = [(token, 0.52) for token in MORPH_SUFFIX_DEFAULTS]
+
+    if variation_profile != 'expanded':
+        prefixes = prefixes[:20]
+        roots = roots[:30]
+        suffixes = suffixes[:20]
+    else:
+        prefixes = prefixes[:42]
+        roots = roots[:64]
+        suffixes = suffixes[:42]
+    return prefixes, roots, suffixes
+
+
 def collect_family_candidates(
     *,
     scope: str,
@@ -449,6 +845,46 @@ def collect_family_candidates(
         for root, suf in itertools.product(roots, SHORT_SUFFIXES):
             merge_generated(generated, name=f'{root}{suf}', family='suggestive', lineage_atoms=[root, suf])
         families['suggestive'] = list(generated.values())
+
+    if 'morphology' in active:
+        generated = {}
+        prefixes, roots, suffixes = build_morphology_pools(
+            source_atoms,
+            variation_profile=variation_profile,
+        )
+        for pref, p_conf in prefixes:
+            for root, r_conf in roots:
+                blend = f'{pref[:4]}{root[-4:]}'
+                merge_generated(
+                    generated,
+                    name=blend,
+                    family='morphology',
+                    lineage_atoms=[pref, root],
+                    source_confidence=(p_conf + r_conf) / 2.0,
+                )
+        for root, r_conf in roots:
+            for suf, s_conf in suffixes:
+                composed = f'{root[:6]}{suf[-3:]}'
+                merge_generated(
+                    generated,
+                    name=composed,
+                    family='morphology',
+                    lineage_atoms=[root, suf],
+                    source_confidence=(r_conf + s_conf) / 2.0,
+                )
+        # Compound morphs produce broader phonetic spread with low token overlap.
+        for (left, l_conf), (right, r_conf) in itertools.product(roots[:36], roots[:36]):
+            if left == right:
+                continue
+            compound = f'{left[:4]}{right[:4]}'
+            merge_generated(
+                generated,
+                name=compound,
+                family='morphology',
+                lineage_atoms=[left, right],
+                source_confidence=(l_conf + r_conf) / 2.0,
+            )
+        families['morphology'] = list(generated.values())
 
     if 'seed' in active:
         generated = {}
@@ -594,6 +1030,7 @@ def generate_candidates(
     max_per_suffix2: int,
     max_per_shape: int,
     max_per_family: int,
+    filter_engine: CandidateFilter | None = None,
 ) -> list[GeneratedCandidate]:
     families = collect_family_candidates(
         scope=scope,
@@ -628,13 +1065,15 @@ def generate_candidates(
             )
             seen.add(n)
 
-    return diversity_filter(
-        selected,
+    filter_request = FilterRequest(
+        generated=selected,
         max_per_prefix2=max_per_prefix2,
         max_per_suffix2=max_per_suffix2,
         max_per_shape=max_per_shape,
         max_per_family=max_per_family,
     )
+    active_filter = filter_engine or PrefixSuffixShapeFilter()
+    return active_filter.apply(filter_request)
 
 
 def vowel_ratio(name: str) -> float:
@@ -1474,6 +1913,114 @@ def recommendation(c: Candidate, gate: str) -> str:
     return 'weak'
 
 
+def shortlist_bucket(name: str) -> str:
+    normalized = normalize_alpha(name)
+    if not normalized:
+        return 'x|x|x'
+    prefix = normalized[:2]
+    suffix = normalized[-2:]
+    shape = pattern_shape(normalized)[:6]
+    return f'{prefix}|{suffix}|{shape}'
+
+
+def phonetic_fingerprint(name: str) -> str:
+    normalized = normalize_alpha(name)
+    if not normalized:
+        return ''
+    folded = normalized
+    replacements = (
+        ('sch', 's'),
+        ('ph', 'f'),
+        ('ck', 'k'),
+        ('qu', 'k'),
+        ('x', 'ks'),
+        ('z', 's'),
+    )
+    for src, dst in replacements:
+        folded = folded.replace(src, dst)
+    first = folded[0]
+    tail = re.sub(r'[aeiouy]', '', folded[1:])
+    collapsed = re.sub(r'(.)\1+', r'\1', tail)
+    return (first + collapsed)[:6]
+
+
+def rerank_with_diversity(
+    candidates: list[Candidate],
+    *,
+    gate: str,
+    shortlist_size: int,
+    max_per_bucket: int,
+    max_per_prefix3: int,
+    max_per_phonetic: int,
+) -> list[Candidate]:
+    if shortlist_size <= 0 or not candidates:
+        return candidates
+
+    bucket_counts: Counter[str] = Counter()
+    prefix_counts: Counter[str] = Counter()
+    phonetic_counts: Counter[str] = Counter()
+    selected: list[Candidate] = []
+    deferred: list[Candidate] = []
+
+    for candidate in candidates:
+        if candidate.hard_fail:
+            deferred.append(candidate)
+            candidate.shortlist_selected = False
+            candidate.shortlist_rank = 0
+            candidate.shortlist_reason = 'hard_fail'
+            continue
+
+        bucket = shortlist_bucket(candidate.name)
+        prefix3 = candidate.name[:3]
+        phonetic_key = phonetic_fingerprint(candidate.name)
+        allow = (
+            bucket_counts[bucket] < max_per_bucket
+            and prefix_counts[prefix3] < max_per_prefix3
+            and phonetic_counts[phonetic_key] < max_per_phonetic
+            and len(selected) < shortlist_size
+        )
+        candidate.shortlist_bucket = bucket
+        if allow:
+            bucket_counts[bucket] += 1
+            prefix_counts[prefix3] += 1
+            phonetic_counts[phonetic_key] += 1
+            candidate.shortlist_selected = True
+            candidate.shortlist_reason = (
+                f'diversity_accept bucket={bucket} bucket_count={bucket_counts[bucket]} '
+                f'prefix3={prefix3} prefix_count={prefix_counts[prefix3]} '
+                f'phonetic={phonetic_key} phonetic_count={phonetic_counts[phonetic_key]}'
+            )
+            selected.append(candidate)
+        else:
+            candidate.shortlist_selected = False
+            if len(selected) >= shortlist_size:
+                candidate.shortlist_reason = 'shortlist_capacity_reached'
+            elif bucket_counts[bucket] >= max_per_bucket:
+                candidate.shortlist_reason = f'bucket_quota_reached:{bucket}'
+            elif prefix_counts[prefix3] >= max_per_prefix3:
+                candidate.shortlist_reason = f'prefix3_quota_reached:{prefix3}'
+            elif phonetic_counts[phonetic_key] >= max_per_phonetic:
+                candidate.shortlist_reason = f'phonetic_quota_reached:{phonetic_key}'
+            else:
+                candidate.shortlist_reason = 'deferred'
+            deferred.append(candidate)
+
+    for idx, candidate in enumerate(selected, start=1):
+        candidate.shortlist_rank = idx
+
+    ordered_deferred = sorted(
+        deferred,
+        key=lambda c: (
+            c.hard_fail,
+            {'strong': 0, 'consider': 1, 'weak': 2, 'reject': 3}[recommendation(c, gate)],
+            c.challenge_risk,
+            -c.total_score,
+            c.name,
+        ),
+    )
+    return selected + ordered_deferred
+
+
 def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('w', newline='', encoding='utf-8') as f:
@@ -1527,6 +2074,10 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                 'gibberish_flags',
                 'false_friend_risk',
                 'false_friend_hits',
+                'shortlist_selected',
+                'shortlist_rank',
+                'shortlist_bucket',
+                'shortlist_reason',
                 'trademark_dpma_url',
                 'trademark_swissreg_url',
                 'trademark_tmview_url',
@@ -1586,6 +2137,10 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                     c.gibberish_flags,
                     c.false_friend_risk,
                     c.false_friend_hits,
+                    c.shortlist_selected,
+                    c.shortlist_rank,
+                    c.shortlist_bucket,
+                    c.shortlist_reason,
                     c.trademark_dpma_url,
                     c.trademark_swissreg_url,
                     c.trademark_tmview_url,
@@ -1629,10 +2184,11 @@ def append_run_history(
     for c in candidates:
         counts[recommendation(c, gate)] += 1
         family_counts[c.generator_family] += 1
+    shortlist_selected = sum(1 for c in candidates if c.shortlist_selected)
     top = []
     for c in candidates:
         rec = recommendation(c, gate)
-        if rec in {'strong', 'consider'} and not c.hard_fail:
+        if c.shortlist_selected:
             top.append(
                 {
                     'name': c.name,
@@ -1641,14 +2197,21 @@ def append_run_history(
                     'challenge_risk': c.challenge_risk,
                     'adversarial_risk': c.adversarial_risk,
                     'fail_reason': c.fail_reason,
+                    'shortlist_rank': c.shortlist_rank,
+                    'shortlist_bucket': c.shortlist_bucket,
                 }
             )
         if len(top) >= 12:
             break
+    flags = resolve_feature_flags(args)
     entry = {
         'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
         'scope': scope,
         'gate': gate,
+        'pipeline_version': flags.pipeline_version,
+        'v3_enabled': flags.v3_enabled,
+        'use_engine_interfaces': flags.use_engine_interfaces,
+        'use_tiered_validation': flags.use_tiered_validation,
         'variation_profile': args.variation_profile,
         'generator_families': parse_csv_set(args.generator_families),
         'family_quotas': parse_family_quotas(args.family_quotas),
@@ -1660,6 +2223,10 @@ def append_run_history(
         'false_friend_lexicon': args.false_friend_lexicon,
         'false_friend_fail_threshold': int(args.false_friend_fail_threshold),
         'gibberish_fail_threshold': int(args.gibberish_fail_threshold),
+        'llm_input': args.llm_input,
+        'llm_parse_attempts': int(args.llm_parse_attempts),
+        'llm_parse_backoff_ms': int(args.llm_parse_backoff_ms),
+        'llm_text_fallback': bool(args.llm_text_fallback),
         'degraded_network_mode': bool(args.degraded_network_mode),
         'store_check': bool(args.store_check),
         'domain_check': bool(args.domain_check),
@@ -1668,7 +2235,11 @@ def append_run_history(
         'social_check': bool(args.social_check),
         'pool_size': int(args.pool_size),
         'check_limit': int(args.check_limit),
+        'shortlist_size': int(args.shortlist_size),
+        'shortlist_max_bucket': int(args.shortlist_max_bucket),
+        'shortlist_max_prefix3': int(args.shortlist_max_prefix3),
         'candidate_count': len(candidates),
+        'shortlist_selected_count': shortlist_selected,
         'recommendation_counts': counts,
         'generator_family_counts': dict(sorted(family_counts.items(), key=lambda item: (-item[1], item[0]))),
         'top_candidates': top,
@@ -1689,6 +2260,7 @@ def persist_to_db(
     # Keep import local to avoid dependency coupling for users who only want CSV/JSON output.
     import naming_db as ndb
 
+    flags = resolve_feature_flags(args)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         ndb.ensure_schema(conn)
@@ -1719,12 +2291,25 @@ def persist_to_db(
                 'false_friend_lexicon': args.false_friend_lexicon,
                 'false_friend_fail_threshold': int(args.false_friend_fail_threshold),
                 'gibberish_fail_threshold': int(args.gibberish_fail_threshold),
+                'llm_input': args.llm_input,
+                'llm_parse_attempts': int(args.llm_parse_attempts),
+                'llm_parse_backoff_ms': int(args.llm_parse_backoff_ms),
+                'llm_text_fallback': bool(args.llm_text_fallback),
+                'pipeline_version': flags.pipeline_version,
+                'v3_enabled': flags.v3_enabled,
+                'use_engine_interfaces': flags.use_engine_interfaces,
+                'use_tiered_validation': flags.use_tiered_validation,
+                'shortlist_size': int(args.shortlist_size),
+                'shortlist_max_bucket': int(args.shortlist_max_bucket),
+                'shortlist_max_prefix3': int(args.shortlist_max_prefix3),
+                'stage_events': bool(args.stage_events),
             },
             summary={
                 'candidate_count': len(candidates),
                 'strong_or_consider_count': sum(
                     1 for c in candidates if recommendation(c, gate) in {'strong', 'consider'} and not c.hard_fail
                 ),
+                'shortlist_selected_count': sum(1 for c in candidates if c.shortlist_selected),
             },
         )
 
@@ -1735,6 +2320,11 @@ def persist_to_db(
                 total_score=float(c.total_score),
                 risk_score=float(c.challenge_risk),
                 recommendation=recommendation(c, gate),
+                quality_score=float(c.quality_score),
+                engine_id=str(c.generator_family or ''),
+                parent_ids=str(c.lineage_atoms or ''),
+                status='rejected' if c.hard_fail else 'scored',
+                rejection_reason=str(c.fail_reason or ''),
             )
             ndb.add_source(
                 conn,
@@ -1783,12 +2373,43 @@ def persist_to_db(
                 hard_fail=bool(c.hard_fail),
                 reason=str(c.fail_reason or ''),
             )
+            ndb.add_shortlist_decision(
+                conn,
+                candidate_id=candidate_id,
+                run_id=run_id,
+                selected=bool(c.shortlist_selected),
+                shortlist_rank=int(c.shortlist_rank),
+                bucket_key=str(c.shortlist_bucket or ''),
+                reason=str(c.shortlist_reason or ''),
+                score=float(c.total_score),
+            )
         conn.commit()
     return run_id, len(candidates)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Generate and screen app name candidates.')
+    parser.add_argument(
+        '--pipeline-version',
+        choices=['v2', 'v3'],
+        default='v2',
+        help='Pipeline contract version toggle. Default v2 keeps current behavior.',
+    )
+    parser.add_argument(
+        '--enable-v3',
+        action='store_true',
+        help='Feature flag to enable v3 pipeline path while preserving existing defaults when off.',
+    )
+    parser.add_argument(
+        '--use-engine-interfaces',
+        action='store_true',
+        help='Force engine/scorer/filter/validator interface adapters (v3 contract surface).',
+    )
+    parser.add_argument(
+        '--use-tiered-validation',
+        action='store_true',
+        help='Enable tiered validation signaling for downstream validators.',
+    )
     parser.add_argument('--scope', choices=['dach', 'eu', 'global'], default='eu')
     parser.add_argument('--gate', choices=['balanced', 'strict'], default='strict')
     parser.add_argument('--seeds', default='', help='Comma-separated seed names/roots.')
@@ -1815,7 +2436,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--generator-families',
         default=','.join(DEFAULT_GENERATOR_FAMILIES),
-        help='Comma-separated generator families (coined,stem,suggestive,seed,expression,source_pool,blend).',
+        help='Comma-separated generator families (coined,stem,suggestive,morphology,seed,expression,source_pool,blend).',
     )
     parser.add_argument(
         '--family-quotas',
@@ -1891,6 +2512,34 @@ def parse_args() -> argparse.Namespace:
         help='Hard-fail threshold for gibberish penalty.',
     )
     parser.add_argument(
+        '--llm-input',
+        default='',
+        help='Optional LLM output file (.json/.txt) used as fallback explicit candidates.',
+    )
+    parser.add_argument(
+        '--llm-parse-attempts',
+        type=int,
+        default=3,
+        help='Parse attempts for --llm-input payload before fallback.',
+    )
+    parser.add_argument(
+        '--llm-parse-backoff-ms',
+        type=int,
+        default=150,
+        help='Backoff milliseconds for repeated LLM payload parsing attempts.',
+    )
+    parser.add_argument(
+        '--llm-text-fallback',
+        action='store_true',
+        default=True,
+        help='Allow line-based fallback parsing when LLM JSON is malformed.',
+    )
+    parser.add_argument(
+        '--no-llm-text-fallback',
+        dest='llm_text_fallback',
+        action='store_false',
+    )
+    parser.add_argument(
         '--store-countries',
         default='de,ch,us,gb,fr,it',
         help='Comma-separated country codes for App Store exact-match checks.',
@@ -1929,6 +2578,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--output', default='', help='Output CSV path.')
     parser.add_argument('--json-output', default='', help='Optional machine-readable JSON output path.')
     parser.add_argument(
+        '--shortlist-size',
+        type=int,
+        default=50,
+        help='Size of diversity-aware shortlist selection before remaining candidates.',
+    )
+    parser.add_argument(
+        '--shortlist-max-bucket',
+        type=int,
+        default=2,
+        help='Max shortlist entries per phonetic/string bucket.',
+    )
+    parser.add_argument(
+        '--shortlist-max-prefix3',
+        type=int,
+        default=2,
+        help='Max shortlist entries sharing same first 3 letters.',
+    )
+    parser.add_argument(
+        '--shortlist-max-phonetic',
+        type=int,
+        default=1,
+        help='Max shortlist entries sharing same phonetic fingerprint.',
+    )
+    parser.add_argument(
+        '--stage-events',
+        dest='stage_events',
+        action='store_true',
+        default=True,
+        help='Emit structured JSON stage events for observability.',
+    )
+    parser.add_argument(
+        '--no-stage-events',
+        dest='stage_events',
+        action='store_false',
+    )
+    parser.add_argument(
         '--persist-db',
         action='store_true',
         help='Persist scored candidates into SQLite candidate lake.',
@@ -1948,13 +2633,38 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    flags = resolve_feature_flags(args)
+    run_started = time.monotonic()
+
     seeds = [s.strip() for s in args.seeds.split(',') if s.strip()]
     explicit_candidates = [normalize_alpha(s.strip()) for s in args.candidates.split(',') if s.strip()]
     explicit_candidates = [c for c in explicit_candidates if c]
+
+    llm_fallback_candidates = load_llm_fallback_candidates(
+        path=args.llm_input,
+        max_attempts=max(1, args.llm_parse_attempts),
+        backoff_ms=max(0, args.llm_parse_backoff_ms),
+        allow_text_fallback=bool(args.llm_text_fallback),
+    )
+    if llm_fallback_candidates and args.progress:
+        print(
+            f'llm_fallback_loaded count={len(llm_fallback_candidates)} '
+            f'input={args.llm_input}'
+        )
+    if llm_fallback_candidates:
+        explicit_candidates = sorted(set(explicit_candidates + llm_fallback_candidates))
+    emit_stage_event(
+        args.stage_events,
+        'llm_fallback',
+        llm_input=bool(args.llm_input),
+        fallback_count=len(llm_fallback_candidates),
+    )
+
     active_families = parse_csv_set(args.generator_families) or list(DEFAULT_GENERATOR_FAMILIES)
     family_quotas = parse_family_quotas(args.family_quotas)
     source_languages = parse_csv_set(args.source_languages)
     source_categories = parse_csv_set(args.source_categories)
+    source_load_started = time.monotonic()
     source_atoms = load_source_atoms(
         db_path=args.source_pool_db,
         limit=max(1, args.source_pool_limit),
@@ -1962,6 +2672,15 @@ def main() -> int:
         languages=source_languages,
         categories=source_categories,
     )
+    source_load_latency_ms = int((time.monotonic() - source_load_started) * 1000)
+    emit_stage_event(
+        args.stage_events,
+        'source_pool_load',
+        source_atoms=len(source_atoms),
+        latency_ms=source_load_latency_ms,
+        source_db=args.source_pool_db,
+    )
+
     store_countries = [s.strip().lower() for s in args.store_countries.split(',') if re.fullmatch(r'[a-z]{2}', s.strip().lower())]
     if not store_countries:
         store_countries = ['de', 'ch', 'us']
@@ -1976,53 +2695,116 @@ def main() -> int:
         for name in explicit_candidates
     ]
 
+    generation_started = time.monotonic()
     if args.only_candidates:
         generated_items = explicit_generated
     else:
-        generated_items = generate_candidates(
-            args.scope,
-            seeds,
-            args.min_len,
-            args.max_len,
-            args.variation_profile,
-            active_families,
-            family_quotas,
-            source_atoms,
-            max(1, args.max_per_prefix2),
-            max(1, args.max_per_suffix2),
-            max(1, args.max_per_shape),
-            max(1, args.max_per_family),
-        )
+        if flags.use_engine_interfaces:
+            generation_engine: CandidateGeneratorEngine = FamilyRuleGeneratorEngine(
+                diversity_filter_engine=PrefixSuffixShapeFilter()
+            )
+            generated_items = generation_engine.generate(
+                GenerationRequest(
+                    scope=args.scope,
+                    seeds=tuple(seeds),
+                    min_len=args.min_len,
+                    max_len=args.max_len,
+                    variation_profile=args.variation_profile,
+                    generator_families=tuple(active_families),
+                    family_quotas=family_quotas,
+                    source_atoms=source_atoms,
+                    max_per_prefix2=max(1, args.max_per_prefix2),
+                    max_per_suffix2=max(1, args.max_per_suffix2),
+                    max_per_shape=max(1, args.max_per_shape),
+                    max_per_family=max(1, args.max_per_family),
+                )
+            )
+        else:
+            generated_items = generate_candidates(
+                args.scope,
+                seeds,
+                args.min_len,
+                args.max_len,
+                args.variation_profile,
+                active_families,
+                family_quotas,
+                source_atoms,
+                max(1, args.max_per_prefix2),
+                max(1, args.max_per_suffix2),
+                max(1, args.max_per_shape),
+                max(1, args.max_per_family),
+            )
         by_name = {item.name: item for item in generated_items}
         for item in explicit_generated:
             by_name[item.name] = item
         generated_items = sorted(by_name.values(), key=lambda item: item.name)
+    generation_latency_ms = int((time.monotonic() - generation_started) * 1000)
+    family_generation_counts = dict(sorted(Counter(item.generator_family for item in generated_items).items()))
+    emit_stage_event(
+        args.stage_events,
+        'generation',
+        generated_count=len(generated_items),
+        family_counts=family_generation_counts,
+        latency_ms=generation_latency_ms,
+    )
 
     if args.progress:
         print(
             f'generation_config families={",".join(active_families)} '
-            f'source_atoms={len(source_atoms)} source_db={args.source_pool_db}'
+            f'source_atoms={len(source_atoms)} source_db={args.source_pool_db} '
+            f'pipeline={flags.pipeline_version} v3_enabled={flags.v3_enabled} '
+            f'engine_interfaces={flags.use_engine_interfaces}'
         )
 
     if not generated_items:
         print('No candidates to evaluate. Provide --candidates and/or generation inputs.')
         return 1
 
-    evaluated = evaluate_candidates(
-        args.scope,
-        generated_items,
-        similarity_fail_threshold,
-        max(1, args.false_friend_fail_threshold),
-        max(1, args.gibberish_fail_threshold),
-        false_friend_rules,
-    )
+    scoring_started = time.monotonic()
+    if flags.use_engine_interfaces:
+        scorer_engine: CandidateScorerEngine = RuleScorerEngine()
+        evaluated = scorer_engine.score(
+            ScoringRequest(
+                scope=args.scope,
+                generated_items=generated_items,
+                similarity_fail_threshold=similarity_fail_threshold,
+                false_friend_fail_threshold=max(1, args.false_friend_fail_threshold),
+                gibberish_fail_threshold=max(1, args.gibberish_fail_threshold),
+                false_friend_rules=false_friend_rules,
+            )
+        )
+    else:
+        evaluated = evaluate_candidates(
+            args.scope,
+            generated_items,
+            similarity_fail_threshold,
+            max(1, args.false_friend_fail_threshold),
+            max(1, args.gibberish_fail_threshold),
+            false_friend_rules,
+        )
+    scoring_latency_ms = int((time.monotonic() - scoring_started) * 1000)
 
-    ranked = sorted(
+    ranked_all = sorted(
         evaluated,
         key=lambda c: (c.hard_fail, -c.total_score, c.challenge_risk, -c.quality_score, c.name),
     )
+    cheap_pass = [candidate for candidate in ranked_all if not candidate.hard_fail]
+    cheap_fail = len(ranked_all) - len(cheap_pass)
+    emit_stage_event(
+        args.stage_events,
+        'cheap_gate',
+        evaluated_count=len(ranked_all),
+        cheap_pass_count=len(cheap_pass),
+        cheap_fail_count=cheap_fail,
+        dropoff_count=cheap_fail,
+        latency_ms=scoring_latency_ms,
+    )
 
-    pool = ranked[: max(1, args.pool_size)]
+    if flags.use_tiered_validation:
+        pool_source = cheap_pass
+    else:
+        pool_source = ranked_all
+    pool = pool_source[: max(1, args.pool_size)]
     to_check = pool[: max(1, args.check_limit)]
 
     if explicit_candidates:
@@ -2030,28 +2812,80 @@ def main() -> int:
         in_check = {c.name for c in to_check}
         for name in explicit_candidates:
             c = by_name.get(name)
-            if c and c.name not in in_check:
+            if not c or c.name in in_check:
+                continue
+            if flags.use_tiered_validation and c.hard_fail:
+                continue
+            if c:
                 to_check.append(c)
                 in_check.add(c.name)
-    run_external_checks(
-        to_check,
-        args.scope,
-        args.throttle_ms,
-        args.gate,
-        store_countries,
-        args.store_check,
-        args.web_check,
-        args.web_top,
-        args.domain_check,
-        require_base_com,
-        fail_on_unknown,
-        args.package_check,
-        args.social_check,
-        max(0, min(100, args.adversarial_fail_threshold)),
-        args.progress,
-        args.degraded_network_mode,
+    emit_stage_event(
+        args.stage_events,
+        'finalist_selection',
+        tiered_validation=flags.use_tiered_validation,
+        pool_size=len(pool),
+        finalist_count=len(to_check),
+        requested_pool_size=max(1, args.pool_size),
+        requested_check_limit=max(1, args.check_limit),
     )
-    final_ranked = sorted(
+
+    external_started = time.monotonic()
+    if to_check:
+        if flags.use_engine_interfaces:
+            validator_engine: CandidateValidatorEngine = ExternalCheckValidatorEngine()
+            validator_engine.validate(
+                ExternalValidationRequest(
+                    candidates=to_check,
+                    scope=args.scope,
+                    throttle_ms=args.throttle_ms,
+                    gate=args.gate,
+                    store_countries=store_countries,
+                    store_check=args.store_check,
+                    web_check=args.web_check,
+                    web_top=args.web_top,
+                    domain_check=args.domain_check,
+                    require_base_com=require_base_com,
+                    fail_on_unknown=fail_on_unknown,
+                    package_check=args.package_check,
+                    social_check=args.social_check,
+                    adversarial_fail_threshold=max(0, min(100, args.adversarial_fail_threshold)),
+                    show_progress=args.progress,
+                    degraded_network_mode=args.degraded_network_mode,
+                )
+            )
+        else:
+            run_external_checks(
+                to_check,
+                args.scope,
+                args.throttle_ms,
+                args.gate,
+                store_countries,
+                args.store_check,
+                args.web_check,
+                args.web_top,
+                args.domain_check,
+                require_base_com,
+                fail_on_unknown,
+                args.package_check,
+                args.social_check,
+                max(0, min(100, args.adversarial_fail_threshold)),
+                args.progress,
+                args.degraded_network_mode,
+            )
+    external_latency_ms = int((time.monotonic() - external_started) * 1000)
+    external_pass = sum(1 for candidate in to_check if not candidate.hard_fail)
+    external_fail = len(to_check) - external_pass
+    emit_stage_event(
+        args.stage_events,
+        'expensive_gate',
+        finalists_checked=len(to_check),
+        pass_count=external_pass,
+        fail_count=external_fail,
+        dropoff_count=external_fail,
+        latency_ms=external_latency_ms,
+    )
+
+    ranked_checked = sorted(
         to_check,
         key=lambda c: (
             c.hard_fail,
@@ -2060,6 +2894,25 @@ def main() -> int:
             -c.total_score,
             -c.source_confidence,
             c.name,
+        ),
+    )
+    final_ranked = rerank_with_diversity(
+        ranked_checked,
+        gate=args.gate,
+        shortlist_size=max(1, args.shortlist_size),
+        max_per_bucket=max(1, args.shortlist_max_bucket),
+        max_per_prefix3=max(1, args.shortlist_max_prefix3),
+        max_per_phonetic=max(1, args.shortlist_max_phonetic),
+    )
+    shortlist_selected = sum(1 for candidate in final_ranked if candidate.shortlist_selected)
+    emit_stage_event(
+        args.stage_events,
+        'shortlist',
+        shortlisted_count=shortlist_selected,
+        shortlisted_quota=max(1, args.shortlist_size),
+        shortlisted_buckets=len({c.shortlist_bucket for c in final_ranked if c.shortlist_selected}),
+        shortlisted_phonetics=len(
+            {phonetic_fingerprint(c.name) for c in final_ranked if c.shortlist_selected}
         ),
     )
 
@@ -2084,14 +2937,25 @@ def main() -> int:
     if args.run_log:
         append_run_history(Path(args.run_log), args.scope, args.gate, args, final_ranked)
 
+    total_latency_ms = int((time.monotonic() - run_started) * 1000)
+    emit_stage_event(
+        args.stage_events,
+        'complete',
+        candidate_count=len(final_ranked),
+        shortlist_count=shortlist_selected,
+        latency_ms=total_latency_ms,
+    )
+
     print(f'Wrote {len(final_ranked)} screened candidates: {output_file}')
     print('Top candidates:')
     shown = 0
     for c in final_ranked:
         rec = recommendation(c, args.gate)
         if rec in {'strong', 'consider'} and not c.hard_fail:
+            shortlist_label = f'#{c.shortlist_rank}' if c.shortlist_selected else '-'
             print(
-                f'- {c.name:12s} | fam={c.generator_family:10s} | rec={rec:8s} | total={c.total_score:3d} | '
+                f'- {c.name:12s} | fam={c.generator_family:10s} | shortlist={shortlist_label:3s} | '
+                f'rec={rec:8s} | total={c.total_score:3d} | '
                 f'risk={c.challenge_risk:3d} | domains(com/de/ch)='
                 f'{c.com_available}/{c.de_available}/{c.ch_available} | '
                 f'fallback={c.com_fallback_domain or "-"} | '
