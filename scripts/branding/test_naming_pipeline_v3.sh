@@ -31,7 +31,7 @@ if [[ "$MODE" == "smoke" ]]; then
     --no-progress
   )
   VALIDATOR_ARGS=(
-    --checks=adversarial,psych,descriptive
+    --checks=adversarial,psych,descriptive,tm_cheap
     --validation-tier=cheap
     --candidate-limit=40
     --concurrency=6
@@ -46,7 +46,7 @@ else
   CHECK_LIMIT=140
   GENERATOR_EXTRA_FLAGS=()
   VALIDATOR_ARGS=(
-    --checks=adversarial,psych,descriptive,domain,web,app_store,package,social
+    --checks=adversarial,psych,descriptive,tm_cheap,domain,web,app_store,package,social
     --validation-tier=all
     --candidate-limit=100
     --concurrency=10
@@ -111,6 +111,7 @@ python3 "$ROOT_DIR/scripts/branding/name_generator.py" \
   --shortlist-size=50 \
   --shortlist-max-bucket=2 \
   --shortlist-max-prefix3=2 \
+  --shortlist-max-phonetic=1 \
   --persist-db \
   --db="$DB_PATH" \
   --output="$CSV_OUT" \
@@ -119,17 +120,42 @@ python3 "$ROOT_DIR/scripts/branding/name_generator.py" \
   "${GENERATOR_EXTRA_FLAGS[@]}"
 
 echo "[6/8] Running async validator..."
-python3 "$ROOT_DIR/scripts/branding/naming_validate_async.py" \
-  --db "$DB_PATH" \
-  --pipeline-version=v3 \
-  --enable-v3 \
-  --state-filter=new,checked \
-  --scope=global \
-  --gate=balanced \
-  --expensive-finalist-limit=25 \
-  --finalist-recommendations=strong,consider \
-  "${VALIDATOR_ARGS[@]}" \
-  > "$VALIDATOR_LOG"
+if [[ "$MODE" == "smoke" ]]; then
+  python3 "$ROOT_DIR/scripts/branding/naming_validate_async.py" \
+    --db "$DB_PATH" \
+    --pipeline-version=v3 \
+    --enable-v3 \
+    --state-filter=new,checked \
+    --scope=global \
+    --gate=balanced \
+    --expensive-finalist-limit=25 \
+    --finalist-recommendations=strong,consider \
+    "${VALIDATOR_ARGS[@]}" \
+    > "$VALIDATOR_LOG"
+  python3 "$ROOT_DIR/scripts/branding/naming_validate_async.py" \
+    --db "$DB_PATH" \
+    --pipeline-version=v3 \
+    --enable-v3 \
+    --state-filter=new,checked \
+    --scope=global \
+    --gate=balanced \
+    --expensive-finalist-limit=25 \
+    --finalist-recommendations=strong,consider \
+    "${VALIDATOR_ARGS[@]}" \
+    >> "$VALIDATOR_LOG"
+else
+  python3 "$ROOT_DIR/scripts/branding/naming_validate_async.py" \
+    --db "$DB_PATH" \
+    --pipeline-version=v3 \
+    --enable-v3 \
+    --state-filter=new,checked \
+    --scope=global \
+    --gate=balanced \
+    --expensive-finalist-limit=25 \
+    --finalist-recommendations=strong,consider \
+    "${VALIDATOR_ARGS[@]}" \
+    > "$VALIDATOR_LOG"
+fi
 
 echo "[7/8] Contract assertion (deterministic smoke gate)..."
 python3 "$ROOT_DIR/scripts/branding/naming_db.py" \
@@ -162,14 +188,19 @@ if run_log.exists():
 
 if validator_log.exists():
     text = validator_log.read_text(encoding="utf-8")
-    match = re.search(r"run_summary=(\{.*\})", text)
-    if match:
-        payload = json.loads(match.group(1))
+    matches = [
+        line[len("run_summary="):]
+        for line in text.splitlines()
+        if line.startswith("run_summary=")
+    ]
+    if matches:
+        payload = json.loads(matches[-1])
         print(
             "v3_validator_report "
             f"total_jobs={payload.get('total_jobs')} "
             f"status_counts={payload.get('status_counts', {})} "
-            f"tier_result_counts={payload.get('tier_result_counts', {})}"
+            f"tier_result_counts={payload.get('tier_result_counts', {})} "
+            f"cache_summary={payload.get('cache_summary', {})}"
         )
 PY
 

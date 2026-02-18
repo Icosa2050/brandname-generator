@@ -2238,6 +2238,7 @@ def append_run_history(
         'shortlist_size': int(args.shortlist_size),
         'shortlist_max_bucket': int(args.shortlist_max_bucket),
         'shortlist_max_prefix3': int(args.shortlist_max_prefix3),
+        'shortlist_max_phonetic': int(args.shortlist_max_phonetic),
         'candidate_count': len(candidates),
         'shortlist_selected_count': shortlist_selected,
         'recommendation_counts': counts,
@@ -2302,6 +2303,7 @@ def persist_to_db(
                 'shortlist_size': int(args.shortlist_size),
                 'shortlist_max_bucket': int(args.shortlist_max_bucket),
                 'shortlist_max_prefix3': int(args.shortlist_max_prefix3),
+                'shortlist_max_phonetic': int(args.shortlist_max_phonetic),
                 'stage_events': bool(args.stage_events),
             },
             summary={

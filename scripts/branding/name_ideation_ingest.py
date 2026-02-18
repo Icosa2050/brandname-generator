@@ -474,6 +474,25 @@ def dedupe_candidates(candidates: list[IdeationCandidate]) -> list[IdeationCandi
     return sorted(by_norm.values(), key=lambda item: ndb.normalize_name(item.name))
 
 
+def parse_confidence_score(
+    *,
+    raw_record_count: int,
+    candidate_count: int,
+    parser_warning_count: int,
+    schema_warning_count: int,
+    target_count: int,
+) -> float:
+    score = 1.0
+    if raw_record_count > 0:
+        acceptance_ratio = candidate_count / max(1, raw_record_count)
+        score -= max(0.0, 1.0 - acceptance_ratio) * 0.5
+    score -= min(0.25, parser_warning_count * 0.05)
+    score -= min(0.25, schema_warning_count * 0.02)
+    if target_count > 0 and candidate_count < max(1, int(target_count * 0.5)):
+        score -= 0.15
+    return max(0.0, min(1.0, score))
+
+
 def export_source_atoms_json(path: Path, candidates: list[IdeationCandidate]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: list[dict[str, object]] = []
@@ -540,6 +559,12 @@ def parse_args() -> argparse.Namespace:
         '--no-text-fallback',
         dest='allow_text_fallback',
         action='store_false',
+    )
+    parser.add_argument(
+        '--parse-confidence-threshold',
+        type=float,
+        default=0.70,
+        help='Minimum parser confidence required before ingesting fallback-derived candidates.',
     )
     parser.add_argument('--prompt', default='', help='Optional custom prompt (overrides template rendering).')
     parser.add_argument('--template-id', choices=template_choices(), default=DEFAULT_TEMPLATE_ID)
@@ -614,18 +639,35 @@ def main() -> int:
             continue
         coerced.append(candidate)
     candidates = dedupe_candidates(coerced)
+    parse_confidence = parse_confidence_score(
+        raw_record_count=len(raw_records),
+        candidate_count=len(candidates),
+        parser_warning_count=len(parser_warnings),
+        schema_warning_count=len(schema_warnings),
+        target_count=max(0, int(args.target_count)),
+    )
+
+    if args.input and raw_records and parse_confidence < max(0.0, min(1.0, args.parse_confidence_threshold)):
+        print(
+            f'parse_confidence_low value={parse_confidence:.2f} '
+            f'threshold={args.parse_confidence_threshold:.2f} '
+            'ingestion_skipped=true'
+        )
+        return 0
 
     if not candidates:
         if args.emit_prompt_file or args.print_prompt:
             print(
                 'prompt_ready=true candidates_ingested=0 '
-                f'parse_warnings={len(parser_warnings)} schema_warnings={len(schema_warnings)}'
+                f'parse_warnings={len(parser_warnings)} schema_warnings={len(schema_warnings)} '
+                f'parse_confidence={parse_confidence:.2f}'
             )
             return 0
         print(
             'No valid candidate names to ingest. '
             f'parse_warnings={len(parser_warnings)} '
-            f'schema_warnings={len(schema_warnings)} dropped_records={dropped_records}'
+            f'schema_warnings={len(schema_warnings)} dropped_records={dropped_records} '
+            f'parse_confidence={parse_confidence:.2f}'
         )
         return 0
 
@@ -652,6 +694,8 @@ def main() -> int:
                 'prompt_hash': prompt_hash,
                 'prompt_preview': prompt_text[:400],
                 'candidate_count': len(candidates),
+                'parse_confidence': parse_confidence,
+                'parse_confidence_threshold': float(args.parse_confidence_threshold),
                 'ingested_at': now_iso(),
             },
             summary={
@@ -660,6 +704,7 @@ def main() -> int:
                 'parse_warning_count': len(parser_warnings),
                 'schema_warning_count': len(schema_warnings),
                 'dropped_record_count': dropped_records,
+                'parse_confidence': parse_confidence,
             },
         )
 
@@ -713,7 +758,8 @@ def main() -> int:
         f'db={db_path} source_label={args.source_label} '
         f'prompt_id={prompt_id} prompt_hash={prompt_hash[:12]} '
         f'claims_removed={removed_claim_count} dropped={dropped_records} '
-        f'parse_warnings={len(parser_warnings)} schema_warnings={len(schema_warnings)}'
+        f'parse_warnings={len(parser_warnings)} schema_warnings={len(schema_warnings)} '
+        f'parse_confidence={parse_confidence:.2f}'
     )
     return 0
 

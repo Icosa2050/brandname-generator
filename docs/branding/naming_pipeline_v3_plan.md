@@ -14,14 +14,15 @@ Run a wider naming surface (multi-engine + morphology + LLM-safe ingest) while c
 2. Generate candidates with V3 flags:
    - `--pipeline-version=v3 --enable-v3 --use-engine-interfaces --use-tiered-validation`
 3. Cheap gate on all generated candidates:
-   - similarity/adversarial/gibberish/false-friend scoring.
+   - similarity/adversarial/gibberish/false-friend scoring + static cheap trademark pre-screen (`tm_cheap`).
 4. Expensive gate only on finalists:
    - domain/web/app-store/package/social checks on top finalists only.
 5. Diversity shortlist reranking:
-   - bucket + prefix quotas.
+   - bucket + prefix + phonetic fingerprint quotas.
 6. Persist:
    - candidates + lineage + score snapshots + shortlist decisions.
 7. Optional async validator pass (cheap-only smoke, full in non-smoke).
+   - cheap-tier checks reuse recent results via DB cache (`--cheap-cache`, TTL-controlled).
 8. Assert contract/provenance via `assert-contract`.
 
 ## Acceptance Metrics

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
+import hashlib
 import json
 import sqlite3
 import time
@@ -125,6 +127,30 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument('--adversarial-fail-threshold', type=int, default=82)
     parser.add_argument('--adversarial-warn-threshold', type=int, default=68)
+    parser.add_argument(
+        '--cheap-trademark-screen',
+        dest='cheap_trademark_screen',
+        action='store_true',
+        default=True,
+        help='Enable static trademark pre-screen in cheap tier.',
+    )
+    parser.add_argument(
+        '--no-cheap-trademark-screen',
+        dest='cheap_trademark_screen',
+        action='store_false',
+    )
+    parser.add_argument(
+        '--cheap-trademark-fail-threshold',
+        type=int,
+        default=90,
+        help='Hard-fail threshold for cheap trademark pre-screen similarity score (0-100).',
+    )
+    parser.add_argument(
+        '--cheap-trademark-warn-threshold',
+        type=int,
+        default=78,
+        help='Warn threshold for cheap trademark pre-screen similarity score (0-100).',
+    )
     parser.add_argument('--min-trust-proxy', type=int, default=50)
     parser.add_argument('--warn-trust-proxy', type=int, default=62)
     parser.add_argument('--max-spelling-risk', type=int, default=28)
@@ -138,6 +164,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--strict-required-domains', action='store_true')
     parser.add_argument('--progress', dest='progress', action='store_true', default=True)
     parser.add_argument('--no-progress', dest='progress', action='store_false')
+    parser.add_argument(
+        '--cheap-cache',
+        dest='cheap_cache',
+        action='store_true',
+        default=True,
+        help='Reuse recent cheap-tier validation results from DB cache when signatures match.',
+    )
+    parser.add_argument(
+        '--no-cheap-cache',
+        dest='cheap_cache',
+        action='store_false',
+    )
+    parser.add_argument(
+        '--cheap-cache-ttl-s',
+        type=int,
+        default=3600,
+        help='TTL for cheap-tier result reuse cache in seconds.',
+    )
     parser.add_argument(
         '--progress-every',
         type=int,
@@ -245,6 +289,39 @@ def load_candidates(conn: sqlite3.Connection, states: list[str], limit: int) -> 
     ]
 
 
+CHEAP_TRADEMARK_BLOCKLIST = sorted(
+    set(
+        list(ng.PROTECTED_MARKS)
+        + list(ng.ADVERSARIAL_MARKS)
+        + [
+            'airbnb',
+            'booking',
+            'immobilienscout',
+            'immoscout24',
+            'immonet',
+            'immowelt',
+            'microsoft',
+            'salesforce',
+            'sap',
+        ]
+    )
+)
+
+
+def cheap_trademark_similarity_signal(name: str) -> tuple[int, str]:
+    best_score = 0
+    best_mark = ''
+    for mark in CHEAP_TRADEMARK_BLOCKLIST:
+        ratio = ng.similarity_with_prefix_boost(name, mark)
+        if mark in name and len(mark) >= 5:
+            ratio = max(ratio, 0.94)
+        score = int(round(ratio * 100))
+        if score > best_score:
+            best_score = score
+            best_mark = mark
+    return best_score, best_mark
+
+
 def check_adversarial(name: str, args: argparse.Namespace) -> dict:
     normalized = ng.normalize_alpha(name)
     risk, hits = ng.adversarial_similarity_signal(normalized)
@@ -328,6 +405,58 @@ def check_descriptive(name: str, args: argparse.Namespace) -> dict:
         'score_delta': 0.0,
         'reason': '',
         'evidence': {'descriptive_risk': risk},
+    }
+
+
+def check_trademark_cheap(name: str, args: argparse.Namespace) -> dict:
+    normalized = ng.normalize_alpha(name)
+    if not getattr(args, 'cheap_trademark_screen', True):
+        return {
+            'status': 'pass',
+            'hard_fail': False,
+            'score_delta': 0.0,
+            'reason': 'cheap_trademark_screen_disabled',
+            'evidence': {'screen_enabled': False},
+        }
+
+    similarity_score, closest_mark = cheap_trademark_similarity_signal(normalized)
+    if similarity_score >= max(0, min(100, args.cheap_trademark_fail_threshold)):
+        return {
+            'status': 'fail',
+            'hard_fail': True,
+            'score_delta': -16.0,
+            'reason': 'cheap_trademark_collision_risk',
+            'evidence': {
+                'screen_enabled': True,
+                'similarity_score': similarity_score,
+                'closest_mark': closest_mark,
+                'blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
+            },
+        }
+    if similarity_score >= max(0, min(100, args.cheap_trademark_warn_threshold)):
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -6.0,
+            'reason': 'cheap_trademark_similarity_warning',
+            'evidence': {
+                'screen_enabled': True,
+                'similarity_score': similarity_score,
+                'closest_mark': closest_mark,
+                'blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
+            },
+        }
+    return {
+        'status': 'pass',
+        'hard_fail': False,
+        'score_delta': 0.0,
+        'reason': '',
+        'evidence': {
+            'screen_enabled': True,
+            'similarity_score': similarity_score,
+            'closest_mark': closest_mark,
+            'blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
+        },
     }
 
 
@@ -578,6 +707,7 @@ CHECK_SPECS: dict[str, ValidationCheckSpec] = {
     'adversarial': ValidationCheckSpec('adversarial', 'cheap', check_adversarial),
     'psych': ValidationCheckSpec('psych', 'cheap', check_psych),
     'descriptive': ValidationCheckSpec('descriptive', 'cheap', check_descriptive),
+    'tm_cheap': ValidationCheckSpec('tm_cheap', 'cheap', check_trademark_cheap),
     'domain': ValidationCheckSpec('domain', 'expensive', check_domain),
     'web': ValidationCheckSpec('web', 'expensive', check_web),
     'app_store': ValidationCheckSpec('app_store', 'expensive', check_app_store),
@@ -604,6 +734,77 @@ def select_checks(args: argparse.Namespace) -> tuple[list[str], ValidationFeatur
         if spec.tier == flags.validation_tier:
             filtered.append(check)
     return filtered, flags
+
+
+CACHE_SIGNATURE_FIELDS: dict[str, tuple[str, ...]] = {
+    'adversarial': ('adversarial_fail_threshold', 'adversarial_warn_threshold'),
+    'psych': ('min_trust_proxy', 'warn_trust_proxy', 'max_spelling_risk', 'warn_spelling_risk'),
+    'descriptive': ('descriptive_fail_threshold', 'descriptive_warn_threshold'),
+    'tm_cheap': ('cheap_trademark_screen', 'cheap_trademark_fail_threshold', 'cheap_trademark_warn_threshold'),
+}
+
+
+def cheap_check_cache_signature(check_type: str, args: argparse.Namespace) -> str:
+    fields = CACHE_SIGNATURE_FIELDS.get(check_type, ())
+    payload: dict[str, object] = {'check_type': check_type}
+    for field in fields:
+        payload[field] = getattr(args, field, None)
+    if check_type == 'tm_cheap':
+        payload['blocklist_size'] = len(CHEAP_TRADEMARK_BLOCKLIST)
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]
+
+
+def load_cached_validation_result(
+    conn: sqlite3.Connection,
+    *,
+    candidate_id: int,
+    check_type: str,
+    ttl_s: int,
+    cache_signature: str,
+) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT status, score_delta, hard_fail, reason, evidence_json, checked_at
+        FROM validation_results
+        WHERE candidate_id = ? AND check_type = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (candidate_id, check_type),
+    ).fetchone()
+    if not row:
+        return None
+    status = str(row[0])
+    score_delta = float(row[1] or 0.0)
+    hard_fail = bool(int(row[2] or 0))
+    reason = str(row[3] or '')
+    evidence_json = str(row[4] or '')
+    checked_at_raw = str(row[5] or '')
+    if not checked_at_raw:
+        return None
+    try:
+        checked_at = dt.datetime.fromisoformat(checked_at_raw)
+    except ValueError:
+        return None
+    age_s = max(0.0, (dt.datetime.now() - checked_at).total_seconds())
+    if age_s > max(1, ttl_s):
+        return None
+    try:
+        evidence = json.loads(evidence_json) if evidence_json else {}
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(evidence, dict):
+        return None
+    if evidence.get('_cache_signature') != cache_signature:
+        return None
+    return {
+        'status': status,
+        'score_delta': score_delta,
+        'hard_fail': hard_fail,
+        'reason': reason,
+        'evidence': evidence,
+    }
 
 
 async def run_single_job(
@@ -634,15 +835,48 @@ async def run_single_job(
                 conn.commit()
 
             try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(runner, spec.candidate_name, args),
-                    timeout=args.timeout_s,
+                spec_meta = CHECK_SPECS.get(spec.check_type)
+                cache_eligible = bool(
+                    getattr(args, 'cheap_cache', True)
+                    and spec_meta is not None
+                    and spec_meta.tier == 'cheap'
                 )
-                status = str(result['status'])
-                hard_fail = bool(result['hard_fail'])
-                score_delta = float(result['score_delta'])
-                reason = str(result['reason'])
-                evidence = dict(result['evidence'])
+                cache_signature = (
+                    cheap_check_cache_signature(spec.check_type, args)
+                    if cache_eligible
+                    else ''
+                )
+                cached_result: dict | None = None
+                if cache_eligible:
+                    async with db_lock:
+                        cached_result = load_cached_validation_result(
+                            conn,
+                            candidate_id=spec.candidate_id,
+                            check_type=spec.check_type,
+                            ttl_s=max(1, int(getattr(args, 'cheap_cache_ttl_s', 3600))),
+                            cache_signature=cache_signature,
+                        )
+
+                if cached_result is not None:
+                    status = str(cached_result['status'])
+                    hard_fail = bool(cached_result['hard_fail'])
+                    score_delta = float(cached_result['score_delta'])
+                    reason = str(cached_result['reason'])
+                    evidence = dict(cached_result.get('evidence') or {})
+                    evidence['_cache_source'] = 'reused'
+                else:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(runner, spec.candidate_name, args),
+                        timeout=args.timeout_s,
+                    )
+                    status = str(result['status'])
+                    hard_fail = bool(result['hard_fail'])
+                    score_delta = float(result['score_delta'])
+                    reason = str(result['reason'])
+                    evidence = dict(result['evidence'])
+                    if cache_eligible:
+                        evidence['_cache_signature'] = cache_signature
+                        evidence['_cache_source'] = 'live'
 
                 async with db_lock:
                     ndb.add_validation_result(
@@ -767,6 +1001,39 @@ def summarize_results_by_tier(
     return summary
 
 
+def summarize_cache_usage(conn: sqlite3.Connection, run_id: int) -> dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT evidence_json
+        FROM validation_results
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchall()
+    summary = {'reused': 0, 'live': 0, 'none': 0}
+    for row in rows:
+        evidence_json = str(row[0] or '')
+        if not evidence_json:
+            summary['none'] += 1
+            continue
+        try:
+            evidence = json.loads(evidence_json)
+        except json.JSONDecodeError:
+            summary['none'] += 1
+            continue
+        if not isinstance(evidence, dict):
+            summary['none'] += 1
+            continue
+        source = str(evidence.get('_cache_source') or '').strip().lower()
+        if source == 'reused':
+            summary['reused'] += 1
+        elif source == 'live':
+            summary['live'] += 1
+        else:
+            summary['none'] += 1
+    return summary
+
+
 def mark_candidates_checked(conn: sqlite3.Connection, rows: list[CandidateRow], actor: str) -> None:
     ts = ndb.now_iso()
     for row in rows:
@@ -858,6 +1125,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
             expensive_finalist_count=len(expensive_finalists),
             expensive_finalist_ids=sorted(expensive_ids)[:20],
             validation_tier=flags.validation_tier,
+            cheap_tm_enabled=bool(args.cheap_trademark_screen),
+            cheap_tm_blocklist_size=len(CHEAP_TRADEMARK_BLOCKLIST),
         )
 
         run_id = ndb.create_run(
@@ -882,6 +1151,12 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'expensive_finalist_limit': int(args.expensive_finalist_limit),
                 'finalist_recommendations': finalist_recommendations,
                 'planned_job_count': len(job_plan),
+                'cheap_trademark_screen': bool(args.cheap_trademark_screen),
+                'cheap_trademark_fail_threshold': int(args.cheap_trademark_fail_threshold),
+                'cheap_trademark_warn_threshold': int(args.cheap_trademark_warn_threshold),
+                'cheap_trademark_blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
+                'cheap_cache': bool(args.cheap_cache),
+                'cheap_cache_ttl_s': int(args.cheap_cache_ttl_s),
             },
             summary={},
         )
@@ -955,7 +1230,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 f'jobs={len(jobs)} checks={",".join(checks)} '
                 f'pipeline={flags.pipeline_version} v3_enabled={flags.v3_enabled} '
                 f'tier={flags.validation_tier} tiered_split={tiered_split} '
-                f'expensive_finalists={len(expensive_finalists)}',
+                f'expensive_finalists={len(expensive_finalists)} '
+                f'cheap_cache={args.cheap_cache} ttl={args.cheap_cache_ttl_s}s',
                 flush=True,
             )
 
@@ -985,12 +1261,14 @@ async def orchestrate(args: argparse.Namespace) -> int:
             cheap_checks=cheap_checks,
             expensive_checks=expensive_checks,
         )
+        cache_summary = summarize_cache_usage(conn, run_id)
         emit_stage_event(
             args.stage_events,
             'cheap_gate',
             result_counts=tier_summary['cheap'],
             dropoff_count=tier_summary['cheap'].get('fail', 0) + tier_summary['cheap'].get('error', 0),
             checks=cheap_checks,
+            cache=cache_summary,
         )
         emit_stage_event(
             args.stage_events,
@@ -1010,6 +1288,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
             executed_job_count=len(jobs),
             status_counts=summary.get('status_counts', {}),
             tier_result_counts=tier_summary,
+            cache_summary=cache_summary,
             latency_ms=latency_ms,
         )
         conn.execute(
@@ -1024,6 +1303,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                     {
                         **summary,
                         'tier_result_counts': tier_summary,
+                        'cache_summary': cache_summary,
                         'tiered_split': tiered_split,
                         'expensive_finalist_count': len(expensive_finalists),
                     },
@@ -1044,6 +1324,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
             {
                 **summary,
                 'tier_result_counts': tier_summary,
+                'cache_summary': cache_summary,
                 'tiered_split': tiered_split,
                 'expensive_finalist_count': len(expensive_finalists),
             },
