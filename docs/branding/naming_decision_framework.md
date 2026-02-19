@@ -238,4 +238,4 @@ Recent generated samples:
 - `docs/branding/shortlist_screening_global.csv`
 - `docs/branding/shortlist_screening_global_handcrafted.csv`
 - `docs/branding/shortlist_screening_global_gemini60_v2.csv`
-- `docs/branding/broader_scope_shortlist.md`
+- `docs/archive/branding/2026/broader_scope_shortlist.md`
