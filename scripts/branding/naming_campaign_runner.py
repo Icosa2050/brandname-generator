@@ -83,6 +83,9 @@ def append_progress_row(path: Path, row: dict[str, object]) -> None:
     write_header = not path.exists()
     headers = [
         'run',
+        'shard_id',
+        'shard_count',
+        'shard_combo_count',
         'timestamp',
         'scope',
         'gate',
@@ -116,11 +119,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--check-limit', type=int, default=150, help='Generator external-check finalist limit.')
     parser.add_argument('--shortlist-size', type=int, default=60, help='Generator shortlist size.')
     parser.add_argument(
+        '--generator-store-countries',
+        default='de,ch,us,gb,fr,it',
+        help='Comma-separated App Store countries passed to generator --store-countries.',
+    )
+    parser.add_argument(
         '--generator-no-external-checks',
         dest='generator_no_external_checks',
         action='store_true',
         default=False,
         help='Disable generator external checks (fast local sweep mode).',
+    )
+    parser.add_argument(
+        '--generator-degraded-network-mode',
+        dest='generator_degraded_network_mode',
+        action='store_true',
+        default=False,
+        help='Pass --degraded-network-mode to generator (unknown external states become soft signals).',
     )
     parser.add_argument(
         '--validator-checks',
@@ -205,6 +220,18 @@ def parse_args() -> argparse.Namespace:
         help='Ingest names.txt if present in repository root.',
     )
     parser.add_argument('--no-include-names-txt', dest='include_names_txt', action='store_false')
+    parser.add_argument(
+        '--shard-id',
+        type=int,
+        default=0,
+        help='0-based shard id for parallel campaign workers.',
+    )
+    parser.add_argument(
+        '--shard-count',
+        type=int,
+        default=1,
+        help='Total number of shard workers.',
+    )
     return parser.parse_args()
 
 
@@ -233,26 +260,50 @@ def main() -> int:
     if not shares or not scopes or not gates or not quota_profiles:
         print('Invalid sweep configuration: shares/scopes/gates/quota-profiles must be non-empty.')
         return 1
+    if args.shard_count < 1:
+        print('Invalid shard configuration: --shard-count must be >= 1.')
+        return 1
+    if args.shard_id < 0 or args.shard_id >= args.shard_count:
+        print('Invalid shard configuration: --shard-id must be in range [0, --shard-count).')
+        return 1
+
+    sweep_combos: list[tuple[float, str, str, str]] = []
+    for quota_profile in quota_profiles:
+        for gate in gates:
+            for scope in scopes:
+                for share in shares:
+                    sweep_combos.append((share, scope, gate, quota_profile))
+    shard_combos = sweep_combos[args.shard_id :: args.shard_count]
+    if not shard_combos:
+        print(
+            'Invalid shard configuration: no sweep combinations assigned '
+            f'to shard_id={args.shard_id} with shard_count={args.shard_count}.'
+        )
+        return 1
 
     print(f'campaign_start out_dir={out_dir}')
     print(
         f'campaign_config hours={args.hours} max_runs={args.max_runs} sleep_s={args.sleep_s} '
         f'shares={shares} scopes={scopes} gates={gates} quota_profiles={len(quota_profiles)} '
+        f'shard={args.shard_id + 1}/{args.shard_count} shard_combo_count={len(shard_combos)} '
         f'check_limit={args.check_limit} validator_tier={args.validator_tier} '
         f'validator_candidate_limit={args.validator_candidate_limit}'
     )
 
     if args.mini_test:
-        mini_log = logs_dir / 'mini_test_smoke.log'
-        code = run_cmd(
-            [str(root / 'scripts' / 'branding' / 'test_naming_pipeline_v3.sh'), 'smoke'],
-            cwd=root,
-            log_path=mini_log,
-        )
-        if code != 0:
-            print(f'mini_test_failed exit={code} log={mini_log}')
-            return code
-        print(f'mini_test_passed log={mini_log}')
+        if args.shard_count > 1 and args.shard_id != 0:
+            print('mini_test_skipped reason=shard_nonzero')
+        else:
+            mini_log = logs_dir / 'mini_test_smoke.log'
+            code = run_cmd(
+                [str(root / 'scripts' / 'branding' / 'test_naming_pipeline_v3.sh'), 'smoke'],
+                cwd=root,
+                log_path=mini_log,
+            )
+            if code != 0:
+                print(f'mini_test_failed exit={code} log={mini_log}')
+                return code
+            print(f'mini_test_passed log={mini_log}')
 
     syntax_log = logs_dir / 'preflight_syntax.log'
     syntax_cmd = [
@@ -350,12 +401,7 @@ def main() -> int:
         run_stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
         run_id = f'run_{run_count:03d}_{run_stamp}'
 
-        share = shares[(run_count - 1) % len(shares)]
-        scope = scopes[((run_count - 1) // len(shares)) % len(scopes)]
-        gate = gates[((run_count - 1) // (len(shares) * len(scopes))) % len(gates)]
-        quota_profile = quota_profiles[
-            ((run_count - 1) // (len(shares) * len(scopes) * len(gates))) % len(quota_profiles)
-        ]
+        share, scope, gate, quota_profile = shard_combos[(run_count - 1) % len(shard_combos)]
 
         run_csv = runs_dir / f'{run_id}.csv'
         run_json = runs_dir / f'{run_id}.json'
@@ -366,6 +412,7 @@ def main() -> int:
 
         print(
             f'run_start idx={run_count} id={run_id} '
+            f'shard={args.shard_id + 1}/{args.shard_count} '
             f'share={share:.2f} scope={scope} gate={gate}'
         )
 
@@ -388,6 +435,7 @@ def main() -> int:
             f'--source-pool-db={db_path}',
             '--source-pool-limit=900',
             '--source-min-confidence=0.55',
+            f'--store-countries={args.generator_store_countries}',
             f'--source-influence-share={share:.2f}',
             f'--pool-size={pool_size}',
             f'--check-limit={check_limit}',
@@ -413,6 +461,8 @@ def main() -> int:
                     '--no-progress',
                 ]
             )
+        elif args.generator_degraded_network_mode:
+            generator_cmd.append('--degraded-network-mode')
         code = run_cmd(generator_cmd, cwd=root, log_path=gen_log)
         if code != 0:
             error_count += 1
@@ -421,6 +471,9 @@ def main() -> int:
                 progress_csv,
                 {
                     'run': run_count,
+                    'shard_id': args.shard_id,
+                    'shard_count': args.shard_count,
+                    'shard_combo_count': len(shard_combos),
                     'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                     'scope': scope,
                     'gate': gate,
@@ -462,6 +515,9 @@ def main() -> int:
                 progress_csv,
                 {
                     'run': run_count,
+                    'shard_id': args.shard_id,
+                    'shard_count': args.shard_count,
+                    'shard_combo_count': len(shard_combos),
                     'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                     'scope': scope,
                     'gate': gate,
@@ -517,6 +573,9 @@ def main() -> int:
             progress_csv,
             {
                 'run': run_count,
+                'shard_id': args.shard_id,
+                'shard_count': args.shard_count,
+                'shard_combo_count': len(shard_combos),
                 'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                 'scope': scope,
                 'gate': gate,
@@ -537,7 +596,8 @@ def main() -> int:
         print(
             f'run_done idx={run_count} duration_s={duration_s} shortlist={len(shortlist)} '
             f'new={len(new_names)} unique_total={len(seen_shortlist)} '
-            f'validator_total_jobs={total_jobs} remaining_s={remaining_s}'
+            f'validator_total_jobs={total_jobs} remaining_s={remaining_s} '
+            f'shard={args.shard_id + 1}/{args.shard_count}'
         )
         last_status = 'ok'
 
@@ -561,6 +621,9 @@ def main() -> int:
         'db': str(db_path),
         'hours_budget': float(args.hours),
         'max_runs': int(args.max_runs),
+        'shard_id': int(args.shard_id),
+        'shard_count': int(args.shard_count),
+        'shard_combo_count': int(len(shard_combos)),
         'runs_executed': int(run_count),
         'errors': int(error_count),
         'status': last_status,

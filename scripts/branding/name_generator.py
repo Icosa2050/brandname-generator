@@ -1710,7 +1710,9 @@ def app_store_signal(name: str, country: str) -> tuple[int, bool, bool]:
     )
     data = fetch_json(url)
     if not data:
-        return -1, False, False
+        # iTunes search can intermittently return 403/429 from automation contexts.
+        # Fall back to public apps.apple.com search HTML and extract app links.
+        return app_store_signal_web(name, country)
 
     count = int(data.get('resultCount', 0))
     exact = False
@@ -1719,6 +1721,33 @@ def app_store_signal(name: str, country: str) -> tuple[int, bool, bool]:
         if track == name:
             exact = True
             break
+    return count, exact, True
+
+
+def app_store_signal_web(name: str, country: str) -> tuple[int, bool, bool]:
+    # apps.apple.com search results are platform-specific. Probe core platforms
+    # and aggregate unique app slugs to reduce false negatives.
+    slugs: set[str] = set()
+    successful_queries = 0
+    for platform in ('iphone', 'ipad', 'mac'):
+        url = f'https://apps.apple.com/{country}/{platform}/search?' + parse.urlencode({'term': name})
+        html = fetch_text(url, timeout=8.0, retries=1)
+        if not html:
+            continue
+        successful_queries += 1
+        slugs.update(
+            slug.lower()
+            for slug in re.findall(
+                r'https://apps\.apple\.com/[a-z]{2}/app/([^/\\"\\s?]+)/id\\d+',
+                html,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    if successful_queries == 0:
+        return -1, False, False
+    count = len(slugs)
+    exact = any(normalize_alpha(slug) == name for slug in slugs)
     return count, exact, True
 
 
@@ -2157,16 +2186,27 @@ def run_external_checks(
                     mark_fail(c, 'base_com_not_available')
 
         if store_check and fail_on_unknown and c.store_unknown_countries:
-            mark_fail(c, 'app_store_check_unknown')
+            unknown_store = '-'.join(
+                [part.strip() for part in c.store_unknown_countries.split(',') if part.strip()]
+            )
+            mark_fail(c, f'app_store_check_unknown_{unknown_store or "unknown"}')
 
         if fail_on_unknown and web_check and not web_ok:
-            mark_fail(c, 'web_check_unknown')
+            web_source = (c.web_source or '').strip().replace('+', '_')
+            mark_fail(c, f'web_check_unknown_{web_source or "unknown"}')
 
         if fail_on_unknown and package_check and ('unknown' in {c.pypi_exists, c.npm_exists}):
-            mark_fail(c, 'package_check_unknown')
+            unknown_packages = '-'.join(
+                [
+                    label
+                    for label, value in (('pypi', c.pypi_exists), ('npm', c.npm_exists))
+                    if value == 'unknown'
+                ]
+            )
+            mark_fail(c, f'package_check_unknown_{unknown_packages or "unknown"}')
 
         if fail_on_unknown and social_check and c.social_unknown_count > 0:
-            mark_fail(c, 'social_check_unknown')
+            mark_fail(c, f'social_check_unknown_{c.social_unknown_count}')
 
         if show_progress:
             duration = time.monotonic() - candidate_start
