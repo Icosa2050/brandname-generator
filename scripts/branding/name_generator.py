@@ -318,6 +318,56 @@ GIBBERISH_BIGRAMS = {
     'qw',
 }
 
+PROMO_PREFIXES = (
+    'true',
+    'good',
+    'clean',
+    'safe',
+    'calm',
+    'fair',
+    'smart',
+    'easy',
+    'quick',
+    'best',
+)
+
+FUNCTION_TOKENS = (
+    'ledger',
+    'led',
+    'alloc',
+    'balance',
+    'bal',
+    'share',
+    'set',
+    'rent',
+    'miet',
+    'umlag',
+    'neben',
+    'saldo',
+)
+
+FACTORY_SUFFIXES = (
+    'via',
+    'rio',
+    'neo',
+    'ex',
+    'on',
+    'ly',
+    'la',
+    'va',
+)
+
+ARTIFACT_NGRAMS = (
+    'ledva',
+    'ledla',
+    'setla',
+    'setrio',
+    'balva',
+    'balla',
+    'alro',
+    'alla',
+)
+
 USER_AGENT = 'kostula-name-generator/1.0'
 
 
@@ -372,6 +422,8 @@ class Candidate:
     adversarial_top_hits: str = ''
     psych_spelling_risk: int = 0
     psych_trust_proxy: int = 0
+    template_penalty: int = 0
+    template_flags: str = ''
     trademark_dpma_url: str = ''
     trademark_swissreg_url: str = ''
     trademark_tmview_url: str = ''
@@ -430,6 +482,12 @@ class ScoringRequest:
     false_friend_fail_threshold: int
     gibberish_fail_threshold: int
     false_friend_rules: dict[str, tuple[int, str]]
+    quality_first: bool = False
+    quality_min_trust_proxy: int = 64
+    quality_max_spelling_risk: int = 16
+    quality_max_gibberish_penalty: int = 24
+    quality_max_false_friend_risk: int = 16
+    quality_max_template_penalty: int = 18
 
 
 @dataclass(frozen=True)
@@ -530,6 +588,12 @@ class RuleScorerEngine:
             request.false_friend_fail_threshold,
             request.gibberish_fail_threshold,
             request.false_friend_rules,
+            quality_first=request.quality_first,
+            quality_min_trust_proxy=request.quality_min_trust_proxy,
+            quality_max_spelling_risk=request.quality_max_spelling_risk,
+            quality_max_gibberish_penalty=request.quality_max_gibberish_penalty,
+            quality_max_false_friend_risk=request.quality_max_false_friend_risk,
+            quality_max_template_penalty=request.quality_max_template_penalty,
         )
 
 
@@ -1607,6 +1671,37 @@ def false_friend_signal(name: str, rules: dict[str, tuple[int, str]] | None = No
     return min(100, total), ';'.join(hits[:6])
 
 
+def template_likeness_signal(name: str) -> tuple[int, str]:
+    penalty = 0
+    flags: list[str] = []
+
+    has_promo_prefix = any(name.startswith(prefix) for prefix in PROMO_PREFIXES)
+    has_function_token = any(token in name for token in FUNCTION_TOKENS)
+    has_factory_suffix = any(name.endswith(suffix) for suffix in FACTORY_SUFFIXES)
+    has_artifact_ngram = any(fragment in name for fragment in ARTIFACT_NGRAMS)
+
+    if has_promo_prefix:
+        penalty += 14
+        flags.append('promo_prefix')
+    if has_function_token and has_promo_prefix:
+        penalty += 18
+        flags.append('promo_plus_function_token')
+    if has_function_token and has_factory_suffix:
+        penalty += 10
+        flags.append('function_token_plus_factory_suffix')
+    if has_artifact_ngram:
+        penalty += 24
+        flags.append('artifact_ngram')
+    if re.search(r'(via|rio|neo)$', name) and len(name) >= 8:
+        penalty += 6
+        flags.append('factory_suffix_long')
+    if re.search(r'(.)\1{2,}', name):
+        penalty += 8
+        flags.append('triple_repeat')
+
+    return min(100, penalty), ';'.join(sorted(set(flags)))
+
+
 def trademark_search_urls(name: str) -> tuple[str, str, str]:
     dpma = (
         'https://register.dpma.de/DPMAregister/marke/register/erweitert'
@@ -1938,6 +2033,13 @@ def evaluate_candidates(
     false_friend_fail_threshold: int,
     gibberish_fail_threshold: int,
     false_friend_rules: dict[str, tuple[int, str]],
+    *,
+    quality_first: bool = False,
+    quality_min_trust_proxy: int = 64,
+    quality_max_spelling_risk: int = 16,
+    quality_max_gibberish_penalty: int = 24,
+    quality_max_false_friend_risk: int = 16,
+    quality_max_template_penalty: int = 18,
 ) -> list[Candidate]:
     results: list[Candidate] = []
     for item in generated_items:
@@ -1947,8 +2049,10 @@ def evaluate_candidates(
         adv_risk, adv_hits = adversarial_similarity_signal(n)
         gib_penalty, gib_flags = gibberish_signal(n)
         false_friend_risk, false_friend_hits = false_friend_signal(n, false_friend_rules)
+        template_penalty, template_flags = template_likeness_signal(n)
         risk = min(100, risk + int(0.25 * adv_risk))
         risk = min(100, risk + int(gib_penalty * 0.4) + int(false_friend_risk * 0.65))
+        risk = min(100, risk + int(template_penalty * 0.75))
         total = max(0, min(100, int(q - (risk * 0.55))))
         spell_risk = psych_spelling_risk(n)
         trust_proxy = psych_trust_proxy_score(n)
@@ -1969,6 +2073,8 @@ def evaluate_candidates(
             adversarial_top_hits=adv_hits,
             psych_spelling_risk=spell_risk,
             psych_trust_proxy=trust_proxy,
+            template_penalty=template_penalty,
+            template_flags=template_flags,
             trademark_dpma_url=dpma_url,
             trademark_swissreg_url=swissreg_url,
             trademark_tmview_url=tmview_url,
@@ -1992,6 +2098,27 @@ def evaluate_candidates(
             c.hard_fail = True
             if not c.fail_reason:
                 c.fail_reason = 'false_friend_risk'
+        if quality_first:
+            if trust_proxy < max(0, min(100, quality_min_trust_proxy)):
+                c.hard_fail = True
+                if not c.fail_reason:
+                    c.fail_reason = 'quality_trust_proxy_low'
+            if spell_risk > max(0, min(100, quality_max_spelling_risk)):
+                c.hard_fail = True
+                if not c.fail_reason:
+                    c.fail_reason = 'quality_spelling_risk_high'
+            if gib_penalty > max(0, min(100, quality_max_gibberish_penalty)):
+                c.hard_fail = True
+                if not c.fail_reason:
+                    c.fail_reason = 'quality_gibberish_high'
+            if false_friend_risk > max(0, min(100, quality_max_false_friend_risk)):
+                c.hard_fail = True
+                if not c.fail_reason:
+                    c.fail_reason = 'quality_false_friend_high'
+            if template_penalty > max(0, min(100, quality_max_template_penalty)):
+                c.hard_fail = True
+                if not c.fail_reason:
+                    c.fail_reason = 'quality_template_like'
         results.append(c)
     return results
 
@@ -2401,6 +2528,8 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                 'adversarial_top_hits',
                 'psych_spelling_risk',
                 'psych_trust_proxy',
+                'template_penalty',
+                'template_flags',
                 'gibberish_penalty',
                 'gibberish_flags',
                 'false_friend_risk',
@@ -2464,6 +2593,8 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                     c.adversarial_top_hits,
                     c.psych_spelling_risk,
                     c.psych_trust_proxy,
+                    c.template_penalty,
+                    c.template_flags,
                     c.gibberish_penalty,
                     c.gibberish_flags,
                     c.false_friend_risk,
@@ -2559,6 +2690,12 @@ def append_run_history(
         'false_friend_lexicon': args.false_friend_lexicon,
         'false_friend_fail_threshold': int(args.false_friend_fail_threshold),
         'gibberish_fail_threshold': int(args.gibberish_fail_threshold),
+        'quality_first': bool(args.quality_first),
+        'quality_min_trust_proxy': int(args.quality_min_trust_proxy),
+        'quality_max_spelling_risk': int(args.quality_max_spelling_risk),
+        'quality_max_gibberish_penalty': int(args.quality_max_gibberish_penalty),
+        'quality_max_false_friend_risk': int(args.quality_max_false_friend_risk),
+        'quality_max_template_penalty': int(args.quality_max_template_penalty),
         'llm_input': args.llm_input,
         'llm_parse_attempts': int(args.llm_parse_attempts),
         'llm_parse_backoff_ms': int(args.llm_parse_backoff_ms),
@@ -2861,6 +2998,42 @@ def parse_args() -> argparse.Namespace:
         help='Hard-fail threshold for gibberish penalty.',
     )
     parser.add_argument(
+        '--quality-first',
+        action='store_true',
+        default=False,
+        help='Apply stricter brand-quality gate before external checks.',
+    )
+    parser.add_argument(
+        '--quality-min-trust-proxy',
+        type=int,
+        default=64,
+        help='quality-first: minimum trust-proxy score (0-100).',
+    )
+    parser.add_argument(
+        '--quality-max-spelling-risk',
+        type=int,
+        default=16,
+        help='quality-first: maximum spelling risk (0-100).',
+    )
+    parser.add_argument(
+        '--quality-max-gibberish-penalty',
+        type=int,
+        default=24,
+        help='quality-first: maximum gibberish penalty (0-100).',
+    )
+    parser.add_argument(
+        '--quality-max-false-friend-risk',
+        type=int,
+        default=16,
+        help='quality-first: maximum false-friend risk (0-100).',
+    )
+    parser.add_argument(
+        '--quality-max-template-penalty',
+        type=int,
+        default=18,
+        help='quality-first: maximum template-likeness penalty (0-100).',
+    )
+    parser.add_argument(
         '--llm-input',
         default='',
         help='Optional LLM output file (.json/.txt) used as fallback explicit candidates.',
@@ -3113,7 +3286,8 @@ def main() -> int:
             f'source_atoms={len(source_atoms)} source_db={args.source_pool_db} '
             f'source_influence_share={source_influence_share:.2f} '
             f'pipeline={flags.pipeline_version} v3_enabled={flags.v3_enabled} '
-            f'engine_interfaces={flags.use_engine_interfaces}'
+            f'engine_interfaces={flags.use_engine_interfaces} '
+            f'quality_first={args.quality_first}'
         )
 
     if not generated_items:
@@ -3131,6 +3305,12 @@ def main() -> int:
                 false_friend_fail_threshold=max(1, args.false_friend_fail_threshold),
                 gibberish_fail_threshold=max(1, args.gibberish_fail_threshold),
                 false_friend_rules=false_friend_rules,
+                quality_first=bool(args.quality_first),
+                quality_min_trust_proxy=int(args.quality_min_trust_proxy),
+                quality_max_spelling_risk=int(args.quality_max_spelling_risk),
+                quality_max_gibberish_penalty=int(args.quality_max_gibberish_penalty),
+                quality_max_false_friend_risk=int(args.quality_max_false_friend_risk),
+                quality_max_template_penalty=int(args.quality_max_template_penalty),
             )
         )
     else:
@@ -3141,6 +3321,12 @@ def main() -> int:
             max(1, args.false_friend_fail_threshold),
             max(1, args.gibberish_fail_threshold),
             false_friend_rules,
+            quality_first=bool(args.quality_first),
+            quality_min_trust_proxy=int(args.quality_min_trust_proxy),
+            quality_max_spelling_risk=int(args.quality_max_spelling_risk),
+            quality_max_gibberish_penalty=int(args.quality_max_gibberish_penalty),
+            quality_max_false_friend_risk=int(args.quality_max_false_friend_risk),
+            quality_max_template_penalty=int(args.quality_max_template_penalty),
         )
     scoring_latency_ms = int((time.monotonic() - scoring_started) * 1000)
 
@@ -3157,8 +3343,22 @@ def main() -> int:
         cheap_pass_count=len(cheap_pass),
         cheap_fail_count=cheap_fail,
         dropoff_count=cheap_fail,
+        quality_first=bool(args.quality_first),
+        quality_thresholds={
+            'min_trust_proxy': int(args.quality_min_trust_proxy),
+            'max_spelling_risk': int(args.quality_max_spelling_risk),
+            'max_gibberish_penalty': int(args.quality_max_gibberish_penalty),
+            'max_false_friend_risk': int(args.quality_max_false_friend_risk),
+            'max_template_penalty': int(args.quality_max_template_penalty),
+        },
         latency_ms=scoring_latency_ms,
     )
+    if args.progress and cheap_fail > 0:
+        dropped_sample = [f'{c.name}:{c.fail_reason}' for c in ranked_all if c.hard_fail][:12]
+        print(
+            f'cheap_gate_dropped count={cheap_fail} sample={dropped_sample}',
+            flush=True,
+        )
 
     if flags.use_tiered_validation:
         pool_source = cheap_pass
@@ -3337,7 +3537,8 @@ def main() -> int:
                 f'store(de/ch/us)={c.store_de_count}/{c.store_ch_count}/{c.store_us_count} | '
                 f'web(exact/near)={c.web_exact_hits}/{c.web_near_hits} | '
                 f'pkg(pypi/npm)={c.pypi_exists}/{c.npm_exists} | '
-                f'adv={c.adversarial_risk} | ff={c.false_friend_risk} | gib={c.gibberish_penalty}'
+                f'adv={c.adversarial_risk} | ff={c.false_friend_risk} | '
+                f'gib={c.gibberish_penalty} | tpl={c.template_penalty}'
             )
             shown += 1
         if shown >= 15:
