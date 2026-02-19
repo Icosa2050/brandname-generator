@@ -285,6 +285,7 @@ DEFAULT_FAMILY_QUOTAS = {
     'source_pool': 220,
     'blend': 220,
 }
+SOURCE_DEPENDENT_FAMILIES = {'morphology', 'source_pool', 'blend'}
 
 FALSE_FRIEND_RULES: dict[str, tuple[int, str]] = {
     'mist': (18, 'negative_meaning_de'),
@@ -405,6 +406,7 @@ class GenerationRequest:
     generator_families: tuple[str, ...]
     family_quotas: dict[str, int]
     source_atoms: list[dict]
+    source_influence_share: float
     max_per_prefix2: int
     max_per_suffix2: int
     max_per_shape: int
@@ -507,6 +509,7 @@ class FamilyRuleGeneratorEngine:
             list(request.generator_families),
             request.family_quotas,
             request.source_atoms,
+            request.source_influence_share,
             request.max_per_prefix2,
             request.max_per_suffix2,
             request.max_per_shape,
@@ -596,6 +599,40 @@ def parse_family_quotas(raw: str) -> dict[str, int]:
         except ValueError:
             continue
         out[family] = max(0, quota)
+    return out
+
+
+def rebalance_family_quotas_for_source_influence(
+    *,
+    active_families: list[str],
+    family_quotas: dict[str, int],
+    source_influence_share: float,
+) -> dict[str, int]:
+    share = clamp_share(source_influence_share)
+    if share >= 0.999:
+        return dict(family_quotas)
+
+    out = dict(family_quotas)
+    source_families = [family for family in active_families if family in SOURCE_DEPENDENT_FAMILIES]
+    non_source_families = [family for family in active_families if family not in SOURCE_DEPENDENT_FAMILIES]
+    if not source_families or not non_source_families:
+        return out
+
+    source_total = sum(max(0, out.get(family, DEFAULT_FAMILY_QUOTAS.get(family, 120))) for family in source_families)
+    non_source_total = sum(
+        max(0, out.get(family, DEFAULT_FAMILY_QUOTAS.get(family, 120))) for family in non_source_families
+    )
+    if source_total <= 0 or non_source_total <= 0:
+        return out
+
+    max_source_total = int((non_source_total * share) / max(1e-9, (1.0 - share)))
+    if max_source_total >= source_total:
+        return out
+
+    scale = max(0.0, min(1.0, max_source_total / max(1, source_total)))
+    for family in source_families:
+        current = max(0, out.get(family, DEFAULT_FAMILY_QUOTAS.get(family, 120)))
+        out[family] = int(current * scale)
     return out
 
 
@@ -771,14 +808,224 @@ def source_atom_role(atom: dict) -> str:
     return ''
 
 
+def clamp_share(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def build_fallback_atom_pool(variation_profile: str) -> list[tuple[str, float]]:
+    seed_tokens: list[str] = []
+    seed_tokens.extend(MORPH_ROOT_DEFAULTS)
+    seed_tokens.extend(MORPH_PREFIX_DEFAULTS)
+    seed_tokens.extend(MORPH_SUFFIX_DEFAULTS)
+    seed_tokens.extend(BRAND_STEMS)
+    seed_tokens.extend(GLOBAL_VARIATION_ROOTS if variation_profile == 'expanded' else GLOBAL_VARIATION_ROOTS[:10])
+    seed_tokens.extend(SUGGESTIVE_ROOTS_GLOBAL if variation_profile == 'expanded' else SUGGESTIVE_ROOTS_GLOBAL[:10])
+
+    out: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for token in seed_tokens:
+        normalized = normalize_alpha(token)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append((normalized, 0.46))
+    return out
+
+
+def mix_atom_pools(
+    primary: list[tuple[str, float]],
+    fallback: list[tuple[str, float]],
+    *,
+    share: float,
+    target: int,
+) -> list[tuple[str, float]]:
+    target = max(1, int(target))
+    share = clamp_share(share)
+    if not primary:
+        return fallback[:target]
+    if not fallback:
+        return primary[:target]
+
+    primary_target = int(round(target * share))
+    if share > 0 and primary_target == 0:
+        primary_target = 1
+    primary_target = max(0, min(target, primary_target))
+    fallback_target = max(0, target - primary_target)
+
+    mixed: list[tuple[str, float]] = []
+    seen: set[str] = set()
+
+    def take_from(pool: list[tuple[str, float]], count: int) -> int:
+        taken = 0
+        for token, conf in pool:
+            if taken >= count:
+                break
+            if token in seen:
+                continue
+            seen.add(token)
+            mixed.append((token, conf))
+            taken += 1
+        return taken
+
+    take_from(primary, primary_target)
+    take_from(fallback, fallback_target)
+
+    remaining = target - len(mixed)
+    if remaining > 0:
+        remaining -= take_from(primary, remaining)
+    if remaining > 0:
+        take_from(fallback, remaining)
+
+    return mixed[:target]
+
+
+def source_token_set(source_atoms: list[dict]) -> set[str]:
+    tokens: set[str] = set()
+    for atom in source_atoms:
+        value = normalize_alpha(str(atom.get('atom_display') or atom.get('atom_normalized') or ''))
+        if value:
+            tokens.add(value)
+    return tokens
+
+
+def is_source_influenced(item: GeneratedCandidate, source_tokens: set[str]) -> bool:
+    if not source_tokens:
+        return False
+    return any(normalize_alpha(part) in source_tokens for part in item.lineage_atoms)
+
+
+def rebalance_source_influence(
+    generated: list[GeneratedCandidate],
+    *,
+    source_tokens: set[str],
+    source_influence_share: float,
+) -> list[GeneratedCandidate]:
+    if not generated or not source_tokens:
+        return generated
+    source_influence_share = clamp_share(source_influence_share)
+    if source_influence_share >= 0.999:
+        return generated
+
+    influenced: list[GeneratedCandidate] = []
+    neutral: list[GeneratedCandidate] = []
+    for item in generated:
+        if is_source_influenced(item, source_tokens):
+            influenced.append(item)
+        else:
+            neutral.append(item)
+
+    if not influenced or not neutral:
+        return generated
+
+    total = len(generated)
+    target_influenced = int(round(total * source_influence_share))
+    if source_influence_share > 0 and target_influenced == 0:
+        target_influenced = 1
+    target_influenced = min(len(influenced), max(0, target_influenced))
+    target_neutral = min(len(neutral), max(0, total - target_influenced))
+
+    selected = influenced[:target_influenced] + neutral[:target_neutral]
+    if len(selected) < total:
+        remainder = [*influenced[target_influenced:], *neutral[target_neutral:]]
+        selected.extend(remainder[: total - len(selected)])
+    return selected
+
+
+def apply_source_confidence_balance(
+    generated: list[GeneratedCandidate],
+    *,
+    source_tokens: set[str],
+    source_influence_share: float,
+) -> list[GeneratedCandidate]:
+    if not generated or not source_tokens:
+        return generated
+    source_influence_share = clamp_share(source_influence_share)
+    if source_influence_share >= 0.999:
+        return generated
+
+    source_multiplier = max(0.2, 0.4 + source_influence_share * 0.6)
+    neutral_multiplier = 1.0 + (1.0 - source_influence_share) * 0.4
+
+    out: list[GeneratedCandidate] = []
+    for item in generated:
+        influenced = is_source_influenced(item, source_tokens)
+        conf = float(item.source_confidence)
+        if influenced:
+            conf *= source_multiplier
+        else:
+            conf = min(1.0, conf * neutral_multiplier + 0.03)
+        out.append(
+            GeneratedCandidate(
+                name=item.name,
+                generator_family=item.generator_family,
+                lineage_atoms=item.lineage_atoms,
+                source_confidence=conf,
+            )
+        )
+    return out
+
+
+def candidate_is_source_influenced(candidate: Candidate, source_tokens: set[str]) -> bool:
+    if not source_tokens:
+        return False
+    parts = [normalize_alpha(part) for part in str(candidate.lineage_atoms or '').split(';') if part.strip()]
+    return any(part in source_tokens for part in parts)
+
+
+def rebalance_candidate_source_influence(
+    ranked: list[Candidate],
+    *,
+    source_tokens: set[str],
+    source_influence_share: float,
+) -> list[Candidate]:
+    if not ranked or not source_tokens:
+        return ranked
+    source_influence_share = clamp_share(source_influence_share)
+    if source_influence_share >= 0.999:
+        return ranked
+
+    influenced_total = sum(1 for candidate in ranked if candidate_is_source_influenced(candidate, source_tokens))
+    neutral_total = len(ranked) - influenced_total
+    if influenced_total == 0 or neutral_total == 0:
+        return ranked
+
+    target_influenced = int(round(len(ranked) * source_influence_share))
+    if source_influence_share > 0 and target_influenced == 0:
+        target_influenced = 1
+    target_influenced = max(0, min(influenced_total, target_influenced))
+    target_neutral = max(0, min(neutral_total, len(ranked) - target_influenced))
+
+    selected: list[Candidate] = []
+    selected_influenced = 0
+    selected_neutral = 0
+    skipped: list[Candidate] = []
+
+    for candidate in ranked:
+        influenced = candidate_is_source_influenced(candidate, source_tokens)
+        if influenced and selected_influenced < target_influenced:
+            selected.append(candidate)
+            selected_influenced += 1
+            continue
+        if not influenced and selected_neutral < target_neutral:
+            selected.append(candidate)
+            selected_neutral += 1
+            continue
+        skipped.append(candidate)
+
+    if len(selected) < len(ranked):
+        selected.extend(skipped[: len(ranked) - len(selected)])
+    return selected
+
+
 def build_morphology_pools(
     source_atoms: list[dict],
     *,
     variation_profile: str,
+    source_influence_share: float,
 ) -> tuple[list[tuple[str, float]], list[tuple[str, float]], list[tuple[str, float]]]:
-    prefixes: list[tuple[str, float]] = []
-    roots: list[tuple[str, float]] = []
-    suffixes: list[tuple[str, float]] = []
+    prefixes_source: list[tuple[str, float]] = []
+    roots_source: list[tuple[str, float]] = []
+    suffixes_source: list[tuple[str, float]] = []
 
     for atom in source_atoms:
         token = normalize_alpha(str(atom.get('atom_display') or atom.get('atom_normalized') or ''))
@@ -787,32 +1034,48 @@ def build_morphology_pools(
         conf = float(atom.get('confidence_weight') or 0.0)
         role = source_atom_role(atom)
         if role == 'prefix':
-            prefixes.append((token[:5], conf))
+            prefixes_source.append((token[:5], conf))
         elif role == 'suffix':
-            suffixes.append((token[-5:], conf))
+            suffixes_source.append((token[-5:], conf))
         elif role == 'root':
-            roots.append((token, conf))
+            roots_source.append((token, conf))
         else:
-            roots.append((token, conf))
+            roots_source.append((token, conf))
             if len(token) >= 4:
-                prefixes.append((token[:4], conf * 0.7))
-                suffixes.append((token[-4:], conf * 0.7))
+                prefixes_source.append((token[:4], conf * 0.7))
+                suffixes_source.append((token[-4:], conf * 0.7))
 
-    if not prefixes:
-        prefixes = [(token, 0.52) for token in MORPH_PREFIX_DEFAULTS]
-    if not roots:
-        roots = [(token, 0.56) for token in MORPH_ROOT_DEFAULTS]
-    if not suffixes:
-        suffixes = [(token, 0.52) for token in MORPH_SUFFIX_DEFAULTS]
+    prefixes_fallback = [(token, 0.52) for token in MORPH_PREFIX_DEFAULTS]
+    roots_fallback = [(token, 0.56) for token in MORPH_ROOT_DEFAULTS]
+    suffixes_fallback = [(token, 0.52) for token in MORPH_SUFFIX_DEFAULTS]
 
     if variation_profile != 'expanded':
-        prefixes = prefixes[:20]
-        roots = roots[:30]
-        suffixes = suffixes[:20]
+        prefix_target = 20
+        root_target = 30
+        suffix_target = 20
     else:
-        prefixes = prefixes[:42]
-        roots = roots[:64]
-        suffixes = suffixes[:42]
+        prefix_target = 42
+        root_target = 64
+        suffix_target = 42
+
+    prefixes = mix_atom_pools(
+        prefixes_source,
+        prefixes_fallback,
+        share=source_influence_share,
+        target=prefix_target,
+    )
+    roots = mix_atom_pools(
+        roots_source,
+        roots_fallback,
+        share=source_influence_share,
+        target=root_target,
+    )
+    suffixes = mix_atom_pools(
+        suffixes_source,
+        suffixes_fallback,
+        share=source_influence_share,
+        target=suffix_target,
+    )
     return prefixes, roots, suffixes
 
 
@@ -822,6 +1085,7 @@ def collect_family_candidates(
     seeds: Iterable[str],
     variation_profile: str,
     source_atoms: list[dict],
+    source_influence_share: float,
     active_families: list[str],
 ) -> dict[str, list[GeneratedCandidate]]:
     families: dict[str, dict[str, GeneratedCandidate]] = {}
@@ -851,6 +1115,7 @@ def collect_family_candidates(
         prefixes, roots, suffixes = build_morphology_pools(
             source_atoms,
             variation_profile=variation_profile,
+            source_influence_share=source_influence_share,
         )
         for pref, p_conf in prefixes:
             for root, r_conf in roots:
@@ -923,12 +1188,19 @@ def collect_family_candidates(
 
     if 'source_pool' in active:
         generated = {}
-        normalized_atoms: list[tuple[str, float]] = []
+        normalized_atoms_source: list[tuple[str, float]] = []
         for atom in source_atoms:
             value = normalize_alpha(str(atom.get('atom_display') or atom.get('atom_normalized') or ''))
             if not value:
                 continue
-            normalized_atoms.append((value, float(atom.get('confidence_weight') or 0.0)))
+            normalized_atoms_source.append((value, float(atom.get('confidence_weight') or 0.0)))
+
+        normalized_atoms = mix_atom_pools(
+            normalized_atoms_source,
+            build_fallback_atom_pool(variation_profile),
+            share=source_influence_share,
+            target=120 if variation_profile == 'expanded' else 72,
+        )
 
         for atom, conf in normalized_atoms:
             merge_generated(
@@ -950,14 +1222,19 @@ def collect_family_candidates(
 
     if 'blend' in active:
         generated = {}
-        base_roots = GLOBAL_VARIATION_ROOTS if variation_profile == 'expanded' else GLOBAL_VARIATION_ROOTS[:10]
-        atoms_for_blend: list[tuple[str, float]] = []
+        atoms_for_blend_source: list[tuple[str, float]] = []
         for atom in source_atoms:
             value = normalize_alpha(str(atom.get('atom_display') or atom.get('atom_normalized') or ''))
             if value:
-                atoms_for_blend.append((value, float(atom.get('confidence_weight') or 0.0)))
-        if not atoms_for_blend:
-            atoms_for_blend = [(root, 0.5) for root in base_roots]
+                atoms_for_blend_source.append((value, float(atom.get('confidence_weight') or 0.0)))
+
+        fallback_blend_atoms = build_fallback_atom_pool(variation_profile)
+        atoms_for_blend = mix_atom_pools(
+            atoms_for_blend_source,
+            fallback_blend_atoms,
+            share=source_influence_share,
+            target=48 if variation_profile == 'expanded' else 28,
+        )
 
         for (left, l_conf), (right, r_conf) in itertools.product(atoms_for_blend[:36], atoms_for_blend[:36]):
             if left == right:
@@ -1026,6 +1303,7 @@ def generate_candidates(
     generator_families: list[str],
     family_quotas: dict[str, int],
     source_atoms: list[dict],
+    source_influence_share: float,
     max_per_prefix2: int,
     max_per_suffix2: int,
     max_per_shape: int,
@@ -1037,6 +1315,7 @@ def generate_candidates(
         seeds=seeds,
         variation_profile=variation_profile,
         source_atoms=source_atoms,
+        source_influence_share=source_influence_share,
         active_families=generator_families,
     )
 
@@ -1064,6 +1343,18 @@ def generate_candidates(
                 )
             )
             seen.add(n)
+
+    source_tokens = source_token_set(source_atoms)
+    selected = apply_source_confidence_balance(
+        selected,
+        source_tokens=source_tokens,
+        source_influence_share=source_influence_share,
+    )
+    selected = rebalance_source_influence(
+        selected,
+        source_tokens=source_tokens,
+        source_influence_share=source_influence_share,
+    )
 
     filter_request = FilterRequest(
         generated=selected,
@@ -2214,12 +2505,17 @@ def append_run_history(
         'use_tiered_validation': flags.use_tiered_validation,
         'variation_profile': args.variation_profile,
         'generator_families': parse_csv_set(args.generator_families),
-        'family_quotas': parse_family_quotas(args.family_quotas),
+        'family_quotas': rebalance_family_quotas_for_source_influence(
+            active_families=parse_csv_set(args.generator_families) or list(DEFAULT_GENERATOR_FAMILIES),
+            family_quotas=parse_family_quotas(args.family_quotas),
+            source_influence_share=clamp_share(float(args.source_influence_share)),
+        ),
         'source_pool_db': args.source_pool_db,
         'source_pool_limit': int(args.source_pool_limit),
         'source_min_confidence': float(args.source_min_confidence),
         'source_languages': parse_csv_set(args.source_languages),
         'source_categories': parse_csv_set(args.source_categories),
+        'source_influence_share': clamp_share(float(args.source_influence_share)),
         'false_friend_lexicon': args.false_friend_lexicon,
         'false_friend_fail_threshold': int(args.false_friend_fail_threshold),
         'gibberish_fail_threshold': int(args.gibberish_fail_threshold),
@@ -2283,12 +2579,17 @@ def persist_to_db(
                 'check_limit': int(args.check_limit),
                 'degraded_network_mode': bool(args.degraded_network_mode),
                 'generator_families': parse_csv_set(args.generator_families),
-                'family_quotas': parse_family_quotas(args.family_quotas),
+                'family_quotas': rebalance_family_quotas_for_source_influence(
+                    active_families=parse_csv_set(args.generator_families) or list(DEFAULT_GENERATOR_FAMILIES),
+                    family_quotas=parse_family_quotas(args.family_quotas),
+                    source_influence_share=clamp_share(float(args.source_influence_share)),
+                ),
                 'source_pool_db': args.source_pool_db,
                 'source_pool_limit': int(args.source_pool_limit),
                 'source_min_confidence': float(args.source_min_confidence),
                 'source_languages': parse_csv_set(args.source_languages),
                 'source_categories': parse_csv_set(args.source_categories),
+                'source_influence_share': clamp_share(float(args.source_influence_share)),
                 'false_friend_lexicon': args.false_friend_lexicon,
                 'false_friend_fail_threshold': int(args.false_friend_fail_threshold),
                 'gibberish_fail_threshold': int(args.gibberish_fail_threshold),
@@ -2471,6 +2772,12 @@ def parse_args() -> argparse.Namespace:
         '--source-categories',
         default='',
         help='Optional comma-separated semantic category filters for source atoms.',
+    )
+    parser.add_argument(
+        '--source-influence-share',
+        type=float,
+        default=1.0,
+        help='Share (0..1) of curated source-atom influence for source_pool/blend/morphology families; lower mixes in fallback global roots.',
     )
     parser.add_argument(
         '--max-per-prefix2',
@@ -2666,6 +2973,12 @@ def main() -> int:
     family_quotas = parse_family_quotas(args.family_quotas)
     source_languages = parse_csv_set(args.source_languages)
     source_categories = parse_csv_set(args.source_categories)
+    source_influence_share = clamp_share(float(args.source_influence_share))
+    family_quotas = rebalance_family_quotas_for_source_influence(
+        active_families=active_families,
+        family_quotas=family_quotas,
+        source_influence_share=source_influence_share,
+    )
     source_load_started = time.monotonic()
     source_atoms = load_source_atoms(
         db_path=args.source_pool_db,
@@ -2679,6 +2992,7 @@ def main() -> int:
         args.stage_events,
         'source_pool_load',
         source_atoms=len(source_atoms),
+        source_influence_share=source_influence_share,
         latency_ms=source_load_latency_ms,
         source_db=args.source_pool_db,
     )
@@ -2715,6 +3029,7 @@ def main() -> int:
                     generator_families=tuple(active_families),
                     family_quotas=family_quotas,
                     source_atoms=source_atoms,
+                    source_influence_share=source_influence_share,
                     max_per_prefix2=max(1, args.max_per_prefix2),
                     max_per_suffix2=max(1, args.max_per_suffix2),
                     max_per_shape=max(1, args.max_per_shape),
@@ -2731,6 +3046,7 @@ def main() -> int:
                 active_families,
                 family_quotas,
                 source_atoms,
+                source_influence_share,
                 max(1, args.max_per_prefix2),
                 max(1, args.max_per_suffix2),
                 max(1, args.max_per_shape),
@@ -2747,6 +3063,7 @@ def main() -> int:
         'generation',
         generated_count=len(generated_items),
         family_counts=family_generation_counts,
+        effective_family_quotas={family: int(family_quotas.get(family, 0)) for family in active_families},
         latency_ms=generation_latency_ms,
     )
 
@@ -2754,6 +3071,7 @@ def main() -> int:
         print(
             f'generation_config families={",".join(active_families)} '
             f'source_atoms={len(source_atoms)} source_db={args.source_pool_db} '
+            f'source_influence_share={source_influence_share:.2f} '
             f'pipeline={flags.pipeline_version} v3_enabled={flags.v3_enabled} '
             f'engine_interfaces={flags.use_engine_interfaces}'
         )
@@ -2806,6 +3124,11 @@ def main() -> int:
         pool_source = cheap_pass
     else:
         pool_source = ranked_all
+    pool_source = rebalance_candidate_source_influence(
+        pool_source,
+        source_tokens=source_token_set(source_atoms),
+        source_influence_share=source_influence_share,
+    )
     pool = pool_source[: max(1, args.pool_size)]
     to_check = pool[: max(1, args.check_limit)]
 
@@ -2821,6 +3144,13 @@ def main() -> int:
             if c:
                 to_check.append(c)
                 in_check.add(c.name)
+    source_tokens = source_token_set(source_atoms)
+    pool_influenced_count = sum(
+        1 for candidate in pool if candidate_is_source_influenced(candidate, source_tokens)
+    )
+    check_influenced_count = sum(
+        1 for candidate in to_check if candidate_is_source_influenced(candidate, source_tokens)
+    )
     emit_stage_event(
         args.stage_events,
         'finalist_selection',
@@ -2829,6 +3159,9 @@ def main() -> int:
         finalist_count=len(to_check),
         requested_pool_size=max(1, args.pool_size),
         requested_check_limit=max(1, args.check_limit),
+        source_influence_share_target=source_influence_share,
+        pool_source_influenced_count=pool_influenced_count,
+        finalists_source_influenced_count=check_influenced_count,
     )
 
     external_started = time.monotonic()
