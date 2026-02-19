@@ -9,12 +9,15 @@ This script is intended for first-time long runs:
 
 from __future__ import annotations
 
+import atexit
 import argparse
 import csv
 import datetime as dt
 import json
+import os
 import shlex
 import shutil
+import socket
 import subprocess
 import time
 from collections import deque
@@ -43,6 +46,74 @@ def run_cmd(cmd: list[str], *, cwd: Path, log_path: Path) -> int:
         handle.flush()
         proc = subprocess.run(cmd, cwd=str(cwd), stdout=handle, stderr=subprocess.STDOUT, check=False)
     return int(proc.returncode)
+
+
+def pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def read_lock_payload(lock_path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(lock_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def acquire_campaign_lock(*, out_dir: Path, shard_id: int, shard_count: int) -> tuple[Path | None, str]:
+    lock_path = out_dir / f'.campaign_lock_shard_{shard_id}.json'
+    payload = {
+        'pid': os.getpid(),
+        'host': socket.gethostname(),
+        'created_at': dt.datetime.now().isoformat(timespec='seconds'),
+        'shard_id': int(shard_id),
+        'shard_count': int(shard_count),
+    }
+    for _ in range(2):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            existing = read_lock_payload(lock_path)
+            existing_pid = int(existing.get('pid') or 0)
+            existing_host = str(existing.get('host') or 'unknown')
+            existing_created = str(existing.get('created_at') or 'unknown')
+            if existing_pid > 0 and pid_is_alive(existing_pid):
+                return None, (
+                    f'active_pid={existing_pid} host={existing_host} '
+                    f'created_at={existing_created}'
+                )
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                return None, f'stale_lock_remove_failed={exc}'
+            continue
+        except OSError as exc:
+            return None, f'lock_open_failed={exc}'
+        else:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+                handle.write('\n')
+            return lock_path, ''
+    return None, 'lock_acquire_failed_after_retries'
+
+
+def release_campaign_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 
 
 def extract_run_summary(validator_log: Path) -> dict[str, object]:
@@ -289,6 +360,20 @@ def main() -> int:
         f'check_limit={args.check_limit} validator_tier={args.validator_tier} '
         f'validator_candidate_limit={args.validator_candidate_limit}'
     )
+
+    lock_path, lock_error = acquire_campaign_lock(
+        out_dir=out_dir,
+        shard_id=int(args.shard_id),
+        shard_count=int(args.shard_count),
+    )
+    if lock_path is None:
+        print(
+            f'campaign_lock_blocked out_dir={out_dir} '
+            f'shard={args.shard_id + 1}/{args.shard_count} reason={lock_error}'
+        )
+        return 2
+    atexit.register(release_campaign_lock, lock_path)
+    print(f'campaign_lock_acquired path={lock_path}')
 
     if args.mini_test:
         if args.shard_count > 1 and args.shard_id != 0:
