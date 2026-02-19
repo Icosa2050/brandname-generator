@@ -58,6 +58,40 @@ AVAILABILITY_TEXT_PATTERN = re.compile(
     r'\b(domain|trademark|tm|app\s*store|play\s*store|social|handle)\b.*\b(available|free|clear|not taken)\b',
     re.IGNORECASE,
 )
+TXT_COLON_PAIR_PATTERN = re.compile(r'^\s*([A-Z][a-z]{2,24})\s*:\s*([^|]{2,160})\s*$')
+TXT_PAREN_PAIR_PATTERN = re.compile(r'\b([A-Z][a-z]{2,24})\s*\(([^()]{2,100})\)')
+TXT_SIMPLE_ATOM_PATTERN = re.compile(r"^[A-Za-z][A-Za-z' -]{1,30}$")
+TXT_BLOCKED_NAME_TOKENS = {
+    'also',
+    'and',
+    'are',
+    'beautiful',
+    'categorized',
+    'common',
+    'cooperating',
+    'deep',
+    'expressions',
+    'girl',
+    'guy',
+    'here',
+    'hospitality',
+    'like',
+    'meaning',
+    'meaningful',
+    'nature',
+    'often',
+    'person',
+    'popular',
+    'strong',
+    'symbolism',
+    'the',
+    'thebump',
+    'these',
+    'used',
+    'volunteer',
+    'words',
+    'would',
+}
 
 
 def parse_csv_set(raw: str) -> list[str]:
@@ -230,14 +264,85 @@ def parse_json(path: Path, default_label: str, default_conf: float) -> list[Sour
     return rows
 
 
+def _normalize_gloss(text: str) -> str:
+    gloss = re.sub(r'\s+', ' ', text).strip().strip('.,;:!?')
+    if gloss.lower().startswith('meaning '):
+        gloss = gloss[8:].strip()
+    return gloss
+
+
+def _is_usable_name_token(raw_name: str) -> bool:
+    if not re.fullmatch(r'[A-Z][a-z]{2,24}', raw_name.strip()):
+        return False
+    normalized = ndb.normalize_name(raw_name)
+    if not normalized or normalized in TXT_BLOCKED_NAME_TOKENS:
+        return False
+    return True
+
+
+def _build_gloss_record(
+    name: str,
+    meaning: str,
+    default_label: str,
+    default_conf: float,
+    swahili_hint: bool,
+    extraction_tag: str,
+) -> SourceRecord | None:
+    if not _is_usable_name_token(name):
+        return None
+    cleaned_meaning = _normalize_gloss(meaning)
+    if not cleaned_meaning:
+        return None
+    lowered_meaning = cleaned_meaning.lower()
+    if 'http' in lowered_meaning or '.com' in lowered_meaning:
+        return None
+    if len(cleaned_meaning) > 140:
+        return None
+    return SourceRecord(
+        name=name.strip(),
+        language_hint='sw' if swahili_hint else '',
+        semantic_category='name_gloss',
+        confidence_weight=min(1.0, default_conf + 0.03),
+        source_label=f'{default_label}:txt_gloss',
+        note=cleaned_meaning,
+        provenance_tags=[f'extract:{extraction_tag}'],
+        metadata={
+            'meaning': cleaned_meaning,
+            'extraction': extraction_tag,
+        },
+    )
+
+
 def parse_txt(path: Path, default_label: str, default_conf: float) -> list[SourceRecord]:
+    text = path.read_text(encoding='utf-8')
+    swahili_hint = 'swahili' in text.lower()
     rows: list[SourceRecord] = []
-    for raw in path.read_text(encoding='utf-8').splitlines():
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith('#'):
             continue
         parts = [part.strip() for part in line.split('|')]
         if len(parts) == 1:
+            colon_match = TXT_COLON_PAIR_PATTERN.match(line)
+            if colon_match:
+                record = _build_gloss_record(
+                    colon_match.group(1),
+                    colon_match.group(2),
+                    default_label=default_label,
+                    default_conf=default_conf,
+                    swahili_hint=swahili_hint,
+                    extraction_tag='colon_line',
+                )
+                if record is not None:
+                    rows.append(record)
+                continue
+        if len(parts) == 1:
+            if len(line) > 32:
+                continue
+            if not TXT_SIMPLE_ATOM_PATTERN.fullmatch(line):
+                continue
+            if len([word for word in line.split() if word]) > 2:
+                continue
             rows.append(
                 SourceRecord(
                     name=parts[0],
@@ -265,6 +370,18 @@ def parse_txt(path: Path, default_label: str, default_conf: float) -> list[Sourc
                 metadata={},
             )
         )
+
+    for match in TXT_PAREN_PAIR_PATTERN.finditer(text):
+        record = _build_gloss_record(
+            match.group(1),
+            match.group(2),
+            default_label=default_label,
+            default_conf=default_conf,
+            swahili_hint=swahili_hint,
+            extraction_tag='parenthetical_pair',
+        )
+        if record is not None:
+            rows.append(record)
     return rows
 
 
