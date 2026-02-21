@@ -23,12 +23,38 @@ from pathlib import Path
 from typing import Iterable
 
 
+DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5000
+
+
 def now_iso() -> str:
     return dt.datetime.now().isoformat(timespec='seconds')
 
 
 def normalize_name(value: str) -> str:
     return re.sub(r'[^a-z]+', '', value.lower())
+
+
+def configure_connection(
+    conn: sqlite3.Connection,
+    *,
+    busy_timeout_ms: int = DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+    wal: bool = True,
+) -> None:
+    if wal:
+        conn.execute('PRAGMA journal_mode = WAL;')
+    conn.execute(f'PRAGMA busy_timeout = {max(0, int(busy_timeout_ms))};')
+    conn.execute('PRAGMA foreign_keys = ON;')
+
+
+def open_connection(
+    db_path: Path,
+    *,
+    busy_timeout_ms: int = DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+    wal: bool = True,
+) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    configure_connection(conn, busy_timeout_ms=busy_timeout_ms, wal=wal)
+    return conn
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -41,11 +67,15 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column_name: str, defin
     conn.execute(f'ALTER TABLE {table} ADD COLUMN {column_name} {definition_sql}')
 
 
-def ensure_schema(conn: sqlite3.Connection) -> None:
+def ensure_schema(
+    conn: sqlite3.Connection,
+    *,
+    busy_timeout_ms: int = DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+    wal: bool = True,
+) -> None:
+    configure_connection(conn, busy_timeout_ms=busy_timeout_ms, wal=wal)
     conn.executescript(
         """
-        PRAGMA foreign_keys = ON;
-
         CREATE TABLE IF NOT EXISTS naming_runs (
           id INTEGER PRIMARY KEY,
           created_at TEXT NOT NULL,
@@ -1054,7 +1084,7 @@ def main() -> int:
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with sqlite3.connect(db_path) as conn:
+    with open_connection(db_path) as conn:
         ensure_schema(conn)
 
         if args.command == 'init':

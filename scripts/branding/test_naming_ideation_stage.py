@@ -7,7 +7,6 @@ import csv
 import json
 import tempfile
 import unittest
-from io import BytesIO
 from pathlib import Path
 from unittest import mock
 from urllib import error
@@ -50,6 +49,26 @@ class NamingIdeationStageTest(unittest.TestCase):
             self.assertIn('fairbill', got)
             self.assertIn('veribill', got)
             self.assertIn('nexbill', got)  # punctuation is stripped by normalize_alpha_name
+
+    def test_load_fixture_candidates_with_usage_openrouter_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'fixture_openrouter.json'
+            path.write_text(
+                json.dumps(
+                    {
+                        'choices': [
+                            {'message': {'content': '{"candidates":[{"name":"Verodomo"},{"name":"Fairbill"}]}'}}
+                        ],
+                        'usage': {'prompt_tokens': 9, 'completion_tokens': 11, 'cost': 0.0021},
+                    }
+                )
+                + '\n',
+                encoding='utf-8',
+            )
+            names, usage, err = nide.load_fixture_candidates_with_usage(str(path))
+            self.assertEqual(err, '')
+            self.assertEqual(sorted(names), ['fairbill', 'verodomo'])
+            self.assertEqual(usage.get('prompt_tokens'), 9)
 
     def test_parse_candidate_payload_empty(self) -> None:
         self.assertEqual(nide.parse_candidate_payload(''), [])
@@ -129,7 +148,7 @@ class NamingIdeationStageTest(unittest.TestCase):
             code=404,
             msg='not found',
             hdrs=None,
-            fp=BytesIO(b'{"error":"model not found"}'),
+            fp=None,
         )
         second_payload = json.dumps(
             {
@@ -144,17 +163,19 @@ class NamingIdeationStageTest(unittest.TestCase):
             }
         )
         mock_urlopen.side_effect = [first_error, _FakeHTTPResponse(second_payload)]
-
-        names, usage, err = nide.call_openrouter_candidates(
-            api_key='k',
-            model='mistralai/mistral-small-creative',
-            prompt='hello',
-            timeout_ms=500,
-            strict_json=True,
-        )
-        self.assertEqual(err, '')
-        self.assertEqual(sorted(names), ['fairbill', 'verodomo'])
-        self.assertEqual(usage.get('prompt_tokens'), 12)
+        try:
+            names, usage, err = nide.call_openrouter_candidates(
+                api_key='k',
+                model='mistralai/mistral-small-creative',
+                prompt='hello',
+                timeout_ms=500,
+                strict_json=True,
+            )
+            self.assertEqual(err, '')
+            self.assertEqual(sorted(names), ['fairbill', 'verodomo'])
+            self.assertEqual(usage.get('prompt_tokens'), 12)
+        finally:
+            first_error.close()
 
     @mock.patch('naming_ideation_stage.request.urlopen')
     def test_call_openrouter_candidates_sets_attribution_headers(self, mock_urlopen: mock.Mock) -> None:
@@ -187,6 +208,12 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertEqual(usage.get('cost'), 0.0123)
         self.assertEqual(captured_headers.get('http-referer'), 'https://example.com/app')
         self.assertEqual(captured_headers.get('x-title'), 'Kostula Naming Pipeline')
+
+    def test_extract_openrouter_response_content_missing_choices(self) -> None:
+        content, usage, err = nide.extract_openrouter_response_content({'usage': {'cost': 0.01}})
+        self.assertEqual(content, '')
+        self.assertEqual(usage.get('cost'), 0.01)
+        self.assertEqual(err, 'missing_choices')
 
     def test_estimate_usage_cost_prefers_direct_cost(self) -> None:
         got = nide.estimate_usage_cost_usd(
@@ -255,6 +282,22 @@ class NamingIdeationStageTest(unittest.TestCase):
             )
             self.assertLessEqual(len(constraints['banned_tokens']), 3)
             self.assertLessEqual(len(constraints['banned_prefixes']), 2)
+
+    def test_evaluate_ideation_slo_breach(self) -> None:
+        got = nide.evaluate_ideation_slo(
+            attempted_rounds=5,
+            successful_rounds=2,
+            timeout_rounds=2,
+            empty_rounds=1,
+            min_success_rate=0.6,
+            max_timeout_rate=0.2,
+            max_empty_rate=0.1,
+            min_samples=3,
+        )
+        self.assertEqual(got['status'], 'breach')
+        self.assertIn('success_rate', got['breaches'])
+        self.assertIn('timeout_rate', got['breaches'])
+        self.assertIn('empty_rate', got['breaches'])
 
 
 if __name__ == '__main__':

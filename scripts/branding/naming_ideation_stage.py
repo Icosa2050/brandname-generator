@@ -252,20 +252,68 @@ def parse_candidate_payload(raw_text: str) -> list[str]:
     return sorted(set(out))
 
 
-def load_fixture_candidates(path: str) -> list[str]:
+def extract_openrouter_response_content(response: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    usage = response.get('usage') if isinstance(response.get('usage'), dict) else {}
+    choices = response.get('choices')
+    if not isinstance(choices, list) or not choices:
+        return '', usage, 'missing_choices'
+    msg = choices[0].get('message') if isinstance(choices[0], dict) else None
+    content = msg.get('content') if isinstance(msg, dict) else ''
+    if isinstance(content, list):
+        text_parts = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get('text'), str):
+                text_parts.append(part['text'])
+        content = '\n'.join(text_parts)
+    if not isinstance(content, str):
+        content = str(content or '')
+    return content, usage, ''
+
+
+def load_fixture_candidates_with_usage(path: str) -> tuple[list[str], dict[str, Any], str]:
     p = Path(path)
     if not path or not p.exists():
-        return []
-    raw = p.read_text(encoding='utf-8')
+        return [], {}, 'fixture_missing'
+    try:
+        raw = p.read_text(encoding='utf-8')
+    except OSError:
+        return [], {}, 'fixture_read_error'
+
+    payload: Any = None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = None
+
+    usage: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        if isinstance(payload.get('usage'), dict):
+            usage = payload['usage']
+        content, extracted_usage, extracted_err = extract_openrouter_response_content(payload)
+        if extracted_err == '':
+            names = parse_candidate_payload(content)
+            if names:
+                return names, extracted_usage, ''
+            return [], extracted_usage, 'candidate_parse_failed'
+
     names = parse_candidate_payload(raw)
     if names:
-        return names
+        return names, usage, ''
+
     fallback: list[str] = []
     for line in raw.splitlines():
         name = normalize_alpha_name(line.strip().strip('-*').strip())
         if 5 <= len(name) <= 12:
             fallback.append(name)
-    return sorted(set(fallback))
+    deduped = sorted(set(fallback))
+    if deduped:
+        return deduped, usage, ''
+    return [], usage, 'fixture_no_candidates'
+
+
+def load_fixture_candidates(path: str) -> list[str]:
+    names, _usage, _err = load_fixture_candidates_with_usage(path)
+    return names
 
 
 def canonical_constraints(constraints: dict[str, Any]) -> dict[str, Any]:
@@ -574,21 +622,9 @@ def call_openrouter_candidates(
             response = json.loads(raw)
         except json.JSONDecodeError:
             return '', {}, 'response_json_decode_error'
-        usage = response.get('usage') if isinstance(response, dict) and isinstance(response.get('usage'), dict) else {}
-        choices = response.get('choices') if isinstance(response, dict) else None
-        if not isinstance(choices, list) or not choices:
-            return '', usage, 'missing_choices'
-        msg = choices[0].get('message') if isinstance(choices[0], dict) else None
-        content = msg.get('content') if isinstance(msg, dict) else ''
-        if isinstance(content, list):
-            text_parts = []
-            for part in content:
-                if isinstance(part, dict) and isinstance(part.get('text'), str):
-                    text_parts.append(part['text'])
-            content = '\n'.join(text_parts)
-        if not isinstance(content, str):
-            content = str(content or '')
-        return content, usage, ''
+        if not isinstance(response, dict):
+            return '', {}, 'response_invalid_root'
+        return extract_openrouter_response_content(response)
 
     fallback_http_errors = {'http_400', 'http_404', 'http_422'}
     last_usage: dict[str, Any] = {}
@@ -632,6 +668,73 @@ def estimate_usage_cost_usd(
     in_cost = (prompt_tokens / 1000.0) * max(0.0, in_price_per_1k)
     out_cost = (completion_tokens / 1000.0) * max(0.0, out_price_per_1k)
     return round(in_cost + out_cost, 8)
+
+
+def evaluate_ideation_slo(
+    *,
+    attempted_rounds: int,
+    successful_rounds: int,
+    timeout_rounds: int,
+    empty_rounds: int,
+    min_success_rate: float,
+    max_timeout_rate: float,
+    max_empty_rate: float,
+    min_samples: int,
+) -> dict[str, Any]:
+    attempted = max(0, int(attempted_rounds))
+    successful = max(0, int(successful_rounds))
+    timeouts = max(0, int(timeout_rounds))
+    empty = max(0, int(empty_rounds))
+    samples_required = max(1, int(min_samples))
+    if attempted <= 0:
+        return {
+            'status': 'insufficient_samples',
+            'attempted_rounds': attempted,
+            'successful_rounds': successful,
+            'timeout_rounds': timeouts,
+            'empty_rounds': empty,
+            'success_rate': 0.0,
+            'timeout_rate': 0.0,
+            'empty_rate': 0.0,
+            'min_samples': samples_required,
+            'breaches': ['no_attempts'],
+            'pass': False,
+        }
+
+    success_rate = successful / attempted
+    timeout_rate = timeouts / attempted
+    empty_rate = empty / attempted
+    breaches: list[str] = []
+    if attempted < samples_required:
+        status = 'insufficient_samples'
+    else:
+        status = 'pass'
+        if success_rate < max(0.0, min(1.0, min_success_rate)):
+            breaches.append('success_rate')
+        if timeout_rate > max(0.0, min(1.0, max_timeout_rate)):
+            breaches.append('timeout_rate')
+        if empty_rate > max(0.0, min(1.0, max_empty_rate)):
+            breaches.append('empty_rate')
+        if breaches:
+            status = 'breach'
+    return {
+        'status': status,
+        'attempted_rounds': attempted,
+        'successful_rounds': successful,
+        'timeout_rounds': timeouts,
+        'empty_rounds': empty,
+        'success_rate': round(success_rate, 4),
+        'timeout_rate': round(timeout_rate, 4),
+        'empty_rate': round(empty_rate, 4),
+        'min_samples': samples_required,
+        'thresholds': {
+            'min_success_rate': round(max(0.0, min(1.0, min_success_rate)), 4),
+            'max_timeout_rate': round(max(0.0, min(1.0, max_timeout_rate)), 4),
+            'max_empty_rate': round(max(0.0, min(1.0, max_empty_rate)), 4),
+        },
+        'breaches': breaches,
+        'pass': bool(status == 'pass'),
+    }
 
 
 def parse_family_quotas(raw: str) -> dict[str, int]:

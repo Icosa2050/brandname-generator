@@ -7,7 +7,7 @@
         "description": "Harden OpenRouter generation so candidate output remains valid and deterministic under retries, model catalog drift, and budget/time constraints.",
         "details": "Audit and strengthen ideation stage contracts, retries, cache keys, and fallback behavior. Ensure candidate provenance is complete per run.",
         "testStrategy": "Run fixture and live smoke modes; verify schema-conformant candidate output and deterministic fail-open behavior.",
-        "status": "pending",
+        "status": "done",
         "dependencies": [],
         "priority": "high",
         "subtasks": [
@@ -15,8 +15,8 @@
             "id": 1,
             "title": "Codify ideation SLOs and failure modes",
             "description": "Define explicit SLOs for success rate, timeout rate, and empty-response handling.",
-            "details": "",
-            "status": "pending",
+            "details": "Implemented ideation SLO codification in `scripts/branding/naming_ideation_stage.py` via `evaluate_ideation_slo(...)` and wired it into `scripts/branding/naming_campaign_runner.py`. Added SLO knobs: `--llm-slo-min-success-rate`, `--llm-slo-max-timeout-rate`, `--llm-slo-max-empty-rate`, `--llm-slo-min-samples`, and deterministic fail-open toggle `--llm-slo-fail-open/--no-llm-slo-fail-open`. Progress CSV rows now include SLO status/rates/breaches so run health is visible without tailing logs.",
+            "status": "done",
             "dependencies": [],
             "parentTaskId": 1
           },
@@ -24,8 +24,8 @@
             "id": 2,
             "title": "Add fixture parity checks",
             "description": "Ensure fixture mode mirrors provider response shape and parser paths.",
-            "details": "",
-            "status": "pending",
+            "details": "Added fixture/provider parser parity by extracting shared response parsing into `extract_openrouter_response_content(...)` and introducing `load_fixture_candidates_with_usage(...)`. Fixture mode now accepts OpenRouter-shaped envelopes (`choices[].message.content`) and usage metadata, and still falls back safely to JSON/line parsing. Added unit coverage in `scripts/branding/test_naming_ideation_stage.py` for OpenRouter-shape fixture parsing and response extraction edge cases.",
+            "status": "done",
             "dependencies": [
               "1.1"
             ],
@@ -39,7 +39,7 @@
         "description": "Increase validator throughput with bounded parallelism and stronger DB contention controls.",
         "details": "Evaluate in-process asyncio scaling versus shard-level parallel workers. Add guardrails for SQLite lock pressure.",
         "testStrategy": "Benchmark jobs/sec across representative candidate/check counts and validate stable summaries.",
-        "status": "pending",
+        "status": "in-progress",
         "dependencies": [
           "1"
         ],
@@ -50,8 +50,8 @@
             "title": "Enable WAL mode and busy_timeout for SQLite contention resilience",
             "description": "Configure SQLite connections in naming_db.py and naming_validate_async.py to use WAL journal mode and a busy_timeout, reducing lock contention for concurrent readers/writers.",
             "dependencies": [],
-            "details": "In `naming_db.py:ensure_schema()` (line 44), add `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;` before the existing `PRAGMA foreign_keys = ON;`. Also add the same PRAGMAs in `naming_validate_async.py` for the memory DB connection opened at line 1291. WAL mode allows concurrent reads during writes, and busy_timeout prevents immediate SQLITE_BUSY errors under contention. Ensure the PRAGMAs are set before any schema or data operations. Add a `--sqlite-busy-timeout-ms` CLI arg to `naming_validate_async.py` (default 5000) so the timeout is tunable.",
-            "status": "pending",
+            "details": "Completed via shared SQLite configuration in `scripts/branding/naming_db.py` (`configure_connection`, `open_connection`) with WAL + busy_timeout + foreign_keys. `scripts/branding/naming_validate_async.py` now accepts `--sqlite-busy-timeout-ms` and applies it to both primary DB and memory DB connections before schema/data operations.",
+            "status": "done",
             "testStrategy": "Unit test: open two connections to same DB, start a write transaction on one, verify the second connection can still read (WAL) and that a write on the second connection waits up to busy_timeout before failing. Verify PRAGMA values with `PRAGMA journal_mode` and `PRAGMA busy_timeout` queries after ensure_schema()."
           },
           {
@@ -61,8 +61,8 @@
             "dependencies": [
               1
             ],
-            "details": "Add a `def open_connection(db_path: Path, *, busy_timeout_ms: int = 5000, wal: bool = True) -> sqlite3.Connection` function in `naming_db.py`. This function calls `sqlite3.connect(db_path)`, sets `PRAGMA journal_mode=WAL` (if wal=True), `PRAGMA busy_timeout={busy_timeout_ms}`, `PRAGMA foreign_keys=ON`, and returns the connection. Update `naming_validate_async.py:orchestrate()` (line 1285) and `naming_campaign_runner.py` (which calls subprocess scripts that open their own connections) to use this factory. The campaign runner itself doesn't open SQLite directly (it shells out), but ensure the validator and naming_db CLI entry points use the factory.",
-            "status": "pending",
+            "details": "Completed by adding `open_connection(db_path, busy_timeout_ms=..., wal=...)` in `scripts/branding/naming_db.py` and wiring it into `naming_db.py` CLI `main()` plus `scripts/branding/naming_validate_async.py:orchestrate()`. Added regression tests in `scripts/branding/test_naming_db.py` for PRAGMA correctness and contention behavior.",
+            "status": "done",
             "testStrategy": "Unit test: call open_connection with a temp DB path, verify journal_mode is 'wal', busy_timeout matches the provided value, and foreign_keys is ON. Verify ensure_schema still works when called on the returned connection."
           },
           {

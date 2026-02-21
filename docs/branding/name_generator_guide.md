@@ -190,8 +190,13 @@ python3 scripts/branding/naming_campaign_runner.py \
   --llm-max-usd-per-run=0.50 \
   --llm-pricing-input-per-1k=0.0006 \
   --llm-pricing-output-per-1k=0.0006 \
+  --llm-slo-min-success-rate=0.60 \
+  --llm-slo-max-timeout-rate=0.35 \
+  --llm-slo-max-empty-rate=0.40 \
+  --llm-slo-fail-open \
   --llm-cache-dir=test_outputs/branding/llm_cache \
   --validator-state-filter=new \
+  --sqlite-busy-timeout-ms=5000 \
   --validator-memory-db=test_outputs/branding/naming_exclusion_memory.db \
   --validator-memory-ttl-days=180 \
   --dynamic-window-runs=5 \
@@ -206,11 +211,16 @@ Notes:
 - Optional attribution headers: `--llm-openrouter-http-referer` and `--llm-openrouter-x-title`
   (or env vars `OPENROUTER_HTTP_REFERER`, `OPENROUTER_X_TITLE`).
 - `--llm-provider=fixture --llm-fixture-input=<file>` is useful for offline smoke tests.
+- Fixture mode can now consume OpenRouter-style response envelopes (`choices[].message.content`) to mirror live parser behavior.
 - `--llm-context-file=<json>` injects product/user/tone guidance into the LLM prompt.
 - Example context packet: `docs/branding/llm_context.example.json`.
 - `llm_cost_usd` now prefers provider-reported `usage.cost` when available; token-price flags remain fallback estimation.
+- Ideation SLO thresholds are configurable via `--llm-slo-min-success-rate`, `--llm-slo-max-timeout-rate`,
+  `--llm-slo-max-empty-rate`, and `--llm-slo-min-samples`; breach metadata is emitted in progress rows.
+- `--llm-slo-fail-open` keeps campaign runs deterministic even when SLO breaches are recorded.
 - `--generator-only-llm-candidates` keeps generator output focused on model candidates (avoids deterministic legacy families in the same run).
 - `--validator-state-filter=new` avoids revalidating `checked` names in follow-up runs; use `new,checked` only for explicit refresh.
+- `--sqlite-busy-timeout-ms` tunes SQLite lock wait behavior for validator primary/memory DB connections.
 - `--validator-memory-db` stores persistent hard-fail exclusions across campaigns so eliminated names are skipped in later runs.
 - `--validator-memory-ttl-days` controls exclusion memory lifetime; policy signature + scope + gate must match to apply.
 - Campaign default memory DB is `test_outputs/branding/naming_exclusion_memory.db` (override per branch/experiment if needed).

@@ -7,7 +7,9 @@ import argparse
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 import naming_db as ndb
 import naming_validate_async as nva
@@ -36,6 +38,11 @@ def _base_args() -> argparse.Namespace:
 
 
 class NamingValidateAsyncMemoryTest(unittest.TestCase):
+    def test_parse_args_accepts_sqlite_busy_timeout(self) -> None:
+        with mock.patch('sys.argv', ['naming_validate_async.py', '--sqlite-busy-timeout-ms', '1234']):
+            args = nva.parse_args()
+        self.assertEqual(args.sqlite_busy_timeout_ms, 1234)
+
     def test_policy_signature_is_stable(self) -> None:
         args = _base_args()
         flags = nva.ValidationFeatureFlags(pipeline_version='v3', v3_enabled=True, validation_tier='all')
@@ -47,7 +54,7 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
     def test_exclusion_memory_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             mem_path = Path(td) / 'memory.db'
-            with sqlite3.connect(mem_path) as mem_conn:
+            with closing(sqlite3.connect(mem_path)) as mem_conn:
                 nva.ensure_exclusion_memory_schema(mem_conn)
                 upserted = nva.upsert_exclusion_memory(
                     mem_conn,
@@ -76,7 +83,7 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 self.assertEqual(miss, set())
 
     def test_mark_candidates_memory_excluded_sets_state(self) -> None:
-        with sqlite3.connect(':memory:') as conn:
+        with closing(sqlite3.connect(':memory:')) as conn:
             ndb.ensure_schema(conn)
             candidate_id = ndb.upsert_candidate(
                 conn,
@@ -110,7 +117,7 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             self.assertEqual(got, ('memory_excluded', 'rejected_memory', 'memory_excluded'))
 
     def test_collect_hard_fail_reasons_by_name(self) -> None:
-        with sqlite3.connect(':memory:') as conn:
+        with closing(sqlite3.connect(':memory:')) as conn:
             ndb.ensure_schema(conn)
             run_id = ndb.create_run(
                 conn,
@@ -163,4 +170,3 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

@@ -169,6 +169,11 @@ def append_progress_row(path: Path, row: dict[str, object]) -> None:
         'llm_candidate_count',
         'llm_cost_usd',
         'llm_stage_status',
+        'llm_slo_status',
+        'llm_slo_success_rate',
+        'llm_slo_timeout_rate',
+        'llm_slo_empty_rate',
+        'llm_slo_breaches',
         'shard_id',
         'shard_count',
         'shard_combo_count',
@@ -270,6 +275,18 @@ def run_active_llm_ideation(
         'errors': [],
         'context_enabled': bool(context_packet),
         'context_hash': context_hash,
+        'slo': {
+            'status': 'skipped',
+            'attempted_rounds': 0,
+            'successful_rounds': 0,
+            'timeout_rounds': 0,
+            'empty_rounds': 0,
+            'success_rate': 0.0,
+            'timeout_rate': 0.0,
+            'empty_rate': 0.0,
+            'breaches': [],
+            'pass': False,
+        },
     }
     if not args.llm_ideation_enabled:
         return None, report
@@ -293,6 +310,10 @@ def run_active_llm_ideation(
     stage_started = time.monotonic()
     total_cost = 0.0
     last_call_cost = 0.0
+    attempted_rounds = 0
+    successful_rounds = 0
+    timeout_rounds = 0
+    empty_rounds = 0
     llm_log = logs_dir / f'{run_id}_llm.log'
     cache_dir = Path(args.llm_cache_dir).expanduser() if args.llm_cache_dir else Path()
 
@@ -302,16 +323,39 @@ def run_active_llm_ideation(
             handle.write(line.rstrip() + '\n')
 
     if args.llm_provider == 'fixture':
-        fixture_names = nide.load_fixture_candidates(args.llm_fixture_input)
+        attempted_rounds = 1
+        fixture_names, fixture_usage, fixture_err = nide.load_fixture_candidates_with_usage(args.llm_fixture_input)
         names = fixture_names[:target_total]
-        report['status'] = 'ok_fixture'
+        if names:
+            successful_rounds = 1
+            total_cost = nide.estimate_usage_cost_usd(
+                usage=fixture_usage,
+                in_price_per_1k=max(0.0, float(args.llm_pricing_input_per_1k)),
+                out_price_per_1k=max(0.0, float(args.llm_pricing_output_per_1k)),
+            )
+            report['status'] = 'ok_fixture'
+        else:
+            empty_rounds = 1
+            report['status'] = 'fixture_empty'
+            if fixture_err:
+                report['errors'].append(f'fixture:{fixture_err}')
     elif args.llm_provider == 'pal':
-        fixture_names = nide.load_fixture_candidates(args.llm_fixture_input)
+        attempted_rounds = 1
+        fixture_names, fixture_usage, fixture_err = nide.load_fixture_candidates_with_usage(args.llm_fixture_input)
         if fixture_names:
             names = fixture_names[:target_total]
+            successful_rounds = 1
+            total_cost = nide.estimate_usage_cost_usd(
+                usage=fixture_usage,
+                in_price_per_1k=max(0.0, float(args.llm_pricing_input_per_1k)),
+                out_price_per_1k=max(0.0, float(args.llm_pricing_output_per_1k)),
+            )
             report['status'] = 'ok_pal_fixture'
         else:
+            empty_rounds = 1
             report['status'] = 'pal_unavailable_without_fixture'
+            if fixture_err:
+                report['errors'].append(f'pal_fixture:{fixture_err}')
             report['errors'].append('pal mode requires fixture input in CLI runner')
     else:
         api_key = os.environ.get(args.llm_api_key_env, '').strip()
@@ -329,9 +373,11 @@ def run_active_llm_ideation(
             else:
                 report['status'] = 'running'
                 for round_idx in range(max(1, int(args.llm_rounds))):
+                    attempted_rounds += 1
                     elapsed_ms = int((time.monotonic() - stage_started) * 1000)
                     if elapsed_ms >= max(1000, int(args.llm_stage_timeout_ms)):
                         report['status'] = 'stage_timeout'
+                        timeout_rounds += 1
                         break
                     if args.llm_max_usd_per_run > 0:
                         projected = total_cost + max(last_call_cost, 0.0)
@@ -370,6 +416,11 @@ def run_active_llm_ideation(
                         )
                     if cached is not None:
                         round_names = cached
+                        if round_names:
+                            successful_rounds += 1
+                        else:
+                            empty_rounds += 1
+                            report['errors'].append(f'round={round_idx + 1}:cache_empty')
                         report['cache_hits'] = int(report['cache_hits']) + 1
                         append_log(f'round={round_idx + 1} mode={mode_key} source=cache names={len(round_names)}')
                     else:
@@ -388,6 +439,7 @@ def run_active_llm_ideation(
                             )
                             if call_names:
                                 round_names = call_names
+                                successful_rounds += 1
                                 call_cost = nide.estimate_usage_cost_usd(
                                     usage=usage,
                                     in_price_per_1k=max(0.0, float(args.llm_pricing_input_per_1k)),
@@ -414,6 +466,10 @@ def run_active_llm_ideation(
                                 append_log(f'round={round_idx + 1} retry={attempt + 1} err={err} sleep_s={sleep_s:.2f}')
                                 time.sleep(sleep_s)
                                 continue
+                            if err == 'timeout':
+                                timeout_rounds += 1
+                            else:
+                                empty_rounds += 1
                             report['errors'].append(f'round={round_idx + 1}:{err}')
                             append_log(f'round={round_idx + 1} err={err}')
                             break
@@ -440,6 +496,21 @@ def run_active_llm_ideation(
     names = names[:target_total]
     report['candidate_count'] = len(names)
     report['cost_usd'] = round(total_cost, 6)
+    slo = nide.evaluate_ideation_slo(
+        attempted_rounds=attempted_rounds,
+        successful_rounds=successful_rounds,
+        timeout_rounds=timeout_rounds,
+        empty_rounds=empty_rounds,
+        min_success_rate=max(0.0, min(1.0, float(args.llm_slo_min_success_rate))),
+        max_timeout_rate=max(0.0, min(1.0, float(args.llm_slo_max_timeout_rate))),
+        max_empty_rate=max(0.0, min(1.0, float(args.llm_slo_max_empty_rate))),
+        min_samples=max(1, int(args.llm_slo_min_samples)),
+    )
+    report['slo'] = slo
+    if slo.get('status') == 'breach':
+        report['errors'].append(f'slo_breach:{",".join(slo.get("breaches", []))}')
+        if not bool(args.llm_slo_fail_open):
+            report['status'] = 'slo_breach'
     if not names:
         return None, report
 
@@ -454,6 +525,8 @@ def run_active_llm_ideation(
             'status': report['status'],
             'cost_usd': report['cost_usd'],
             'context_hash': context_hash,
+            'slo_status': slo.get('status'),
+            'slo_breaches': slo.get('breaches', []),
         },
     }
     artifact_path.write_text(json.dumps(artifact_payload, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -759,6 +832,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--llm-max-usd-per-run', type=float, default=0.0, help='Budget cap for LLM calls (0 disables cap).')
     parser.add_argument('--llm-pricing-input-per-1k', type=float, default=0.0, help='Estimated input token price USD per 1k.')
     parser.add_argument('--llm-pricing-output-per-1k', type=float, default=0.0, help='Estimated output token price USD per 1k.')
+    parser.add_argument(
+        '--llm-slo-min-success-rate',
+        type=float,
+        default=0.60,
+        help='Minimum successful-round ratio expected for ideation stage (0-1).',
+    )
+    parser.add_argument(
+        '--llm-slo-max-timeout-rate',
+        type=float,
+        default=0.35,
+        help='Maximum timeout-round ratio tolerated for ideation stage (0-1).',
+    )
+    parser.add_argument(
+        '--llm-slo-max-empty-rate',
+        type=float,
+        default=0.40,
+        help='Maximum empty/error-round ratio tolerated for ideation stage (0-1).',
+    )
+    parser.add_argument(
+        '--llm-slo-min-samples',
+        type=int,
+        default=1,
+        help='Minimum round samples required before SLO pass/breach judgment.',
+    )
+    parser.add_argument(
+        '--llm-slo-fail-open',
+        dest='llm_slo_fail_open',
+        action='store_true',
+        default=True,
+        help='Keep run deterministic fail-open when ideation SLO is breached.',
+    )
+    parser.add_argument('--no-llm-slo-fail-open', dest='llm_slo_fail_open', action='store_false')
     parser.add_argument('--llm-cache-dir', default='', help='Optional cache directory for LLM round responses.')
     parser.add_argument('--llm-cache-ttl-days', type=int, default=7, help='Cache TTL in days.')
     parser.add_argument('--llm-fixture-input', default='', help='Fixture input file used by fixture/pal modes.')
@@ -872,6 +977,10 @@ def main() -> int:
         f'validator_memory_ttl_days={int(args.validator_memory_ttl_days)} '
         f'reset_db={args.reset_db} '
         f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} llm_model={args.llm_model} '
+        f'llm_slo_min_success_rate={float(args.llm_slo_min_success_rate):.2f} '
+        f'llm_slo_max_timeout_rate={float(args.llm_slo_max_timeout_rate):.2f} '
+        f'llm_slo_max_empty_rate={float(args.llm_slo_max_empty_rate):.2f} '
+        f'llm_slo_fail_open={bool(args.llm_slo_fail_open)} '
         f'generator_only_llm={args.generator_only_llm_candidates} '
         f'llm_context_enabled={bool(llm_context_packet)} '
         f'llm_attribution_headers={bool(str(args.llm_openrouter_http_referer).strip() or str(args.llm_openrouter_x_title).strip())}'
@@ -1055,6 +1164,13 @@ def main() -> int:
             'status': 'skipped',
             'candidate_count': 0,
             'cost_usd': 0.0,
+            'slo': {
+                'status': 'skipped',
+                'success_rate': 0.0,
+                'timeout_rate': 0.0,
+                'empty_rate': 0.0,
+                'breaches': [],
+            },
         }
         if llm_active_for_run:
             llm_artifact, llm_report = run_active_llm_ideation(
@@ -1085,6 +1201,11 @@ def main() -> int:
                     'llm_candidate_count': llm_report.get('candidate_count', 0),
                     'llm_cost_usd': llm_report.get('cost_usd', 0.0),
                     'llm_stage_status': llm_report.get('status', 'skipped'),
+                    'llm_slo_status': (llm_report.get('slo') or {}).get('status', 'skipped'),
+                    'llm_slo_success_rate': (llm_report.get('slo') or {}).get('success_rate', 0.0),
+                    'llm_slo_timeout_rate': (llm_report.get('slo') or {}).get('timeout_rate', 0.0),
+                    'llm_slo_empty_rate': (llm_report.get('slo') or {}).get('empty_rate', 0.0),
+                    'llm_slo_breaches': json.dumps((llm_report.get('slo') or {}).get('breaches', []), ensure_ascii=False),
                     'shard_id': args.shard_id,
                     'shard_count': args.shard_count,
                     'shard_combo_count': len(shard_combos),
@@ -1175,6 +1296,11 @@ def main() -> int:
                     'llm_candidate_count': llm_report.get('candidate_count', 0),
                     'llm_cost_usd': llm_report.get('cost_usd', 0.0),
                     'llm_stage_status': llm_report.get('status', 'skipped'),
+                    'llm_slo_status': (llm_report.get('slo') or {}).get('status', 'skipped'),
+                    'llm_slo_success_rate': (llm_report.get('slo') or {}).get('success_rate', 0.0),
+                    'llm_slo_timeout_rate': (llm_report.get('slo') or {}).get('timeout_rate', 0.0),
+                    'llm_slo_empty_rate': (llm_report.get('slo') or {}).get('empty_rate', 0.0),
+                    'llm_slo_breaches': json.dumps((llm_report.get('slo') or {}).get('breaches', []), ensure_ascii=False),
                     'shard_id': args.shard_id,
                     'shard_count': args.shard_count,
                     'shard_combo_count': len(shard_combos),
@@ -1232,6 +1358,11 @@ def main() -> int:
                     'llm_candidate_count': llm_report.get('candidate_count', 0),
                     'llm_cost_usd': llm_report.get('cost_usd', 0.0),
                     'llm_stage_status': llm_report.get('status', 'skipped'),
+                    'llm_slo_status': (llm_report.get('slo') or {}).get('status', 'skipped'),
+                    'llm_slo_success_rate': (llm_report.get('slo') or {}).get('success_rate', 0.0),
+                    'llm_slo_timeout_rate': (llm_report.get('slo') or {}).get('timeout_rate', 0.0),
+                    'llm_slo_empty_rate': (llm_report.get('slo') or {}).get('empty_rate', 0.0),
+                    'llm_slo_breaches': json.dumps((llm_report.get('slo') or {}).get('breaches', []), ensure_ascii=False),
                     'shard_id': args.shard_id,
                     'shard_count': args.shard_count,
                     'shard_combo_count': len(shard_combos),
@@ -1299,6 +1430,11 @@ def main() -> int:
                 'llm_candidate_count': llm_report.get('candidate_count', 0),
                 'llm_cost_usd': llm_report.get('cost_usd', 0.0),
                 'llm_stage_status': llm_report.get('status', 'skipped'),
+                'llm_slo_status': (llm_report.get('slo') or {}).get('status', 'skipped'),
+                'llm_slo_success_rate': (llm_report.get('slo') or {}).get('success_rate', 0.0),
+                'llm_slo_timeout_rate': (llm_report.get('slo') or {}).get('timeout_rate', 0.0),
+                'llm_slo_empty_rate': (llm_report.get('slo') or {}).get('empty_rate', 0.0),
+                'llm_slo_breaches': json.dumps((llm_report.get('slo') or {}).get('breaches', []), ensure_ascii=False),
                 'shard_id': args.shard_id,
                 'shard_count': args.shard_count,
                 'shard_combo_count': len(shard_combos),

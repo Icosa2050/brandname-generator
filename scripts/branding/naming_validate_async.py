@@ -194,6 +194,12 @@ def parse_args() -> argparse.Namespace:
         help='Days to keep hard-fail exclusions active in memory DB.',
     )
     parser.add_argument(
+        '--sqlite-busy-timeout-ms',
+        type=int,
+        default=ndb.DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+        help='SQLite busy timeout in milliseconds for primary and memory DB connections.',
+    )
+    parser.add_argument(
         '--progress-every',
         type=int,
         default=20,
@@ -1282,13 +1288,14 @@ async def orchestrate(args: argparse.Namespace) -> int:
     memory_db_path = Path(args.memory_db).expanduser() if str(args.memory_db or '').strip() else None
     memory_policy_signature = exclusion_memory_policy_signature(args=args, checks=checks, flags=flags)
 
-    with sqlite3.connect(db_path) as conn:
-        ndb.ensure_schema(conn)
+    sqlite_busy_timeout_ms = max(0, int(args.sqlite_busy_timeout_ms))
+    with ndb.open_connection(db_path, busy_timeout_ms=sqlite_busy_timeout_ms, wal=True) as conn:
+        ndb.ensure_schema(conn, busy_timeout_ms=sqlite_busy_timeout_ms, wal=True)
         memory_conn: sqlite3.Connection | None = None
         memory_prefilter_count = 0
         if memory_db_path is not None:
             memory_db_path.parent.mkdir(parents=True, exist_ok=True)
-            memory_conn = sqlite3.connect(memory_db_path)
+            memory_conn = ndb.open_connection(memory_db_path, busy_timeout_ms=sqlite_busy_timeout_ms, wal=True)
             ensure_exclusion_memory_schema(memory_conn)
         while True:
             candidates = load_candidates(conn, states, args.candidate_limit)
@@ -1418,6 +1425,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'cheap_cache_ttl_s': int(args.cheap_cache_ttl_s),
                 'memory_db': str(memory_db_path) if memory_db_path is not None else '',
                 'memory_ttl_days': int(args.memory_ttl_days),
+                'sqlite_busy_timeout_ms': int(sqlite_busy_timeout_ms),
                 'memory_policy_signature': memory_policy_signature if memory_conn is not None else '',
                 'memory_prefilter_count': int(memory_prefilter_count),
             },
