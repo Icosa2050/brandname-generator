@@ -28,6 +28,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+import naming_db as ndb
 import naming_ideation_stage as nide
 
 
@@ -122,6 +123,142 @@ def release_campaign_lock(lock_path: Path) -> None:
         return
     except OSError:
         return
+
+
+def shard_db_path(base_db: Path, shard_id: int) -> Path:
+    suffix = base_db.suffix or '.db'
+    return base_db.with_name(f'{base_db.stem}_shard{int(shard_id)}{suffix}')
+
+
+def merge_shard_databases(
+    *,
+    target_db: Path,
+    shard_db_paths: list[Path],
+) -> dict[str, Any]:
+    existing_shards = [path for path in shard_db_paths if path.exists() and path.resolve() != target_db.resolve()]
+    if not existing_shards:
+        return {
+            'status': 'skipped_no_shard_dbs',
+            'target_db': str(target_db),
+            'requested_shards': [str(path) for path in shard_db_paths],
+            'existing_shards': [],
+            'merged_candidates': 0,
+            'merged_validation_results': 0,
+            'merged_candidate_scores': 0,
+            'merged_shortlist_decisions': 0,
+        }
+
+    target_db.parent.mkdir(parents=True, exist_ok=True)
+    merged_candidates = 0
+    merged_validation_results = 0
+    merged_candidate_scores = 0
+    merged_shortlist_decisions = 0
+    with ndb.open_connection(target_db) as conn:
+        ndb.ensure_schema(conn)
+        merge_run_id = ndb.create_run(
+            conn,
+            source_path=str(target_db),
+            scope='global',
+            gate_mode='balanced',
+            variation_profile='merge_shards',
+            status='running',
+            config={'shards': [str(path) for path in existing_shards]},
+            summary={},
+        )
+        conn.commit()
+
+        for idx, shard_db in enumerate(existing_shards):
+            alias = f'shard_{idx}'
+            conn.execute(f'ATTACH DATABASE ? AS {alias}', (str(shard_db),))
+            conn.execute(
+                f"""
+                INSERT OR IGNORE INTO candidates(
+                  name_display, name_normalized, first_seen_at, last_seen_at,
+                  current_score, current_risk, current_recommendation, state, state_updated_at,
+                  engine_id, parent_ids, status, rejection_reason, score_quality, score_total
+                )
+                SELECT
+                  name_display, name_normalized, first_seen_at, last_seen_at,
+                  current_score, current_risk, current_recommendation, state, state_updated_at,
+                  engine_id, parent_ids, status, rejection_reason, score_quality, score_total
+                FROM {alias}.candidates
+                """
+            )
+            merged_candidates += int(conn.execute('SELECT changes()').fetchone()[0] or 0)
+
+            conn.execute(
+                f"""
+                INSERT INTO validation_results(
+                  candidate_id, run_id, check_type, status, score_delta, hard_fail,
+                  reason, evidence_json, checked_at, cache_expires_at
+                )
+                SELECT
+                  tc.id, ?, vr.check_type, vr.status, vr.score_delta, vr.hard_fail,
+                  vr.reason, vr.evidence_json, vr.checked_at, vr.cache_expires_at
+                FROM {alias}.validation_results vr
+                JOIN {alias}.candidates sc ON sc.id = vr.candidate_id
+                JOIN candidates tc ON tc.name_normalized = sc.name_normalized
+                """,
+                (merge_run_id,),
+            )
+            merged_validation_results += int(conn.execute('SELECT changes()').fetchone()[0] or 0)
+
+            conn.execute(
+                f"""
+                INSERT INTO candidate_scores(
+                  candidate_id, run_id, quality_score, risk_score, external_penalty,
+                  total_score, recommendation, hard_fail, reason, created_at
+                )
+                SELECT
+                  tc.id, ?, cs.quality_score, cs.risk_score, cs.external_penalty,
+                  cs.total_score, cs.recommendation, cs.hard_fail, cs.reason, cs.created_at
+                FROM {alias}.candidate_scores cs
+                JOIN {alias}.candidates sc ON sc.id = cs.candidate_id
+                JOIN candidates tc ON tc.name_normalized = sc.name_normalized
+                """,
+                (merge_run_id,),
+            )
+            merged_candidate_scores += int(conn.execute('SELECT changes()').fetchone()[0] or 0)
+
+            conn.execute(
+                f"""
+                INSERT INTO shortlist_decisions(
+                  candidate_id, run_id, selected, shortlist_rank, bucket_key, reason, score, created_at
+                )
+                SELECT
+                  tc.id, ?, sd.selected, sd.shortlist_rank, sd.bucket_key, sd.reason, sd.score, sd.created_at
+                FROM {alias}.shortlist_decisions sd
+                JOIN {alias}.candidates sc ON sc.id = sd.candidate_id
+                JOIN candidates tc ON tc.name_normalized = sc.name_normalized
+                """,
+                (merge_run_id,),
+            )
+            merged_shortlist_decisions += int(conn.execute('SELECT changes()').fetchone()[0] or 0)
+
+            conn.commit()
+            conn.execute(f'DETACH DATABASE {alias}')
+
+        merge_summary = {
+            'status': 'merged',
+            'target_db': str(target_db),
+            'existing_shards': [str(path) for path in existing_shards],
+            'merged_candidates': int(merged_candidates),
+            'merged_validation_results': int(merged_validation_results),
+            'merged_candidate_scores': int(merged_candidate_scores),
+            'merged_shortlist_decisions': int(merged_shortlist_decisions),
+            'merge_run_id': int(merge_run_id),
+        }
+        conn.execute(
+            """
+            UPDATE naming_runs
+            SET status = ?, summary_json = ?
+            WHERE id = ?
+            """,
+            ('completed', json.dumps(merge_summary, ensure_ascii=False), merge_run_id),
+        )
+        conn.commit()
+
+    return merge_summary
 
 
 def extract_run_summary(validator_log: Path) -> dict[str, object]:
@@ -898,6 +1035,22 @@ def parse_args() -> argparse.Namespace:
         help='Ingest names.txt if present in repository root.',
     )
     parser.add_argument('--no-include-names-txt', dest='include_names_txt', action='store_false')
+    parser.add_argument(
+        '--shard-db-isolation',
+        dest='shard_db_isolation',
+        action='store_true',
+        default=True,
+        help='Use per-shard DB files when shard-count > 1 to avoid cross-shard write contention.',
+    )
+    parser.add_argument('--no-shard-db-isolation', dest='shard_db_isolation', action='store_false')
+    parser.add_argument(
+        '--merge-shards',
+        dest='merge_shards',
+        action='store_true',
+        default=True,
+        help='Merge shard DBs into main DB at campaign end (applies to shard 0 only).',
+    )
+    parser.add_argument('--no-merge-shards', dest='merge_shards', action='store_false')
     parser.add_argument('--shard-id', type=int, default=0, help='0-based shard id for parallel campaign workers.')
     parser.add_argument('--shard-count', type=int, default=1, help='Total number of shard workers.')
     return parser.parse_args()
@@ -909,7 +1062,7 @@ def main() -> int:
     stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
     out_dir = Path(args.out_dir).expanduser() if args.out_dir else root / 'test_outputs' / 'branding' / f'naming_campaign_{stamp}'
-    db_path = Path(args.db).expanduser() if args.db else out_dir / 'naming_campaign.db'
+    db_path_main = Path(args.db).expanduser() if args.db else out_dir / 'naming_campaign.db'
 
     logs_dir = out_dir / 'logs'
     runs_dir = out_dir / 'runs'
@@ -935,6 +1088,18 @@ def main() -> int:
     if args.shard_id < 0 or args.shard_id >= args.shard_count:
         print('Invalid shard configuration: --shard-id must be in range [0, --shard-count).')
         return 1
+    shard_db_isolation_enabled = bool(args.shard_db_isolation and args.shard_count > 1)
+    db_path_worker = (
+        shard_db_path(db_path_main, args.shard_id)
+        if shard_db_isolation_enabled
+        else db_path_main
+    )
+    merge_shards_enabled = bool(
+        args.merge_shards
+        and shard_db_isolation_enabled
+        and args.shard_id == 0
+        and args.shard_count > 1
+    )
     llm_context_packet: dict[str, Any] = {}
     if args.llm_context_file.strip():
         try:
@@ -971,6 +1136,8 @@ def main() -> int:
         f'campaign_config hours={args.hours} max_runs={args.max_runs} sleep_s={args.sleep_s} '
         f'shares={shares} scopes={scopes} gates={gates} quota_profiles={len(quota_profiles)} '
         f'shard={args.shard_id + 1}/{args.shard_count} shard_combo_count={len(shard_combos)} '
+        f'shard_db_isolation={shard_db_isolation_enabled} db_main={db_path_main} db_worker={db_path_worker} '
+        f'merge_shards={merge_shards_enabled} '
         f'check_limit={args.check_limit} validator_tier={args.validator_tier} '
         f'validator_candidate_limit={args.validator_candidate_limit} validator_state_filter={args.validator_state_filter} '
         f'validator_memory_enabled={bool(str(args.validator_memory_db).strip())} '
@@ -1049,19 +1216,23 @@ def main() -> int:
             print(f'preflight_ruff_failed log={ruff_log}')
             return 1
 
-    if db_path.exists():
+    if args.reset_db and shard_db_isolation_enabled and args.shard_id == 0 and db_path_main.exists():
+        db_path_main.unlink()
+        print(f'db_reset_main path={db_path_main}')
+
+    if db_path_worker.exists():
         if args.reset_db:
-            db_path.unlink()
-            print(f'db_reset path={db_path}')
+            db_path_worker.unlink()
+            print(f'db_reset path={db_path_worker}')
         else:
-            print(f'db_reuse path={db_path}')
+            print(f'db_reuse path={db_path_worker}')
 
     ingest_curated_log = logs_dir / 'ingest_curated.log'
     ingest_curated_cmd = [
         'python3',
         str(root / 'scripts' / 'branding' / 'name_input_ingest.py'),
         '--db',
-        str(db_path),
+        str(db_path_worker),
         '--inputs',
         str(root / 'docs' / 'branding' / 'source_inputs_v2.csv'),
         '--source-label',
@@ -1087,7 +1258,7 @@ def main() -> int:
             'python3',
             str(root / 'scripts' / 'branding' / 'name_input_ingest.py'),
             '--db',
-            str(db_path),
+            str(db_path_worker),
             '--inputs',
             str(names_txt),
             '--source-label',
@@ -1242,7 +1413,7 @@ def main() -> int:
             '--variation-profile=expanded',
             f'--generator-families={",".join(active_families)}',
             f'--family-quotas={quota_profile_effective}',
-            f'--source-pool-db={db_path}',
+            f'--source-pool-db={db_path_worker}',
             '--source-pool-limit=900',
             '--source-min-confidence=0.55',
             f'--store-countries={args.generator_store_countries}',
@@ -1254,7 +1425,7 @@ def main() -> int:
             '--shortlist-max-prefix3=2',
             '--shortlist-max-phonetic=1',
             '--persist-db',
-            f'--db={db_path}',
+            f'--db={db_path_worker}',
             f'--output={run_csv}',
             f'--json-output={run_json}',
             f'--run-log={run_log}',
@@ -1327,7 +1498,7 @@ def main() -> int:
             'python3',
             str(root / 'scripts' / 'branding' / 'naming_validate_async.py'),
             '--db',
-            str(db_path),
+            str(db_path_worker),
             '--pipeline-version=v3',
             '--enable-v3',
             f'--state-filter={args.validator_state_filter}',
@@ -1388,7 +1559,7 @@ def main() -> int:
             'python3',
             str(root / 'scripts' / 'branding' / 'naming_db.py'),
             '--db',
-            str(db_path),
+            str(db_path_worker),
             'assert-contract',
             '--min-candidates=10',
             '--require-shortlist',
@@ -1493,10 +1664,31 @@ def main() -> int:
         if ab_report_paths:
             print(f'ab_report_written json={ab_report_paths[0]} md={ab_report_paths[1]}')
 
+    merge_summary: dict[str, Any] = {
+        'status': 'skipped',
+        'reason': 'disabled_or_not_primary_shard',
+    }
+    if merge_shards_enabled:
+        shard_paths = [shard_db_path(db_path_main, shard_idx) for shard_idx in range(args.shard_count)]
+        merge_summary = merge_shard_databases(
+            target_db=db_path_main,
+            shard_db_paths=shard_paths,
+        )
+        print(
+            f'merge_shards_complete status={merge_summary.get("status")} '
+            f'merged_candidates={merge_summary.get("merged_candidates", 0)} '
+            f'merged_validation_results={merge_summary.get("merged_validation_results", 0)} '
+            f'merged_candidate_scores={merge_summary.get("merged_candidate_scores", 0)}'
+        )
+
     summary = {
         'finished_at': dt.datetime.now().isoformat(timespec='seconds'),
         'out_dir': str(out_dir),
-        'db': str(db_path),
+        'db_main': str(db_path_main),
+        'db_worker': str(db_path_worker),
+        'shard_db_isolation': bool(shard_db_isolation_enabled),
+        'merge_shards_enabled': bool(merge_shards_enabled),
+        'merge_summary': merge_summary,
         'hours_budget': float(args.hours),
         'max_runs': int(args.max_runs),
         'shard_id': int(args.shard_id),

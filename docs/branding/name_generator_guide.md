@@ -222,6 +222,8 @@ Notes:
 - `--validator-state-filter=new` avoids revalidating `checked` names in follow-up runs; use `new,checked` only for explicit refresh.
 - `--sqlite-busy-timeout-ms` tunes SQLite lock wait behavior for validator primary/memory DB connections.
 - `--no-track-job-lifecycle` skips intermediate `running/pending` job-state writes in validator for max throughput.
+- `--shard-db-isolation` (default) writes each shard to its own DB (`*_shard<N>.db`) when `--shard-count > 1`.
+- `--merge-shards` (default on shard 0) merges shard DBs into `--db` at campaign completion.
 - `--validator-memory-db` stores persistent hard-fail exclusions across campaigns so eliminated names are skipped in later runs.
 - `--validator-memory-ttl-days` controls exclusion memory lifetime; policy signature + scope + gate must match to apply.
 - Campaign default memory DB is `test_outputs/branding/naming_exclusion_memory.db` (override per branch/experiment if needed).

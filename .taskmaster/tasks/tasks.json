@@ -83,8 +83,8 @@
             "dependencies": [
               2
             ],
-            "details": "In `naming_campaign_runner.py:main()` (line 801), when `shard_count > 1`, derive a shard-specific DB path: `db_path_shard = db_path.with_stem(f'{db_path.stem}_shard{args.shard_id}')`. Pass this shard-local DB to all subprocess invocations (generator, validator, assert-contract). After the campaign loop completes (around line 1355), if `shard_id == 0` and `shard_count > 1`, add a merge step that attaches each shard DB and copies candidates/results/scores into the main DB using `INSERT OR IGNORE` (keyed on name_normalized for candidates). Add a `--merge-shards` flag (default True when shard_id=0) and a `--no-shard-db-isolation` flag to opt out. Each shard still runs the curated ingest independently into its own DB.",
-            "status": "pending",
+            "details": "Completed in `scripts/branding/naming_campaign_runner.py`: added `--shard-db-isolation/--no-shard-db-isolation` and `--merge-shards/--no-merge-shards`. Worker shards now use isolated DB paths (`*_shard<N>.db`) for ingest/generator/validator/assert. Added `merge_shard_databases(...)` on shard 0 to merge candidates + validation_results + candidate_scores + shortlist_decisions back into main DB with name-normalized mapping. Smoke verified with 2-shard fixture run in `/tmp/branding_shard_merge_smoke` (`shard 1` then `shard 0`) and merge summary emitted in campaign output.",
+            "status": "done",
             "testStrategy": "Integration test: run 2 shards with small sweep configs against fixture data, verify each creates its own DB file. Then simulate the merge step and verify the unified DB contains candidates from both shards with no duplicates (by name_normalized). Verify campaign_summary.json reflects merged totals."
           },
           {
