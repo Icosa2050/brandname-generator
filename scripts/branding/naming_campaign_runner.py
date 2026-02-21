@@ -18,6 +18,7 @@ import json
 import math
 import os
 import random
+import select
 import shlex
 import shutil
 import socket
@@ -48,13 +49,133 @@ def is_truthy(raw: str) -> bool:
     return raw.strip().lower() in TRUTHY_VALUES
 
 
-def run_cmd(cmd: list[str], *, cwd: Path, log_path: Path) -> int:
+def should_stream_line(line: str, patterns: list[str]) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    for pattern in patterns:
+        if pattern and pattern in stripped:
+            return True
+    return False
+
+
+def emit_campaign_event(
+    *,
+    enabled: bool,
+    heartbeat_path: Path | None,
+    event: str,
+    **fields: object,
+) -> None:
+    if not enabled:
+        return
+    payload = {
+        'event': event,
+        'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
+        **fields,
+    }
+    print(f'campaign_event={json.dumps(payload, ensure_ascii=False)}', flush=True)
+    if heartbeat_path is not None:
+        heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+        with heartbeat_path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + '\n')
+
+
+def run_cmd(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    live_patterns: list[str] | None = None,
+    stage_label: str = '',
+    run_id: str = '',
+    heartbeat_enabled: bool = False,
+    heartbeat_path: Path | None = None,
+    heartbeat_interval_s: float = 0.0,
+) -> int:
+    tokens = [pattern.strip() for pattern in (live_patterns or []) if pattern.strip()]
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    started_monotonic = time.monotonic()
+    last_heartbeat_monotonic = started_monotonic
     with log_path.open('w', encoding='utf-8') as handle:
         handle.write(f'$ {" ".join(shlex.quote(part) for part in cmd)}\n\n')
         handle.flush()
-        proc = subprocess.run(cmd, cwd=str(cwd), stdout=handle, stderr=subprocess.STDOUT, check=False)
-    return int(proc.returncode)
+        if not tokens:
+            emit_campaign_event(
+                enabled=heartbeat_enabled,
+                heartbeat_path=heartbeat_path,
+                event='stage_start',
+                run_id=run_id,
+                stage=stage_label,
+            )
+            proc = subprocess.run(cmd, cwd=str(cwd), stdout=handle, stderr=subprocess.STDOUT, check=False)
+            emit_campaign_event(
+                enabled=heartbeat_enabled,
+                heartbeat_path=heartbeat_path,
+                event='stage_complete',
+                run_id=run_id,
+                stage=stage_label,
+                exit_code=int(proc.returncode),
+                duration_s=round(max(0.0, time.monotonic() - started_monotonic), 3),
+            )
+            return int(proc.returncode)
+
+        emit_campaign_event(
+            enabled=heartbeat_enabled,
+            heartbeat_path=heartbeat_path,
+            event='stage_start',
+            run_id=run_id,
+            stage=stage_label,
+        )
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors='replace',
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        while True:
+            ready, _, _ = select.select([fd], [], [], 0.25)
+            now_monotonic = time.monotonic()
+            if heartbeat_interval_s > 0 and (now_monotonic - last_heartbeat_monotonic) >= heartbeat_interval_s:
+                emit_campaign_event(
+                    enabled=heartbeat_enabled,
+                    heartbeat_path=heartbeat_path,
+                    event='stage_heartbeat',
+                    run_id=run_id,
+                    stage=stage_label,
+                    elapsed_s=round(max(0.0, now_monotonic - started_monotonic), 3),
+                )
+                last_heartbeat_monotonic = now_monotonic
+            if ready:
+                raw = proc.stdout.readline()
+                if raw:
+                    handle.write(raw)
+                    if should_stream_line(raw, tokens):
+                        print(raw.rstrip('\n'), flush=True)
+                    continue
+            if proc.poll() is not None:
+                break
+
+        for raw in proc.stdout:
+            handle.write(raw)
+            if should_stream_line(raw, tokens):
+                print(raw.rstrip('\n'), flush=True)
+        proc.stdout.close()
+        exit_code = int(proc.wait())
+        emit_campaign_event(
+            enabled=heartbeat_enabled,
+            heartbeat_path=heartbeat_path,
+            event='stage_complete',
+            run_id=run_id,
+            stage=stage_label,
+            exit_code=exit_code,
+            duration_s=round(max(0.0, time.monotonic() - started_monotonic), 3),
+        )
+        return exit_code
 
 
 def pid_is_alive(pid: int) -> bool:
@@ -888,6 +1009,38 @@ def parse_args() -> argparse.Namespace:
         help='Early stop if sum(new shortlist names) over stop window is below this threshold.',
     )
     parser.add_argument(
+        '--heartbeat-events',
+        dest='heartbeat_events',
+        action='store_true',
+        default=True,
+        help='Emit campaign_event lines and append them to heartbeat JSONL.',
+    )
+    parser.add_argument('--no-heartbeat-events', dest='heartbeat_events', action='store_false')
+    parser.add_argument(
+        '--heartbeat-jsonl',
+        default='',
+        help='Optional heartbeat JSONL path (defaults to <out-dir>/runs/campaign_heartbeat.jsonl).',
+    )
+    parser.add_argument(
+        '--heartbeat-interval-s',
+        type=float,
+        default=10.0,
+        help='Interval for stage_heartbeat events while long-running child stages execute.',
+    )
+    parser.add_argument(
+        '--live-progress',
+        dest='live_progress',
+        action='store_true',
+        default=True,
+        help='Stream selected generator/validator child progress lines to stdout while keeping full logs on disk.',
+    )
+    parser.add_argument('--no-live-progress', dest='live_progress', action='store_false')
+    parser.add_argument(
+        '--live-progress-patterns',
+        default='stage_event=,async_validation_,run_summary=,cheap_gate_dropped',
+        help='Comma-separated substrings used to select child process lines for live streaming.',
+    )
+    parser.add_argument(
         '--source-influence-shares',
         default='0.15,0.25,0.35,0.50',
         help='Comma-separated source influence shares for sweep.',
@@ -1069,6 +1222,7 @@ def main() -> int:
     progress_csv = out_dir / 'campaign_progress.csv'
     seen_names_path = out_dir / 'seen_shortlist_names.txt'
     campaign_summary_path = out_dir / 'campaign_summary.json'
+    heartbeat_path = Path(args.heartbeat_jsonl).expanduser() if args.heartbeat_jsonl else runs_dir / 'campaign_heartbeat.jsonl'
 
     out_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -1077,6 +1231,7 @@ def main() -> int:
     shares = [clamp_share(float(part)) for part in parse_csv_list(args.source_influence_shares)]
     scopes = parse_csv_list(args.scopes)
     gates = parse_csv_list(args.gates)
+    live_patterns = parse_csv_list(args.live_progress_patterns) if args.live_progress else []
     quota_profiles = [part.strip() for part in args.quota_profiles.split('|') if part.strip()]
     active_families = parse_csv_list(args.generator_families) or list(DEFAULT_GENERATOR_FAMILIES)
     if not shares or not scopes or not gates or not quota_profiles:
@@ -1132,6 +1287,14 @@ def main() -> int:
         return 1
 
     print(f'campaign_start out_dir={out_dir}')
+    emit_campaign_event(
+        enabled=bool(args.heartbeat_events),
+        heartbeat_path=heartbeat_path,
+        event='campaign_start',
+        out_dir=str(out_dir),
+        shard_id=int(args.shard_id),
+        shard_count=int(args.shard_count),
+    )
     print(
         f'campaign_config hours={args.hours} max_runs={args.max_runs} sleep_s={args.sleep_s} '
         f'shares={shares} scopes={scopes} gates={gates} quota_profiles={len(quota_profiles)} '
@@ -1149,6 +1312,9 @@ def main() -> int:
         f'llm_slo_max_empty_rate={float(args.llm_slo_max_empty_rate):.2f} '
         f'llm_slo_fail_open={bool(args.llm_slo_fail_open)} '
         f'generator_only_llm={args.generator_only_llm_candidates} '
+        f'heartbeat_events={args.heartbeat_events} heartbeat_path={heartbeat_path} '
+        f'heartbeat_interval_s={args.heartbeat_interval_s} '
+        f'live_progress={args.live_progress} live_patterns={live_patterns} '
         f'llm_context_enabled={bool(llm_context_packet)} '
         f'llm_attribution_headers={bool(str(args.llm_openrouter_http_referer).strip() or str(args.llm_openrouter_x_title).strip())}'
     )
@@ -1162,6 +1328,15 @@ def main() -> int:
         print(
             f'campaign_lock_blocked out_dir={out_dir} '
             f'shard={args.shard_id + 1}/{args.shard_count} reason={lock_error}'
+        )
+        emit_campaign_event(
+            enabled=bool(args.heartbeat_events),
+            heartbeat_path=heartbeat_path,
+            event='campaign_lock_blocked',
+            out_dir=str(out_dir),
+            shard_id=int(args.shard_id),
+            shard_count=int(args.shard_count),
+            reason=lock_error,
         )
         return 2
     atexit.register(release_campaign_lock, lock_path)
@@ -1291,6 +1466,15 @@ def main() -> int:
         run_started = time.monotonic()
         run_stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
         run_id = f'run_{run_count:03d}_{run_stamp}'
+        emit_campaign_event(
+            enabled=bool(args.heartbeat_events),
+            heartbeat_path=heartbeat_path,
+            event='run_start',
+            run=run_count,
+            run_id=run_id,
+            shard_id=int(args.shard_id),
+            shard_count=int(args.shard_count),
+        )
 
         share, scope, gate, quota_profile = shard_combos[(run_count - 1) % len(shard_combos)]
         quota_profile_effective = quota_profile
@@ -1452,7 +1636,17 @@ def main() -> int:
             )
         elif args.generator_degraded_network_mode:
             generator_cmd.append('--degraded-network-mode')
-        code = run_cmd(generator_cmd, cwd=root, log_path=gen_log)
+        code = run_cmd(
+            generator_cmd,
+            cwd=root,
+            log_path=gen_log,
+            live_patterns=live_patterns,
+            stage_label='generator',
+            run_id=run_id,
+            heartbeat_enabled=bool(args.heartbeat_events),
+            heartbeat_path=heartbeat_path,
+            heartbeat_interval_s=max(0.0, float(args.heartbeat_interval_s)),
+        )
         if code != 0:
             error_count += 1
             last_status = 'generator_failed'
@@ -1514,7 +1708,17 @@ def main() -> int:
         ]
         if str(args.validator_memory_db).strip():
             validator_cmd.append(f'--memory-db={str(args.validator_memory_db).strip()}')
-        code = run_cmd(validator_cmd, cwd=root, log_path=validator_log)
+        code = run_cmd(
+            validator_cmd,
+            cwd=root,
+            log_path=validator_log,
+            live_patterns=live_patterns,
+            stage_label='validator',
+            run_id=run_id,
+            heartbeat_enabled=bool(args.heartbeat_events),
+            heartbeat_path=heartbeat_path,
+            heartbeat_interval_s=max(0.0, float(args.heartbeat_interval_s)),
+        )
         if code != 0:
             error_count += 1
             last_status = 'validator_failed'
@@ -1643,6 +1847,18 @@ def main() -> int:
             f'hard_fail_ratio={hard_fail_ratio:.4f} validator_total_jobs={total_jobs} '
             f'remaining_s={remaining_s} shard={args.shard_id + 1}/{args.shard_count}'
         )
+        emit_campaign_event(
+            enabled=bool(args.heartbeat_events),
+            heartbeat_path=heartbeat_path,
+            event='run_complete',
+            run=run_count,
+            run_id=run_id,
+            status='ok',
+            duration_s=duration_s,
+            shortlist_count=len(shortlist),
+            new_shortlist_count=len(new_names),
+            validator_total_jobs=int(total_jobs),
+        )
         last_status = 'ok'
 
         if (
@@ -1703,8 +1919,18 @@ def main() -> int:
         'ab_mode': bool(args.ab_mode),
         'ab_report_json': str(ab_report_paths[0]) if ab_report_paths else '',
         'ab_report_md': str(ab_report_paths[1]) if ab_report_paths else '',
+        'heartbeat_jsonl': str(heartbeat_path),
     }
     campaign_summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    emit_campaign_event(
+        enabled=bool(args.heartbeat_events),
+        heartbeat_path=heartbeat_path,
+        event='campaign_complete',
+        status=last_status,
+        runs_executed=int(run_count),
+        errors=int(error_count),
+        summary_path=str(campaign_summary_path),
+    )
     print(f'campaign_complete summary={campaign_summary_path}')
     print(json.dumps(summary, ensure_ascii=False))
     return 0 if error_count < max(1, args.max_errors) else 1

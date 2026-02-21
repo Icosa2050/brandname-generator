@@ -229,6 +229,11 @@ Notes:
 - `--validator-memory-ttl-days` controls exclusion memory lifetime; policy signature + scope + gate must match to apply.
 - Campaign default memory DB is `test_outputs/branding/naming_exclusion_memory.db` (override per branch/experiment if needed).
 - DB reuse is default when the same `--db` path exists; add `--reset-db` for a clean slate.
+- `--live-progress` (default on) now forwards selected generator/validator child lines to campaign stdout.
+- `--live-progress-patterns` controls forwarded line matching (default includes `stage_event=`, `async_validation_`, `run_summary=`).
+- `--heartbeat-events` (default on) emits `campaign_event=` lifecycle records and writes JSONL heartbeat to `<out-dir>/runs/campaign_heartbeat.jsonl`.
+- `--heartbeat-interval-s` controls periodic `stage_heartbeat` events for long-running child stages.
+- `--heartbeat-jsonl` can override the default heartbeat file path.
 - OpenRouter calls use a compatibility fallback chain (`json_schema+require_parameters` -> `json_object` -> plain chat) so models that reject strict routing still return candidates.
 - Campaign `llm_stage_status` now distinguishes empty/error cases (`empty_with_errors`, `empty`) instead of reporting `ok` with zero candidates.
 - Validator `run_summary` now includes SQLite lock contention metrics:

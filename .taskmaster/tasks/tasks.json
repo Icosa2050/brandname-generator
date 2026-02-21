@@ -129,7 +129,7 @@
         "description": "Make campaign progress visible without tailing multiple logs.",
         "details": "Emit structured progress events to stdout plus a compact JSONL heartbeat file in the run directory.",
         "testStrategy": "Run campaign smoke; confirm periodic heartbeat with run/stage percent, ETA, and shard context.",
-        "status": "pending",
+        "status": "done",
         "dependencies": [
           "1"
         ],
@@ -139,8 +139,8 @@
             "id": 1,
             "title": "Define event schema",
             "description": "Standardize stage, run_id, shard_id, counters, and latency fields.",
-            "details": "",
-            "status": "pending",
+            "details": "Completed implementation in `naming_campaign_runner.py`: added `campaign_event` envelope with standardized fields (`event`, `timestamp`, `run_id`, `stage`, `duration_s`, `exit_code`, shard metadata where relevant) and integrated structured event emission for campaign/run/stage lifecycle.",
+            "status": "done",
             "dependencies": [],
             "parentTaskId": 3
           },
@@ -148,8 +148,8 @@
             "id": 2,
             "title": "Add runner heartbeat emission",
             "description": "Emit progress at stage boundaries and fixed intervals in long stages.",
-            "details": "",
-            "status": "pending",
+            "details": "Completed implementation in `naming_campaign_runner.py`: live forwarding from generator/validator (`stage_event=`, `async_validation_`, `run_summary=`), stage boundary events (`stage_start`/`stage_complete`), periodic `stage_heartbeat` events (`--heartbeat-interval-s`), and JSONL persistence (`--heartbeat-jsonl`, default `<out-dir>/runs/campaign_heartbeat.jsonl`). Verified via smoke run at `/tmp/brandname_live_progress_smoke3`.",
+            "status": "done",
             "dependencies": [
               "3.1"
             ],

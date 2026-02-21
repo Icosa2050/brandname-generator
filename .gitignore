@@ -3,3 +3,5 @@
 __pycache__/
 *.py[cod]
 test_outputs/
+.taskmaster/config.json
+.taskmaster/state.json
