@@ -39,7 +39,7 @@
         "description": "Increase validator throughput with bounded parallelism and stronger DB contention controls.",
         "details": "Evaluate in-process asyncio scaling versus shard-level parallel workers. Add guardrails for SQLite lock pressure.",
         "testStrategy": "Benchmark jobs/sec across representative candidate/check counts and validate stable summaries.",
-        "status": "in-progress",
+        "status": "done",
         "dependencies": [
           "1"
         ],
@@ -117,8 +117,8 @@
               5,
               6
             ],
-            "details": "Create `scripts/branding/benchmark_validation.py` that: (1) accepts `--db` (test DB path), `--candidate-counts` (comma-separated, e.g. '50,100,200'), `--concurrency-levels` (e.g. '1,4,8,16'), `--shard-counts` (e.g. '1,2,4'), `--checks` (default 'adversarial,psych,descriptive'), `--rounds` (default 3). (2) For each combination, seeds a temp DB with N synthetic candidates (random 6-8 char names), runs `naming_validate_async.py` via subprocess, captures the stage_event JSON output for 'complete' stage (which now includes lock metrics from subtask 6), and records: wall time, jobs/sec, lock_total_wait_ms, lock_contended_count. (3) Outputs a CSV summary and prints a formatted comparison table. Use only cheap checks (no network) for deterministic benchmarking. Include a `--quick` flag that runs minimal combos (50 candidates, concurrency 1 vs 8, 1 round) for CI smoke testing.",
-            "status": "pending",
+            "details": "Completed with new script `scripts/branding/benchmark_validation.py`. Supports `--db`, `--candidate-counts`, `--concurrency-levels`, `--shard-counts`, `--checks`, `--rounds`, and `--quick`. Harness seeds synthetic candidate DBs per shard, executes validator subprocesses in parallel, parses `stage_event` complete payloads, and records wall time/jobs/sec/lock metrics into CSV. Added usage docs in `docs/branding/name_generator_guide.md` section \"Benchmark validator parallelism\".",
+            "status": "done",
             "testStrategy": "Run `benchmark_validation.py --quick` and verify it produces a valid CSV with expected columns (concurrency, candidates, wall_time_ms, jobs_per_sec, lock_wait_ms). Verify the benchmark completes without errors on a fresh temp DB. Verify that higher concurrency shows equal or better throughput for cheap-only checks."
           }
         ]

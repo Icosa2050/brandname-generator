@@ -235,6 +235,20 @@ Notes:
   `lock_acquisitions`, `lock_total_wait_ms`, `lock_max_wait_ms`, `lock_contended_count`.
 - A/B mode writes `ab_report.json` and `ab_report.md` in campaign output root.
 
+### 14) Benchmark validator parallelism
+```zsh
+# quick benchmark (CI-friendly)
+python3 scripts/branding/benchmark_validation.py --quick
+
+# expanded matrix
+python3 scripts/branding/benchmark_validation.py \
+  --candidate-counts=50,100,200 \
+  --concurrency-levels=1,4,8,16 \
+  --shard-counts=1,2,4 \
+  --rounds=3 \
+  --checks=adversarial,psych,descriptive
+```
+
 ## Output
 The script writes a CSV to:
 - default: `docs/branding/generated_name_candidates_<scope>_<timestamp>.csv`
