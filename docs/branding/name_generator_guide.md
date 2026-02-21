@@ -120,7 +120,7 @@ python3 scripts/branding/name_ideation_ingest.py \
 ```zsh
 python3 scripts/branding/naming_validate_async.py \
   --db docs/branding/naming_pipeline.db \
-  --state-filter="new,checked" \
+  --state-filter="new" \
   --checks="adversarial,psych,descriptive,domain,web,app_store,package,social" \
   --candidate-limit=200 \
   --concurrency=16 \
@@ -176,6 +176,7 @@ python3 scripts/branding/naming_campaign_runner.py \
   --hours=1.0 \
   --max-runs=8 \
   --generator-quality-first \
+  --generator-only-llm-candidates \
   --llm-ideation-enabled \
   --llm-provider=openrouter_http \
   --llm-model="mistralai/mistral-small-creative" \
@@ -190,6 +191,9 @@ python3 scripts/branding/naming_campaign_runner.py \
   --llm-pricing-input-per-1k=0.0006 \
   --llm-pricing-output-per-1k=0.0006 \
   --llm-cache-dir=test_outputs/branding/llm_cache \
+  --validator-state-filter=new \
+  --validator-memory-db=test_outputs/branding/naming_exclusion_memory.db \
+  --validator-memory-ttl-days=180 \
   --dynamic-window-runs=5 \
   --dynamic-fail-threshold=0.20 \
   --dynamic-prefix-entropy-threshold=2.5 \
@@ -205,6 +209,12 @@ Notes:
 - `--llm-context-file=<json>` injects product/user/tone guidance into the LLM prompt.
 - Example context packet: `docs/branding/llm_context.example.json`.
 - `llm_cost_usd` now prefers provider-reported `usage.cost` when available; token-price flags remain fallback estimation.
+- `--generator-only-llm-candidates` keeps generator output focused on model candidates (avoids deterministic legacy families in the same run).
+- `--validator-state-filter=new` avoids revalidating `checked` names in follow-up runs; use `new,checked` only for explicit refresh.
+- `--validator-memory-db` stores persistent hard-fail exclusions across campaigns so eliminated names are skipped in later runs.
+- `--validator-memory-ttl-days` controls exclusion memory lifetime; policy signature + scope + gate must match to apply.
+- Campaign default memory DB is `test_outputs/branding/naming_exclusion_memory.db` (override per branch/experiment if needed).
+- DB reuse is default when the same `--db` path exists; add `--reset-db` for a clean slate.
 - OpenRouter calls use a compatibility fallback chain (`json_schema+require_parameters` -> `json_object` -> plain chat) so models that reject strict routing still return candidates.
 - Campaign `llm_stage_status` now distinguishes empty/error cases (`empty_with_errors`, `empty`) instead of reporting `ok` with zero candidates.
 - A/B mode writes `ab_report.json` and `ab_report.md` in campaign output root.

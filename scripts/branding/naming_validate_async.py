@@ -119,7 +119,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--state-filter',
-        default='new,checked',
+        default='new',
         help='Comma-separated candidate states eligible for validation.',
     )
     parser.add_argument('--scope', choices=['dach', 'eu', 'global'], default='global')
@@ -183,6 +183,17 @@ def parse_args() -> argparse.Namespace:
         help='TTL for cheap-tier result reuse cache in seconds.',
     )
     parser.add_argument(
+        '--memory-db',
+        default='',
+        help='Optional SQLite DB path for persistent hard-fail exclusion memory across campaigns.',
+    )
+    parser.add_argument(
+        '--memory-ttl-days',
+        type=int,
+        default=180,
+        help='Days to keep hard-fail exclusions active in memory DB.',
+    )
+    parser.add_argument(
         '--progress-every',
         type=int,
         default=20,
@@ -228,6 +239,200 @@ def resolve_feature_flags(args: argparse.Namespace) -> ValidationFeatureFlags:
         v3_enabled=v3_enabled,
         validation_tier=validation_tier,
     )
+
+
+MEMORY_POLICY_FIELDS: tuple[str, ...] = (
+    'adversarial_fail_threshold',
+    'adversarial_warn_threshold',
+    'cheap_trademark_screen',
+    'cheap_trademark_fail_threshold',
+    'cheap_trademark_warn_threshold',
+    'min_trust_proxy',
+    'warn_trust_proxy',
+    'max_spelling_risk',
+    'warn_spelling_risk',
+    'descriptive_fail_threshold',
+    'descriptive_warn_threshold',
+    'web_top',
+    'web_near_fail_threshold',
+    'social_unavailable_fail_threshold',
+    'strict_required_domains',
+)
+
+
+def exclusion_memory_policy_signature(
+    *,
+    args: argparse.Namespace,
+    checks: list[str],
+    flags: ValidationFeatureFlags,
+) -> str:
+    payload: dict[str, object] = {
+        'checks': sorted(checks),
+        'pipeline_version': flags.pipeline_version,
+        'v3_enabled': bool(flags.v3_enabled),
+        'validation_tier': flags.validation_tier,
+        'scope': str(getattr(args, 'scope', '') or ''),
+        'gate': str(getattr(args, 'gate', '') or ''),
+        'blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
+    }
+    for field in MEMORY_POLICY_FIELDS:
+        payload[field] = getattr(args, field, None)
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]
+
+
+def ensure_exclusion_memory_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS excluded_candidates (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name_normalized TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          gate TEXT NOT NULL,
+          policy_signature TEXT NOT NULL,
+          reasons_json TEXT NOT NULL DEFAULT '[]',
+          fail_count INTEGER NOT NULL DEFAULT 1,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(name_normalized, scope, gate, policy_signature)
+        );
+        CREATE INDEX IF NOT EXISTS idx_excluded_candidates_lookup
+          ON excluded_candidates(name_normalized, scope, gate, policy_signature, expires_at);
+        """
+    )
+    conn.commit()
+
+
+def _expires_at_iso(*, ttl_days: int) -> str:
+    if ttl_days <= 0:
+        ttl_days = 36500
+    return (dt.datetime.now() + dt.timedelta(days=int(ttl_days))).isoformat(timespec='seconds')
+
+
+def load_memory_excluded_names(
+    conn: sqlite3.Connection,
+    *,
+    names: list[str],
+    scope: str,
+    gate: str,
+    policy_signature: str,
+) -> set[str]:
+    normalized = sorted({ndb.normalize_name(name) for name in names if ndb.normalize_name(name)})
+    if not normalized:
+        return set()
+    placeholders = ','.join('?' for _ in normalized)
+    rows = conn.execute(
+        f"""
+        SELECT name_normalized
+        FROM excluded_candidates
+        WHERE scope = ? AND gate = ? AND policy_signature = ? AND expires_at >= ?
+          AND name_normalized IN ({placeholders})
+        """,
+        (scope, gate, policy_signature, ndb.now_iso(), *normalized),
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def mark_candidates_memory_excluded(
+    conn: sqlite3.Connection,
+    rows: list[CandidateRow],
+    *,
+    actor: str,
+    note: str,
+) -> None:
+    ts = ndb.now_iso()
+    for row in rows:
+        conn.execute(
+            """
+            UPDATE candidates
+            SET state = ?, status = ?, rejection_reason = ?, state_updated_at = ?
+            WHERE id = ?
+            """,
+            ('memory_excluded', 'rejected_memory', 'memory_excluded', ts, row.candidate_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO state_transitions(candidate_id, from_state, to_state, actor, note, created_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (row.candidate_id, row.state, 'memory_excluded', actor, note, ts),
+        )
+
+
+def collect_hard_fail_reasons_by_name(conn: sqlite3.Connection, *, run_id: int) -> dict[str, list[str]]:
+    rows = conn.execute(
+        """
+        SELECT c.name_normalized, COALESCE(vr.reason, '')
+        FROM validation_results vr
+        JOIN candidates c ON c.id = vr.candidate_id
+        WHERE vr.run_id = ? AND vr.hard_fail = 1
+        """,
+        (run_id,),
+    ).fetchall()
+    grouped: dict[str, set[str]] = {}
+    for name_normalized, reason in rows:
+        name = str(name_normalized or '').strip().lower()
+        if not name:
+            continue
+        if name not in grouped:
+            grouped[name] = set()
+        reason_text = str(reason or '').strip()
+        grouped[name].add(reason_text or 'hard_fail')
+    return {
+        name: sorted(values)[:8]
+        for name, values in grouped.items()
+    }
+
+
+def upsert_exclusion_memory(
+    conn: sqlite3.Connection,
+    *,
+    exclusions: dict[str, list[str]],
+    scope: str,
+    gate: str,
+    policy_signature: str,
+    ttl_days: int,
+) -> int:
+    if not exclusions:
+        return 0
+    ts = ndb.now_iso()
+    expires_at = _expires_at_iso(ttl_days=ttl_days)
+    for name, reasons in exclusions.items():
+        reasons_json = json.dumps(list(reasons)[:8], ensure_ascii=False)
+        conn.execute(
+            """
+            INSERT INTO excluded_candidates(
+              name_normalized, scope, gate, policy_signature, reasons_json, fail_count,
+              first_seen_at, last_seen_at, expires_at, created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(name_normalized, scope, gate, policy_signature)
+            DO UPDATE SET
+              reasons_json = excluded.reasons_json,
+              fail_count = excluded_candidates.fail_count + 1,
+              last_seen_at = excluded.last_seen_at,
+              expires_at = excluded.expires_at,
+              updated_at = excluded.updated_at
+            """,
+            (
+                name,
+                scope,
+                gate,
+                policy_signature,
+                reasons_json,
+                1,
+                ts,
+                ts,
+                expires_at,
+                ts,
+                ts,
+            ),
+        )
+    conn.commit()
+    return len(exclusions)
 
 
 def emit_stage_event(enabled: bool, stage: str, **fields: object) -> None:
@@ -1074,13 +1279,57 @@ async def orchestrate(args: argparse.Namespace) -> int:
         return 0
 
     states = parse_csv_set(args.state_filter)
+    memory_db_path = Path(args.memory_db).expanduser() if str(args.memory_db or '').strip() else None
+    memory_policy_signature = exclusion_memory_policy_signature(args=args, checks=checks, flags=flags)
 
     with sqlite3.connect(db_path) as conn:
         ndb.ensure_schema(conn)
-        candidates = load_candidates(conn, states, args.candidate_limit)
-        if not candidates:
-            print('No candidates found for selected state filter.')
-            return 0
+        memory_conn: sqlite3.Connection | None = None
+        memory_prefilter_count = 0
+        if memory_db_path is not None:
+            memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+            memory_conn = sqlite3.connect(memory_db_path)
+            ensure_exclusion_memory_schema(memory_conn)
+        while True:
+            candidates = load_candidates(conn, states, args.candidate_limit)
+            if not candidates:
+                if memory_conn is not None and memory_prefilter_count > 0:
+                    emit_stage_event(
+                        args.stage_events,
+                        'memory_prefilter',
+                        memory_db=str(memory_db_path),
+                        policy_signature=memory_policy_signature,
+                        excluded_count=memory_prefilter_count,
+                        candidate_count_after_prefilter=0,
+                    )
+                print('No candidates found for selected state filter.')
+                if memory_conn is not None:
+                    memory_conn.close()
+                return 0
+            if memory_conn is None:
+                break
+            excluded_names = load_memory_excluded_names(
+                memory_conn,
+                names=[row.name_display for row in candidates],
+                scope=args.scope,
+                gate=args.gate,
+                policy_signature=memory_policy_signature,
+            )
+            if not excluded_names:
+                break
+            memory_rows = [
+                row for row in candidates if ndb.normalize_name(row.name_display) in excluded_names
+            ]
+            if not memory_rows:
+                break
+            mark_candidates_memory_excluded(
+                conn,
+                memory_rows,
+                actor='naming_validate_memory',
+                note=f'memory exclusion match signature={memory_policy_signature}',
+            )
+            conn.commit()
+            memory_prefilter_count += len(memory_rows)
 
         cheap_checks = [check for check in checks if CHECK_SPECS[check].tier == 'cheap']
         expensive_checks = [check for check in checks if CHECK_SPECS[check].tier == 'expensive']
@@ -1113,6 +1362,16 @@ async def orchestrate(args: argparse.Namespace) -> int:
             for row in candidates:
                 for check_type in checks:
                     job_plan.append((row, check_type))
+
+        if memory_conn is not None:
+            emit_stage_event(
+                args.stage_events,
+                'memory_prefilter',
+                memory_db=str(memory_db_path),
+                policy_signature=memory_policy_signature,
+                excluded_count=memory_prefilter_count,
+                candidate_count_after_prefilter=len(candidates),
+            )
 
         emit_stage_event(
             args.stage_events,
@@ -1157,6 +1416,10 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'cheap_trademark_blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
                 'cheap_cache': bool(args.cheap_cache),
                 'cheap_cache_ttl_s': int(args.cheap_cache_ttl_s),
+                'memory_db': str(memory_db_path) if memory_db_path is not None else '',
+                'memory_ttl_days': int(args.memory_ttl_days),
+                'memory_policy_signature': memory_policy_signature if memory_conn is not None else '',
+                'memory_prefilter_count': int(memory_prefilter_count),
             },
             summary={},
         )
@@ -1231,7 +1494,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 f'pipeline={flags.pipeline_version} v3_enabled={flags.v3_enabled} '
                 f'tier={flags.validation_tier} tiered_split={tiered_split} '
                 f'expensive_finalists={len(expensive_finalists)} '
-                f'cheap_cache={args.cheap_cache} ttl={args.cheap_cache_ttl_s}s',
+                f'cheap_cache={args.cheap_cache} ttl={args.cheap_cache_ttl_s}s '
+                f'memory_db={str(memory_db_path) if memory_db_path is not None else "disabled"} '
+                f'memory_prefilter={memory_prefilter_count}',
                 flush=True,
             )
 
@@ -1262,6 +1527,28 @@ async def orchestrate(args: argparse.Namespace) -> int:
             expensive_checks=expensive_checks,
         )
         cache_summary = summarize_cache_usage(conn, run_id)
+        memory_exclusions_upserted = 0
+        memory_hard_fail_count = 0
+        if memory_conn is not None:
+            hard_fail_reasons = collect_hard_fail_reasons_by_name(conn, run_id=run_id)
+            memory_hard_fail_count = len(hard_fail_reasons)
+            memory_exclusions_upserted = upsert_exclusion_memory(
+                memory_conn,
+                exclusions=hard_fail_reasons,
+                scope=args.scope,
+                gate=args.gate,
+                policy_signature=memory_policy_signature,
+                ttl_days=int(args.memory_ttl_days),
+            )
+            emit_stage_event(
+                args.stage_events,
+                'memory_update',
+                memory_db=str(memory_db_path),
+                policy_signature=memory_policy_signature,
+                hard_fail_name_count=memory_hard_fail_count,
+                exclusions_upserted=memory_exclusions_upserted,
+                ttl_days=int(args.memory_ttl_days),
+            )
         emit_stage_event(
             args.stage_events,
             'cheap_gate',
@@ -1289,6 +1576,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
             status_counts=summary.get('status_counts', {}),
             tier_result_counts=tier_summary,
             cache_summary=cache_summary,
+            memory_prefilter_count=memory_prefilter_count,
+            memory_hard_fail_count=memory_hard_fail_count,
+            memory_exclusions_upserted=memory_exclusions_upserted,
             latency_ms=latency_ms,
         )
         conn.execute(
@@ -1306,6 +1596,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
                         'cache_summary': cache_summary,
                         'tiered_split': tiered_split,
                         'expensive_finalist_count': len(expensive_finalists),
+                        'memory_prefilter_count': memory_prefilter_count,
+                        'memory_hard_fail_count': memory_hard_fail_count,
+                        'memory_exclusions_upserted': memory_exclusions_upserted,
                     },
                     ensure_ascii=False,
                 ),
@@ -1313,6 +1606,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
             ),
         )
         conn.commit()
+        if memory_conn is not None:
+            memory_conn.close()
 
     print(
         f'async_validation_complete run_id={run_id} candidates={len(candidates)} '
@@ -1327,6 +1622,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'cache_summary': cache_summary,
                 'tiered_split': tiered_split,
                 'expensive_finalist_count': len(expensive_finalists),
+                'memory_prefilter_count': memory_prefilter_count,
+                'memory_hard_fail_count': memory_hard_fail_count,
+                'memory_exclusions_upserted': memory_exclusions_upserted,
             },
             ensure_ascii=False,
         )

@@ -591,6 +591,14 @@ def parse_args() -> argparse.Namespace:
         help='Comma-separated seeds passed to generator --seeds.',
     )
     parser.add_argument(
+        '--generator-only-llm-candidates',
+        dest='generator_only_llm_candidates',
+        action='store_true',
+        default=False,
+        help='Run generator in --only-candidates mode so only LLM artifact names are screened.',
+    )
+    parser.add_argument('--no-generator-only-llm-candidates', dest='generator_only_llm_candidates', action='store_false')
+    parser.add_argument(
         '--generator-no-external-checks',
         dest='generator_no_external_checks',
         action='store_true',
@@ -634,6 +642,22 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=10,
         help='Validator concurrency.',
+    )
+    parser.add_argument(
+        '--validator-state-filter',
+        default='new',
+        help='Candidate states for async validator (comma-separated). Use "new,checked" to revalidate old names.',
+    )
+    parser.add_argument(
+        '--validator-memory-db',
+        default='test_outputs/branding/naming_exclusion_memory.db',
+        help='Optional persistent exclusion-memory DB path passed to naming_validate_async.',
+    )
+    parser.add_argument(
+        '--validator-memory-ttl-days',
+        type=int,
+        default=180,
+        help='TTL in days for exclusion memory entries written by validator.',
     )
     parser.add_argument(
         '--validator-expensive-finalist-limit',
@@ -755,6 +779,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--out-dir', default='', help='Campaign output root (default test_outputs/branding/naming_campaign_<timestamp>).')
     parser.add_argument('--db', default='', help='SQLite DB path (default <out-dir>/naming_campaign.db).')
     parser.add_argument(
+        '--reset-db',
+        dest='reset_db',
+        action='store_true',
+        default=False,
+        help='Delete existing campaign DB before ingest/bootstrap.',
+    )
+    parser.add_argument(
         '--include-names-txt',
         dest='include_names_txt',
         action='store_true',
@@ -812,6 +843,9 @@ def main() -> int:
             if not ok:
                 print(f'Invalid quota profile "{profile}": {msg}')
                 return 1
+    if args.generator_only_llm_candidates and not args.llm_ideation_enabled:
+        print('Invalid config: --generator-only-llm-candidates requires --llm-ideation-enabled.')
+        return 1
 
     sweep_combos: list[tuple[float, str, str, str]] = []
     for quota_profile in quota_profiles:
@@ -833,8 +867,12 @@ def main() -> int:
         f'shares={shares} scopes={scopes} gates={gates} quota_profiles={len(quota_profiles)} '
         f'shard={args.shard_id + 1}/{args.shard_count} shard_combo_count={len(shard_combos)} '
         f'check_limit={args.check_limit} validator_tier={args.validator_tier} '
-        f'validator_candidate_limit={args.validator_candidate_limit} '
+        f'validator_candidate_limit={args.validator_candidate_limit} validator_state_filter={args.validator_state_filter} '
+        f'validator_memory_enabled={bool(str(args.validator_memory_db).strip())} '
+        f'validator_memory_ttl_days={int(args.validator_memory_ttl_days)} '
+        f'reset_db={args.reset_db} '
         f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} llm_model={args.llm_model} '
+        f'generator_only_llm={args.generator_only_llm_candidates} '
         f'llm_context_enabled={bool(llm_context_packet)} '
         f'llm_attribution_headers={bool(str(args.llm_openrouter_http_referer).strip() or str(args.llm_openrouter_x_title).strip())}'
     )
@@ -903,7 +941,11 @@ def main() -> int:
             return 1
 
     if db_path.exists():
-        db_path.unlink()
+        if args.reset_db:
+            db_path.unlink()
+            print(f'db_reset path={db_path}')
+        else:
+            print(f'db_reuse path={db_path}')
 
     ingest_curated_log = logs_dir / 'ingest_curated.log'
     ingest_curated_cmd = [
@@ -922,8 +964,9 @@ def main() -> int:
         '--derive-morphology',
         '--morph-confidence-scale',
         '0.72',
-        '--also-candidates',
     ]
+    if not args.generator_only_llm_candidates:
+        ingest_curated_cmd.append('--also-candidates')
     if run_cmd(ingest_curated_cmd, cwd=root, log_path=ingest_curated_log) != 0:
         print(f'ingest_curated_failed log={ingest_curated_log}')
         return 1
@@ -1028,6 +1071,39 @@ def main() -> int:
                 f'llm_ideation_complete run={run_id} status={llm_report.get("status")} '
                 f'candidates={llm_report.get("candidate_count")} cost_usd={llm_report.get("cost_usd")}'
             )
+        if args.generator_only_llm_candidates and llm_artifact is None:
+            error_count += 1
+            last_status = 'llm_candidates_missing'
+            append_progress_row(
+                progress_csv,
+                {
+                    'run': run_count,
+                    'arm': arm,
+                    'llm_active': int(llm_active_for_run),
+                    'llm_provider': llm_report.get('provider', ''),
+                    'llm_model': llm_report.get('model', ''),
+                    'llm_candidate_count': llm_report.get('candidate_count', 0),
+                    'llm_cost_usd': llm_report.get('cost_usd', 0.0),
+                    'llm_stage_status': llm_report.get('status', 'skipped'),
+                    'shard_id': args.shard_id,
+                    'shard_count': args.shard_count,
+                    'shard_combo_count': len(shard_combos),
+                    'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
+                    'scope': scope,
+                    'gate': gate,
+                    'source_influence_share': f'{share:.2f}',
+                    'quota_profile': quota_profile,
+                    'quota_profile_effective': quota_profile_effective,
+                    'status': last_status,
+                    'duration_s': int(time.monotonic() - run_started),
+                },
+            )
+            print(f'run_failed idx={run_count} stage=llm_artifact status={llm_report.get("status")}')
+            if error_count >= max(1, args.max_errors):
+                break
+            if time.monotonic() < deadline:
+                time.sleep(max(0, args.sleep_s))
+            continue
 
         check_limit = max(1, int(args.check_limit))
         pool_size = max(1, int(args.pool_size))
@@ -1068,6 +1144,8 @@ def main() -> int:
             generator_cmd.append('--quality-first')
         if llm_artifact is not None:
             generator_cmd.append(f'--llm-input={llm_artifact}')
+        if args.generator_only_llm_candidates:
+            generator_cmd.append('--only-candidates')
         if args.generator_no_external_checks:
             generator_cmd.extend(
                 [
@@ -1126,7 +1204,7 @@ def main() -> int:
             str(db_path),
             '--pipeline-version=v3',
             '--enable-v3',
-            '--state-filter=new,checked',
+            f'--state-filter={args.validator_state_filter}',
             f'--scope={scope}',
             f'--gate={gate}',
             f'--expensive-finalist-limit={max(1, int(args.validator_expensive_finalist_limit))}',
@@ -1135,7 +1213,10 @@ def main() -> int:
             f'--validation-tier={args.validator_tier}',
             f'--candidate-limit={max(1, int(args.validator_candidate_limit))}',
             f'--concurrency={max(1, int(args.validator_concurrency))}',
+            f'--memory-ttl-days={max(1, int(args.validator_memory_ttl_days))}',
         ]
+        if str(args.validator_memory_db).strip():
+            validator_cmd.append(f'--memory-db={str(args.validator_memory_db).strip()}')
         code = run_cmd(validator_cmd, cwd=root, log_path=validator_log)
         if code != 0:
             error_count += 1
