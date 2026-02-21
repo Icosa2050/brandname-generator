@@ -170,6 +170,40 @@ zsh scripts/branding/test_naming_pipeline_v2.sh full
 USE_BLACK=1 zsh scripts/branding/test_naming_pipeline_v2.sh smoke
 ```
 
+### 13) Campaign runner with active ideation (phase 0)
+```zsh
+python3 scripts/branding/naming_campaign_runner.py \
+  --hours=1.0 \
+  --max-runs=8 \
+  --generator-quality-first \
+  --llm-ideation-enabled \
+  --llm-provider=openrouter_http \
+  --llm-model="mistralai/mistral-small-creative" \
+  --llm-context-file=docs/branding/llm_context.example.json \
+  --llm-rounds=2 \
+  --llm-candidates-per-round=20 \
+  --llm-max-call-latency-ms=8000 \
+  --llm-stage-timeout-ms=30000 \
+  --llm-max-usd-per-run=0.50 \
+  --llm-pricing-input-per-1k=0.0006 \
+  --llm-pricing-output-per-1k=0.0006 \
+  --llm-cache-dir=test_outputs/branding/llm_cache \
+  --dynamic-window-runs=5 \
+  --dynamic-fail-threshold=0.20 \
+  --dynamic-prefix-entropy-threshold=2.5 \
+  --ab-mode \
+  --ab-seed=722
+```
+
+Notes:
+- Set `OPENROUTER_API_KEY` for `openrouter_http` mode.
+- `--llm-provider=fixture --llm-fixture-input=<file>` is useful for offline smoke tests.
+- `--llm-context-file=<json>` injects product/user/tone guidance into the LLM prompt.
+- Example context packet: `docs/branding/llm_context.example.json`.
+- OpenRouter calls use a compatibility fallback chain (`json_schema+require_parameters` -> `json_object` -> plain chat) so models that reject strict routing still return candidates.
+- Campaign `llm_stage_status` now distinguishes empty/error cases (`empty_with_errors`, `empty`) instead of reporting `ok` with zero candidates.
+- A/B mode writes `ab_report.json` and `ab_report.md` in campaign output root.
+
 ## Output
 The script writes a CSV to:
 - default: `docs/branding/generated_name_candidates_<scope>_<timestamp>.csv`
@@ -234,6 +268,7 @@ Important flags:
 - `scripts/branding/name_ideation_ingest.py`: import AI ideation batches with provenance metadata.
 - `scripts/branding/name_input_ingest.py`: ingest curated source atoms into `source_atoms`.
 - `scripts/branding/naming_validate_async.py`: async job orchestration and persisted validator lifecycle states.
+- `scripts/branding/naming_campaign_runner.py`: long-running campaign sweeps with optional active LLM ideation stage.
 - `--progress-every=<N>`: progress snapshot cadence for async validator.
 - `--progress-interval-s=<seconds>`: time-based progress fallback.
 - `--no-progress`: disable async validator progress output.

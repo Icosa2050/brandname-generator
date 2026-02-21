@@ -1,0 +1,95 @@
+name: Branding CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'scripts/branding/**'
+      - 'docs/branding/**'
+      - '.github/workflows/branding-ci.yml'
+      - '.github/workflows/branding-openrouter-canary.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: branding-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  branding_checks:
+    name: Branding Deterministic Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install ruff
+
+      - name: Python Syntax Check
+        run: |
+          python3 -m py_compile \
+            scripts/branding/name_generator.py \
+            scripts/branding/name_ideation_ingest.py \
+            scripts/branding/naming_ideation_stage.py \
+            scripts/branding/naming_campaign_runner.py
+
+      - name: Ruff Check
+        run: ruff check scripts/branding
+
+      - name: Ideation Stage Unit Tests
+        run: python3 scripts/branding/test_naming_ideation_stage.py
+
+      - name: Fixture Campaign Smoke
+        run: |
+          cat > /tmp/branding_fixture_candidates.json <<'JSON'
+          {
+            "candidates": [
+              {"name": "verodomo"},
+              {"name": "settlix"},
+              {"name": "equinome"},
+              {"name": "clarivio"},
+              {"name": "novanta"},
+              {"name": "lumedio"}
+            ]
+          }
+          JSON
+
+          python3 scripts/branding/naming_campaign_runner.py \
+            --max-runs 1 \
+            --sleep-s 0 \
+            --mini-test \
+            --pool-size 400 \
+            --check-limit 80 \
+            --validator-candidate-limit 40 \
+            --validator-expensive-finalist-limit 20 \
+            --generator-no-external-checks \
+            --llm-ideation-enabled \
+            --llm-provider fixture \
+            --llm-fixture-input /tmp/branding_fixture_candidates.json \
+            --llm-context-file docs/branding/llm_context.example.json \
+            --llm-rounds 1 \
+            --llm-candidates-per-round 6 \
+            --out-dir /tmp/branding_ci_smoke
+
+      - name: Verify Smoke Output
+        run: |
+          test -f /tmp/branding_ci_smoke/campaign_summary.json
+          test -f /tmp/branding_ci_smoke/campaign_progress.csv
+
+      - name: Upload Branding Smoke Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: branding-ci-smoke-${{ github.run_id }}
+          path: /tmp/branding_ci_smoke
+          if-no-files-found: ignore
+          retention-days: 14

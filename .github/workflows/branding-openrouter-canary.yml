@@ -1,0 +1,90 @@
+name: Branding OpenRouter Canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: OpenRouter model id
+        required: false
+        default: mistralai/mistral-small-creative
+  schedule:
+    - cron: '30 2 * * *'
+
+concurrency:
+  group: branding-openrouter-canary-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openrouter_canary:
+    name: OpenRouter Live Canary
+    if: ${{ secrets.OPENROUTER_API_KEY != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_MODEL: ${{ github.event.inputs.model || 'mistralai/mistral-small-creative' }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run OpenRouter Canary
+        run: |
+          python3 scripts/branding/naming_campaign_runner.py \
+            --max-runs 1 \
+            --sleep-s 0 \
+            --mini-test \
+            --pool-size 400 \
+            --check-limit 80 \
+            --validator-candidate-limit 40 \
+            --validator-expensive-finalist-limit 20 \
+            --generator-no-external-checks \
+            --llm-ideation-enabled \
+            --llm-provider openrouter_http \
+            --llm-model "$OPENROUTER_MODEL" \
+            --llm-context-file docs/branding/llm_context.example.json \
+            --llm-rounds 1 \
+            --llm-candidates-per-round 12 \
+            --llm-max-call-latency-ms 45000 \
+            --llm-stage-timeout-ms 90000 \
+            --llm-max-retries 1 \
+            --out-dir /tmp/branding_openrouter_canary
+
+      - name: Assert Canary Produced LLM Candidates
+        run: |
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+
+          progress = Path('/tmp/branding_openrouter_canary/campaign_progress.csv')
+          assert progress.exists(), f'missing {progress}'
+          row = next(csv.DictReader(progress.open('r', encoding='utf-8', newline='')))
+          count = int(float(row.get('llm_candidate_count') or 0))
+          status = row.get('llm_stage_status') or ''
+          if count <= 0 or status != 'ok':
+              raise SystemExit(f'canary failed: llm_candidate_count={count} llm_stage_status={status}')
+          print(f'canary ok: model={row.get("llm_model")} count={count} status={status}')
+          PY
+
+      - name: Upload Canary Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: branding-openrouter-canary-${{ github.run_id }}
+          path: /tmp/branding_openrouter_canary
+          if-no-files-found: ignore
+          retention-days: 14
+
+  missing_secret_notice:
+    name: Missing OPENROUTER_API_KEY
+    if: ${{ secrets.OPENROUTER_API_KEY == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain Skip
+        run: |
+          echo "OPENROUTER_API_KEY is not configured; skipping live canary."
