@@ -20,6 +20,7 @@ import hashlib
 import json
 import sqlite3
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
@@ -92,6 +93,70 @@ class InstrumentedLock:
         }
 
 
+class AdaptiveSemaphore:
+    """Concurrency gate with runtime-adjustable limit."""
+
+    def __init__(self, *, initial_concurrency: int, min_concurrency: int, max_concurrency: int) -> None:
+        self._min = max(1, int(min_concurrency))
+        self._max = max(self._min, int(max_concurrency))
+        self._limit = max(self._min, min(self._max, int(initial_concurrency)))
+        self._in_flight = 0
+        self._condition = asyncio.Condition()
+
+    async def __aenter__(self) -> 'AdaptiveSemaphore':
+        async with self._condition:
+            while self._in_flight >= self._limit:
+                await self._condition.wait()
+            self._in_flight += 1
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        async with self._condition:
+            self._in_flight = max(0, self._in_flight - 1)
+            self._condition.notify_all()
+        return False
+
+    async def adjust(self, target_concurrency: int) -> int:
+        target = max(self._min, min(self._max, int(target_concurrency)))
+        async with self._condition:
+            self._limit = target
+            self._condition.notify_all()
+        return target
+
+    @property
+    def current_limit(self) -> int:
+        return int(self._limit)
+
+    @property
+    def bounds(self) -> tuple[int, int]:
+        return (self._min, self._max)
+
+
+def calculate_adaptive_concurrency_target(
+    *,
+    outcomes: list[str],
+    current_concurrency: int,
+    min_concurrency: int,
+    max_concurrency: int,
+) -> tuple[int, float]:
+    current = max(1, int(current_concurrency))
+    lower = max(1, int(min_concurrency))
+    upper = max(lower, int(max_concurrency))
+    if not outcomes:
+        return max(lower, min(upper, current)), 0.0
+    errors = sum(1 for outcome in outcomes if outcome != 'success')
+    error_rate = errors / max(1, len(outcomes))
+    target = current
+    if len(outcomes) >= 50:
+        if error_rate > 0.20:
+            target = max(lower, max(1, current // 2))
+        elif error_rate < 0.05:
+            grown = max(current + 1, (current * 5 + 3) // 4)
+            target = min(upper, grown)
+    target = max(lower, min(upper, target))
+    return target, error_rate
+
+
 @dataclass(frozen=True)
 class ValidationFeatureFlags:
     pipeline_version: str
@@ -144,6 +209,18 @@ def parse_args() -> argparse.Namespace:
         help='Comma-separated recommendations prioritized for expensive tier in v3.',
     )
     parser.add_argument('--concurrency', type=int, default=12, help='Max concurrent jobs.')
+    parser.add_argument(
+        '--min-concurrency',
+        type=int,
+        default=2,
+        help='Lower bound for adaptive concurrency scaling.',
+    )
+    parser.add_argument(
+        '--max-concurrency',
+        type=int,
+        default=24,
+        help='Upper bound for adaptive concurrency scaling.',
+    )
     parser.add_argument('--max-retries', type=int, default=2, help='Retry attempts per job.')
     parser.add_argument('--retry-backoff-ms', type=int, default=300, help='Base retry backoff (ms).')
     parser.add_argument('--timeout-s', type=float, default=8.0, help='Per-check timeout seconds.')
@@ -1072,7 +1149,7 @@ async def run_single_job(
     spec: ValidationJobSpec,
     runner: Callable[[str, argparse.Namespace], dict],
     db_lock: InstrumentedLock | asyncio.Lock,
-    semaphore: asyncio.Semaphore,
+    semaphore: AdaptiveSemaphore | asyncio.Semaphore,
     on_complete: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     async with semaphore:
@@ -1335,6 +1412,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
     states = parse_csv_set(args.state_filter)
     memory_db_path = Path(args.memory_db).expanduser() if str(args.memory_db or '').strip() else None
     memory_policy_signature = exclusion_memory_policy_signature(args=args, checks=checks, flags=flags)
+    min_concurrency = max(1, int(getattr(args, 'min_concurrency', 2)))
+    max_concurrency = max(min_concurrency, int(getattr(args, 'max_concurrency', 24)))
+    initial_concurrency = max(min_concurrency, min(max_concurrency, max(1, int(args.concurrency))))
 
     sqlite_busy_timeout_ms = max(0, int(args.sqlite_busy_timeout_ms))
     with ndb.open_connection(db_path, busy_timeout_ms=sqlite_busy_timeout_ms, wal=True) as conn:
@@ -1453,7 +1533,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
             config={
                 'checks': checks,
                 'candidate_limit': args.candidate_limit,
-                'concurrency': args.concurrency,
+                'concurrency': initial_concurrency,
+                'min_concurrency': min_concurrency,
+                'max_concurrency': max_concurrency,
                 'max_retries': args.max_retries,
                 'state_filter': states,
                 'pipeline_version': flags.pipeline_version,
@@ -1504,7 +1586,13 @@ async def orchestrate(args: argparse.Namespace) -> int:
         conn.commit()
 
         db_lock = InstrumentedLock()
-        semaphore = asyncio.Semaphore(max(1, args.concurrency))
+        semaphore = AdaptiveSemaphore(
+            initial_concurrency=initial_concurrency,
+            min_concurrency=min_concurrency,
+            max_concurrency=max_concurrency,
+        )
+        recent_outcomes: deque[str] = deque(maxlen=50)
+        concurrency_adjustments: list[dict[str, object]] = []
         progress_lock = asyncio.Lock()
         progress_state = ProgressState(
             total_jobs=len(jobs),
@@ -1526,15 +1614,40 @@ async def orchestrate(args: argparse.Namespace) -> int:
             )
 
         async def on_job_complete(outcome: str) -> None:
-            if not args.progress:
-                return
             async with progress_lock:
                 progress_state.completed_jobs += 1
                 if outcome == 'success':
                     progress_state.success_jobs += 1
                 else:
                     progress_state.failed_jobs += 1
+                recent_outcomes.append(outcome)
 
+                if len(recent_outcomes) >= 50 and progress_state.completed_jobs % 50 == 0:
+                    target_concurrency, error_rate = calculate_adaptive_concurrency_target(
+                        outcomes=list(recent_outcomes),
+                        current_concurrency=semaphore.current_limit,
+                        min_concurrency=min_concurrency,
+                        max_concurrency=max_concurrency,
+                    )
+                    if target_concurrency != semaphore.current_limit:
+                        previous = semaphore.current_limit
+                        updated = await semaphore.adjust(target_concurrency)
+                        adjustment = {
+                            'completed_jobs': int(progress_state.completed_jobs),
+                            'error_rate': round(error_rate, 4),
+                            'from': int(previous),
+                            'to': int(updated),
+                        }
+                        concurrency_adjustments.append(adjustment)
+                        emit_stage_event(
+                            args.stage_events,
+                            'concurrency_adjust',
+                            **adjustment,
+                            window_size=50,
+                        )
+
+                if not args.progress:
+                    return
                 now = time.monotonic()
                 due_by_count = progress_state.completed_jobs % max(1, args.progress_every) == 0
                 due_by_time = (now - progress_state.last_report_monotonic) >= max(0.1, args.progress_interval_s)
@@ -1551,6 +1664,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 f'pipeline={flags.pipeline_version} v3_enabled={flags.v3_enabled} '
                 f'tier={flags.validation_tier} tiered_split={tiered_split} '
                 f'expensive_finalists={len(expensive_finalists)} '
+                f'concurrency_initial={initial_concurrency} '
+                f'concurrency_range={min_concurrency}-{max_concurrency} '
                 f'cheap_cache={args.cheap_cache} ttl={args.cheap_cache_ttl_s}s '
                 f'memory_db={str(memory_db_path) if memory_db_path is not None else "disabled"} '
                 f'memory_prefilter={memory_prefilter_count}',
@@ -1623,6 +1738,14 @@ async def orchestrate(args: argparse.Namespace) -> int:
             finalist_count=len(expensive_finalists),
         )
         lock_metrics = db_lock.snapshot()
+        adaptive_summary = {
+            'initial': int(initial_concurrency),
+            'final': int(semaphore.current_limit),
+            'min': int(min_concurrency),
+            'max': int(max_concurrency),
+            'adjustment_count': int(len(concurrency_adjustments)),
+            'adjustments': concurrency_adjustments[:20],
+        }
         latency_ms = int((time.monotonic() - started_monotonic) * 1000)
         emit_stage_event(
             args.stage_events,
@@ -1638,6 +1761,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
             memory_hard_fail_count=memory_hard_fail_count,
             memory_exclusions_upserted=memory_exclusions_upserted,
             latency_ms=latency_ms,
+            concurrency_initial=adaptive_summary['initial'],
+            concurrency_final=adaptive_summary['final'],
+            concurrency_adjustment_count=adaptive_summary['adjustment_count'],
             **lock_metrics,
         )
         conn.execute(
@@ -1658,6 +1784,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                         'memory_prefilter_count': memory_prefilter_count,
                         'memory_hard_fail_count': memory_hard_fail_count,
                         'memory_exclusions_upserted': memory_exclusions_upserted,
+                        'adaptive_concurrency': adaptive_summary,
                         **lock_metrics,
                     },
                     ensure_ascii=False,
@@ -1685,6 +1812,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'memory_prefilter_count': memory_prefilter_count,
                 'memory_hard_fail_count': memory_hard_fail_count,
                 'memory_exclusions_upserted': memory_exclusions_upserted,
+                'adaptive_concurrency': adaptive_summary,
                 **lock_metrics,
             },
             ensure_ascii=False,

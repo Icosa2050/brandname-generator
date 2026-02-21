@@ -94,8 +94,8 @@
             "dependencies": [
               3
             ],
-            "details": "In `naming_validate_async.py:orchestrate()`, replace the fixed `asyncio.Semaphore(max(1, args.concurrency))` (line 1450) with an adaptive wrapper. Add `--min-concurrency` (default 2) and `--max-concurrency` (default 24) args. Start at `args.concurrency` and track: (a) consecutive DB lock wait times via a timing wrapper around db_lock acquisitions, (b) error/retry rate from on_job_complete. If error rate exceeds 20% over the last 50 jobs, halve concurrency (down to min). If error rate is below 5% for 50 jobs, increase by 25% (up to max). Implement as an `AdaptiveSemaphore` class wrapping `asyncio.Semaphore` with a `adjust()` method called from `on_job_complete`. Log concurrency changes via the progress reporting system.",
-            "status": "pending",
+            "details": "Completed in `scripts/branding/naming_validate_async.py`: replaced fixed semaphore with `AdaptiveSemaphore` and added `--min-concurrency` / `--max-concurrency`. Concurrency now re-evaluates every 50 completed jobs from rolling error rate: >20% halves, <5% grows by ~25% (bounded). Adjustment events emit via `stage_event=... stage=concurrency_adjust`. Final adaptive state is persisted in run summaries under `adaptive_concurrency`.",
+            "status": "done",
             "testStrategy": "Unit test: create AdaptiveSemaphore with min=2, max=10, initial=5. Simulate 50 'success' signals and verify concurrency increases. Simulate 50 mixed signals with >20% errors and verify concurrency decreases. Verify bounds are respected. Integration: run validator with --min-concurrency=1 --max-concurrency=4 against a test DB and verify it completes without errors."
           },
           {

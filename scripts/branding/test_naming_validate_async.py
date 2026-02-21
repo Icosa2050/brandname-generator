@@ -57,6 +57,10 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         with mock.patch('sys.argv', ['naming_validate_async.py', '--sqlite-busy-timeout-ms', '1234']):
             args = nva.parse_args()
         self.assertEqual(args.sqlite_busy_timeout_ms, 1234)
+        with mock.patch('sys.argv', ['naming_validate_async.py', '--min-concurrency', '3', '--max-concurrency', '9']):
+            args = nva.parse_args()
+        self.assertEqual(args.min_concurrency, 3)
+        self.assertEqual(args.max_concurrency, 9)
         with mock.patch('sys.argv', ['naming_validate_async.py', '--no-track-job-lifecycle']):
             args = nva.parse_args()
         self.assertFalse(args.track_job_lifecycle)
@@ -271,6 +275,33 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertGreaterEqual(stats['lock_max_wait_ms'], 0)
         self.assertGreaterEqual(stats['lock_contended_count'], 1)
 
+    def test_adaptive_semaphore_adjust_respects_bounds(self) -> None:
+        sem = nva.AdaptiveSemaphore(initial_concurrency=5, min_concurrency=2, max_concurrency=10)
+        self.assertEqual(sem.current_limit, 5)
+        asyncio.run(sem.adjust(50))
+        self.assertEqual(sem.current_limit, 10)
+        asyncio.run(sem.adjust(1))
+        self.assertEqual(sem.current_limit, 2)
+
+    def test_calculate_adaptive_concurrency_target_up_and_down(self) -> None:
+        up_target, up_error_rate = nva.calculate_adaptive_concurrency_target(
+            outcomes=['success'] * 50,
+            current_concurrency=4,
+            min_concurrency=2,
+            max_concurrency=10,
+        )
+        self.assertGreaterEqual(up_target, 5)
+        self.assertLess(up_error_rate, 0.05)
+
+        down_target, down_error_rate = nva.calculate_adaptive_concurrency_target(
+            outcomes=(['success'] * 35) + (['fail'] * 15),
+            current_concurrency=8,
+            min_concurrency=2,
+            max_concurrency=10,
+        )
+        self.assertEqual(down_target, 4)
+        self.assertGreater(down_error_rate, 0.20)
+
     def test_orchestrate_writes_lock_metrics_to_summary(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / 'validator.db'
@@ -298,6 +329,8 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                     '--checks=adversarial',
                     '--candidate-limit=1',
                     '--concurrency=1',
+                    '--min-concurrency=1',
+                    '--max-concurrency=4',
                     '--max-retries=0',
                     '--state-filter=new',
                     '--scope=global',
@@ -319,6 +352,9 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             self.assertIn('lock_total_wait_ms', summary)
             self.assertIn('lock_max_wait_ms', summary)
             self.assertIn('lock_contended_count', summary)
+            self.assertIn('adaptive_concurrency', summary)
+            self.assertEqual(summary['adaptive_concurrency'].get('min'), 1)
+            self.assertEqual(summary['adaptive_concurrency'].get('max'), 4)
 
 
 if __name__ == '__main__':
