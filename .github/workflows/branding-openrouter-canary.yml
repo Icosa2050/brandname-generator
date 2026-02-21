@@ -38,7 +38,7 @@ jobs:
           python3 scripts/branding/naming_campaign_runner.py \
             --max-runs 1 \
             --sleep-s 0 \
-            --mini-test \
+            --no-mini-test \
             --pool-size 400 \
             --check-limit 80 \
             --validator-candidate-limit 40 \
