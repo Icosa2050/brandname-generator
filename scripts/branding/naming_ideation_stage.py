@@ -499,6 +499,8 @@ def call_openrouter_candidates(
     prompt: str,
     timeout_ms: int,
     strict_json: bool,
+    http_referer: str = '',
+    x_title: str = '',
 ) -> tuple[list[str], dict[str, Any], str]:
     schema = {
         'name': 'name_candidates',
@@ -540,14 +542,22 @@ def call_openrouter_candidates(
 
     def request_once(payload_body: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
         data = json.dumps(payload_body, ensure_ascii=False).encode('utf-8')
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        }
+        referer = str(http_referer or '').strip()
+        title = str(x_title or '').strip()
+        if referer:
+            headers['HTTP-Referer'] = referer
+        if title:
+            headers['X-Title'] = title
+
         req = request.Request(
             'https://openrouter.ai/api/v1/chat/completions',
             data=data,
-            headers={
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
+            headers=headers,
             method='POST',
         )
         try:
@@ -610,6 +620,13 @@ def estimate_usage_cost_usd(
     in_price_per_1k: float,
     out_price_per_1k: float,
 ) -> float:
+    try:
+        direct_cost = float(usage.get('cost') or 0.0)
+    except (TypeError, ValueError):
+        direct_cost = 0.0
+    if direct_cost > 0.0:
+        return round(direct_cost, 8)
+
     prompt_tokens = float(usage.get('prompt_tokens') or usage.get('input_tokens') or 0.0)
     completion_tokens = float(usage.get('completion_tokens') or usage.get('output_tokens') or 0.0)
     in_cost = (prompt_tokens / 1000.0) * max(0.0, in_price_per_1k)

@@ -383,6 +383,8 @@ def run_active_llm_ideation(
                                 prompt=prompt,
                                 timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                                 strict_json=bool(args.llm_strict_json),
+                                http_referer=args.llm_openrouter_http_referer,
+                                x_title=args.llm_openrouter_x_title,
                             )
                             if call_names:
                                 round_names = call_names
@@ -715,6 +717,16 @@ def parse_args() -> argparse.Namespace:
         default='OPENROUTER_API_KEY',
         help='Environment variable name containing API key for openrouter_http mode.',
     )
+    parser.add_argument(
+        '--llm-openrouter-http-referer',
+        default=os.environ.get('OPENROUTER_HTTP_REFERER', ''),
+        help='Optional HTTP-Referer header for OpenRouter attribution.',
+    )
+    parser.add_argument(
+        '--llm-openrouter-x-title',
+        default=os.environ.get('OPENROUTER_X_TITLE', 'Kostula Naming Pipeline'),
+        help='Optional X-Title header for OpenRouter attribution.',
+    )
     parser.add_argument('--llm-rounds', type=int, default=2, help='LLM ideation rounds per run.')
     parser.add_argument('--llm-candidates-per-round', type=int, default=20, help='Candidates requested per LLM round.')
     parser.add_argument('--llm-max-call-latency-ms', type=int, default=8000, help='Per-call timeout in milliseconds.')
@@ -823,7 +835,8 @@ def main() -> int:
         f'check_limit={args.check_limit} validator_tier={args.validator_tier} '
         f'validator_candidate_limit={args.validator_candidate_limit} '
         f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} llm_model={args.llm_model} '
-        f'llm_context_enabled={bool(llm_context_packet)}'
+        f'llm_context_enabled={bool(llm_context_packet)} '
+        f'llm_attribution_headers={bool(str(args.llm_openrouter_http_referer).strip() or str(args.llm_openrouter_x_title).strip())}'
     )
 
     lock_path, lock_error = acquire_campaign_lock(

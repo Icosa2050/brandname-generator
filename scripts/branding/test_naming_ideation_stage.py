@@ -156,6 +156,46 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertEqual(sorted(names), ['fairbill', 'verodomo'])
         self.assertEqual(usage.get('prompt_tokens'), 12)
 
+    @mock.patch('naming_ideation_stage.request.urlopen')
+    def test_call_openrouter_candidates_sets_attribution_headers(self, mock_urlopen: mock.Mock) -> None:
+        captured_headers: dict[str, str] = {}
+
+        def _fake_urlopen(req: object, timeout: float) -> _FakeHTTPResponse:
+            del timeout
+            if hasattr(req, 'header_items'):
+                captured_headers.update({k.lower(): v for k, v in req.header_items()})
+            payload = json.dumps(
+                {
+                    'choices': [{'message': {'content': '{"candidates":[{"name":"Verodomo"}]}'}}],
+                    'usage': {'cost': 0.0123},
+                }
+            )
+            return _FakeHTTPResponse(payload)
+
+        mock_urlopen.side_effect = _fake_urlopen
+        names, usage, err = nide.call_openrouter_candidates(
+            api_key='k',
+            model='mistralai/mistral-small-creative',
+            prompt='hello',
+            timeout_ms=500,
+            strict_json=True,
+            http_referer='https://example.com/app',
+            x_title='Kostula Naming Pipeline',
+        )
+        self.assertEqual(err, '')
+        self.assertEqual(names, ['verodomo'])
+        self.assertEqual(usage.get('cost'), 0.0123)
+        self.assertEqual(captured_headers.get('http-referer'), 'https://example.com/app')
+        self.assertEqual(captured_headers.get('x-title'), 'Kostula Naming Pipeline')
+
+    def test_estimate_usage_cost_prefers_direct_cost(self) -> None:
+        got = nide.estimate_usage_cost_usd(
+            usage={'prompt_tokens': 1000, 'completion_tokens': 1000, 'cost': 0.0205},
+            in_price_per_1k=0.0006,
+            out_price_per_1k=0.0006,
+        )
+        self.assertAlmostEqual(got, 0.0205, places=6)
+
     def test_compute_dynamic_constraints_fail_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             runs = Path(td)

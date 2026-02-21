@@ -179,6 +179,8 @@ python3 scripts/branding/naming_campaign_runner.py \
   --llm-ideation-enabled \
   --llm-provider=openrouter_http \
   --llm-model="mistralai/mistral-small-creative" \
+  --llm-openrouter-http-referer="https://github.com/Icosa2050/kostula" \
+  --llm-openrouter-x-title="Kostula Naming Pipeline" \
   --llm-context-file=docs/branding/llm_context.example.json \
   --llm-rounds=2 \
   --llm-candidates-per-round=20 \
@@ -197,9 +199,12 @@ python3 scripts/branding/naming_campaign_runner.py \
 
 Notes:
 - Set `OPENROUTER_API_KEY` for `openrouter_http` mode.
+- Optional attribution headers: `--llm-openrouter-http-referer` and `--llm-openrouter-x-title`
+  (or env vars `OPENROUTER_HTTP_REFERER`, `OPENROUTER_X_TITLE`).
 - `--llm-provider=fixture --llm-fixture-input=<file>` is useful for offline smoke tests.
 - `--llm-context-file=<json>` injects product/user/tone guidance into the LLM prompt.
 - Example context packet: `docs/branding/llm_context.example.json`.
+- `llm_cost_usd` now prefers provider-reported `usage.cost` when available; token-price flags remain fallback estimation.
 - OpenRouter calls use a compatibility fallback chain (`json_schema+require_parameters` -> `json_object` -> plain chat) so models that reject strict routing still return candidates.
 - Campaign `llm_stage_status` now distinguishes empty/error cases (`empty_with_errors`, `empty`) instead of reporting `ok` with zero candidates.
 - A/B mode writes `ab_report.json` and `ab_report.md` in campaign output root.

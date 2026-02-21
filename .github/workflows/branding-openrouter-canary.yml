@@ -47,6 +47,8 @@ jobs:
             --llm-ideation-enabled \
             --llm-provider openrouter_http \
             --llm-model "$OPENROUTER_MODEL" \
+            --llm-openrouter-http-referer "https://github.com/Icosa2050/kostula" \
+            --llm-openrouter-x-title "Kostula Naming Pipeline" \
             --llm-context-file docs/branding/llm_context.example.json \
             --llm-rounds 1 \
             --llm-candidates-per-round 12 \
