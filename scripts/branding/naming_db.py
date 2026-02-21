@@ -40,19 +40,24 @@ def configure_connection(
     busy_timeout_ms: int = DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
     wal: bool = True,
 ) -> None:
+    timeout = max(0, int(busy_timeout_ms))
     if wal:
-        conn.execute('PRAGMA journal_mode = WAL;')
-    conn.execute(f'PRAGMA busy_timeout = {max(0, int(busy_timeout_ms))};')
+        try:
+            conn.execute('PRAGMA journal_mode = WAL;')
+        except sqlite3.DatabaseError:
+            # Some SQLite backends (e.g. in-memory modes) do not support WAL.
+            pass
+    conn.execute(f'PRAGMA busy_timeout = {timeout};')
     conn.execute('PRAGMA foreign_keys = ON;')
 
 
 def open_connection(
-    db_path: Path,
+    db_path: Path | str,
     *,
     busy_timeout_ms: int = DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
     wal: bool = True,
 ) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(str(db_path))
     configure_connection(conn, busy_timeout_ms=busy_timeout_ms, wal=wal)
     return conn
 
