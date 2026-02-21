@@ -48,6 +48,9 @@ jobs:
       - name: Ideation Stage Unit Tests
         run: python3 scripts/branding/test_naming_ideation_stage.py
 
+      - name: Generator Unit Tests
+        run: python3 scripts/branding/test_name_generator.py
+
       - name: Fixture Campaign Smoke
         run: |
           cat > /tmp/branding_fixture_candidates.json <<'JSON'

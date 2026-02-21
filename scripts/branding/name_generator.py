@@ -780,9 +780,13 @@ def load_llm_fallback_candidates(
     p = Path(path)
     if not path or not p.exists():
         return []
-    raw = p.read_text(encoding='utf-8')
+    raw = ''
     attempts = max(1, max_attempts)
     for idx in range(attempts):
+        try:
+            raw = p.read_text(encoding='utf-8')
+        except OSError:
+            raw = ''
         names = parse_llm_candidate_payload(raw)
         if names:
             return sorted(set(names))
@@ -3036,7 +3040,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--llm-input',
         default='',
-        help='Optional LLM output file (.json/.txt) used as fallback explicit candidates.',
+        help='Optional LLM candidate input file (.json/.txt) merged into explicit candidates.',
     )
     parser.add_argument(
         '--llm-parse-attempts',
