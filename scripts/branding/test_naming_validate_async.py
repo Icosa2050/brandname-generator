@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import argparse
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -37,11 +39,27 @@ def _base_args() -> argparse.Namespace:
     )
 
 
+def _job_args(**overrides: object) -> argparse.Namespace:
+    args = _base_args()
+    args.cheap_cache = True
+    args.cheap_cache_ttl_s = 3600
+    args.timeout_s = 1.0
+    args.max_retries = 0
+    args.retry_backoff_ms = 1
+    args.track_job_lifecycle = True
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
 class NamingValidateAsyncMemoryTest(unittest.TestCase):
     def test_parse_args_accepts_sqlite_busy_timeout(self) -> None:
         with mock.patch('sys.argv', ['naming_validate_async.py', '--sqlite-busy-timeout-ms', '1234']):
             args = nva.parse_args()
         self.assertEqual(args.sqlite_busy_timeout_ms, 1234)
+        with mock.patch('sys.argv', ['naming_validate_async.py', '--no-track-job-lifecycle']):
+            args = nva.parse_args()
+        self.assertFalse(args.track_job_lifecycle)
 
     def test_policy_signature_is_stable(self) -> None:
         args = _base_args()
@@ -166,6 +184,141 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             got = nva.collect_hard_fail_reasons_by_name(conn, run_id=run_id)
             self.assertIn('verodoma', got)
             self.assertEqual(got['verodoma'], ['required_domain_com_not_available'])
+
+    def test_run_single_job_uses_two_lock_acquisitions_on_success(self) -> None:
+        with closing(sqlite3.connect(':memory:')) as conn:
+            ndb.ensure_schema(conn)
+            run_id = ndb.create_run(
+                conn,
+                source_path=':memory:',
+                scope='global',
+                gate_mode='balanced',
+                variation_profile='test',
+                status='running',
+                config={},
+                summary={},
+            )
+            candidate_id = ndb.upsert_candidate(
+                conn,
+                name_display='Verodoma',
+                total_score=65.0,
+                risk_score=22.0,
+                recommendation='strong',
+                quality_score=71.0,
+                engine_id='explicit',
+                parent_ids='',
+                status='new',
+                rejection_reason='',
+            )
+            job_id = ndb.create_validation_job(
+                conn,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                check_type='adversarial',
+                status='pending',
+            )
+            conn.commit()
+            spec = nva.ValidationJobSpec(
+                job_id=job_id,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                candidate_name='Verodoma',
+                candidate_prev_state='new',
+                check_type='adversarial',
+            )
+            args = _job_args()
+            lock = nva.InstrumentedLock()
+            semaphore = asyncio.Semaphore(1)
+
+            def _runner(_name: str, _args: argparse.Namespace) -> dict:
+                return {'status': 'pass', 'score_delta': 0.0, 'hard_fail': False, 'reason': '', 'evidence': {}}
+
+            asyncio.run(
+                nva.run_single_job(
+                    conn=conn,
+                    args=args,
+                    spec=spec,
+                    runner=_runner,
+                    db_lock=lock,
+                    semaphore=semaphore,
+                    on_complete=None,
+                )
+            )
+            stats = lock.snapshot()
+            self.assertEqual(stats['lock_acquisitions'], 2)
+            status = conn.execute('SELECT status FROM validation_jobs WHERE id = ?', (job_id,)).fetchone()
+            self.assertEqual(status[0], 'success')
+
+    def test_instrumented_lock_reports_contention(self) -> None:
+        lock = nva.InstrumentedLock()
+
+        async def _holder() -> None:
+            async with lock:
+                await asyncio.sleep(0.03)
+
+        async def _waiter() -> None:
+            await asyncio.sleep(0.003)
+            async with lock:
+                return
+
+        async def _run() -> None:
+            await asyncio.gather(_holder(), _waiter())
+
+        asyncio.run(_run())
+        stats = lock.snapshot()
+        self.assertEqual(stats['lock_acquisitions'], 2)
+        self.assertGreaterEqual(stats['lock_total_wait_ms'], 0)
+        self.assertGreaterEqual(stats['lock_max_wait_ms'], 0)
+        self.assertGreaterEqual(stats['lock_contended_count'], 1)
+
+    def test_orchestrate_writes_lock_metrics_to_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / 'validator.db'
+            with ndb.open_connection(db_path) as conn:
+                ndb.ensure_schema(conn)
+                ndb.upsert_candidate(
+                    conn,
+                    name_display='Verodoma',
+                    total_score=65.0,
+                    risk_score=18.0,
+                    recommendation='strong',
+                    quality_score=74.0,
+                    engine_id='explicit',
+                    parent_ids='',
+                    status='new',
+                    rejection_reason='',
+                )
+                conn.commit()
+
+            with mock.patch(
+                'sys.argv',
+                [
+                    'naming_validate_async.py',
+                    f'--db={db_path}',
+                    '--checks=adversarial',
+                    '--candidate-limit=1',
+                    '--concurrency=1',
+                    '--max-retries=0',
+                    '--state-filter=new',
+                    '--scope=global',
+                    '--gate=balanced',
+                    '--no-progress',
+                ],
+            ):
+                args = nva.parse_args()
+            code = asyncio.run(nva.orchestrate(args))
+            self.assertEqual(code, 0)
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                row = conn.execute(
+                    "SELECT summary_json FROM naming_runs ORDER BY id DESC LIMIT 1",
+                ).fetchone()
+            self.assertIsNotNone(row)
+            summary = json.loads(str(row[0] or '{}'))
+            self.assertIn('lock_acquisitions', summary)
+            self.assertIn('lock_total_wait_ms', summary)
+            self.assertIn('lock_max_wait_ms', summary)
+            self.assertIn('lock_contended_count', summary)
 
 
 if __name__ == '__main__':

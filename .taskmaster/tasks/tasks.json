@@ -72,8 +72,8 @@
             "dependencies": [
               1
             ],
-            "details": "In `naming_validate_async.py:run_single_job()` (lines 1015-1153), the function acquires `db_lock` up to 4 times per job (set running, check cache, write result+update job, retry/error paths). Refactor to: (1) combine the 'set running' update and cache lookup into a single `async with db_lock` block, (2) combine the result write and job completion update into a single block (already done). For the retry path, keep the single lock acquisition. This reduces lock round-trips from ~3-4 to ~2 per successful job. Also consider making the 'set running' update optional behind a `--track-job-lifecycle` flag (default True) so users can skip it for maximum throughput.",
-            "status": "pending",
+            "details": "Completed in `scripts/branding/naming_validate_async.py`: combined `running` status update and cheap-cache lookup into one lock section, preserving result+completion as one section. Added `--track-job-lifecycle/--no-track-job-lifecycle` (default on) to optionally skip intermediate lifecycle writes. Added test coverage in `scripts/branding/test_naming_validate_async.py` (`test_run_single_job_uses_two_lock_acquisitions_on_success`) to enforce two lock acquisitions on successful non-retry path.",
+            "status": "done",
             "testStrategy": "Run the existing test suite in test_naming_validate_async.py to verify no regressions. Add a timing assertion or counter that tracks db_lock acquisition count per job in a test scenario with mock runners, verifying the count is <= 2 for a successful non-cached job."
           },
           {
@@ -105,8 +105,8 @@
             "dependencies": [
               3
             ],
-            "details": "Create an `InstrumentedLock` wrapper class around `asyncio.Lock` in `naming_validate_async.py` that tracks: total acquisitions, total wait time (monotonic), max wait time, and acquisitions where wait > 1ms. Replace `db_lock = asyncio.Lock()` (line 1449) with `db_lock = InstrumentedLock()`. The wrapper's `__aenter__` records time before `await self._lock.acquire()` and after, accumulating stats. At run completion (around line 1568), include lock metrics in the stage event and run summary: `lock_acquisitions`, `lock_total_wait_ms`, `lock_max_wait_ms`, `lock_contended_count`. This data feeds the benchmark harness (subtask 7) and helps users tune concurrency.",
-            "status": "pending",
+            "details": "Completed with `InstrumentedLock` in `scripts/branding/naming_validate_async.py`, now used for `db_lock` in orchestrate flow. Lock metrics (`lock_acquisitions`, `lock_total_wait_ms`, `lock_max_wait_ms`, `lock_contended_count`) are emitted in `stage_event` complete payload and persisted in `run_summary` / `naming_runs.summary_json`. Added tests in `scripts/branding/test_naming_validate_async.py` for lock contention accounting and for presence of lock metrics in orchestrate summary output.",
+            "status": "done",
             "testStrategy": "Unit test: create InstrumentedLock, acquire/release it from multiple concurrent coroutines, verify stats are non-negative and acquisition count matches expected. Verify that the lock metrics appear in the run summary JSON after a full orchestrate() call with a test DB."
           },
           {

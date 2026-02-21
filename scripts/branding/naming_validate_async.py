@@ -57,6 +57,41 @@ class ProgressState:
     last_report_monotonic: float = 0.0
 
 
+class InstrumentedLock:
+    """Async lock with lightweight wait-time instrumentation."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self.acquisition_count = 0
+        self.total_wait_s = 0.0
+        self.max_wait_s = 0.0
+        self.contended_count = 0
+
+    async def __aenter__(self) -> 'InstrumentedLock':
+        started = time.monotonic()
+        await self._lock.acquire()
+        wait_s = max(0.0, time.monotonic() - started)
+        self.acquisition_count += 1
+        self.total_wait_s += wait_s
+        if wait_s > self.max_wait_s:
+            self.max_wait_s = wait_s
+        if wait_s > 0.001:
+            self.contended_count += 1
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        self._lock.release()
+        return False
+
+    def snapshot(self) -> dict[str, int]:
+        return {
+            'lock_acquisitions': int(self.acquisition_count),
+            'lock_total_wait_ms': int(round(self.total_wait_s * 1000.0)),
+            'lock_max_wait_ms': int(round(self.max_wait_s * 1000.0)),
+            'lock_contended_count': int(self.contended_count),
+        }
+
+
 @dataclass(frozen=True)
 class ValidationFeatureFlags:
     pipeline_version: str
@@ -198,6 +233,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=ndb.DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
         help='SQLite busy timeout in milliseconds for primary and memory DB connections.',
+    )
+    parser.add_argument(
+        '--track-job-lifecycle',
+        dest='track_job_lifecycle',
+        action='store_true',
+        default=True,
+        help='Persist per-attempt running/pending lifecycle updates in validation_jobs.',
+    )
+    parser.add_argument(
+        '--no-track-job-lifecycle',
+        dest='track_job_lifecycle',
+        action='store_false',
     )
     parser.add_argument(
         '--progress-every',
@@ -1024,50 +1071,50 @@ async def run_single_job(
     args: argparse.Namespace,
     spec: ValidationJobSpec,
     runner: Callable[[str, argparse.Namespace], dict],
-    db_lock: asyncio.Lock,
+    db_lock: InstrumentedLock | asyncio.Lock,
     semaphore: asyncio.Semaphore,
     on_complete: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     async with semaphore:
         attempt = 0
         started_at = ndb.now_iso()
+        spec_meta = CHECK_SPECS.get(spec.check_type)
+        cache_eligible = bool(
+            getattr(args, 'cheap_cache', True)
+            and spec_meta is not None
+            and spec_meta.tier == 'cheap'
+        )
+        cache_signature = (
+            cheap_check_cache_signature(spec.check_type, args)
+            if cache_eligible
+            else ''
+        )
         while True:
             attempt += 1
+            cached_result: dict | None = None
             async with db_lock:
-                ndb.update_validation_job(
-                    conn,
-                    job_id=spec.job_id,
-                    status='running',
-                    attempt_count=attempt,
-                    started_at=started_at,
-                    finished_at=None,
-                    last_error='',
-                )
-                conn.commit()
+                if bool(getattr(args, 'track_job_lifecycle', True)):
+                    ndb.update_validation_job(
+                        conn,
+                        job_id=spec.job_id,
+                        status='running',
+                        attempt_count=attempt,
+                        started_at=started_at,
+                        finished_at=None,
+                        last_error='',
+                    )
+                if cache_eligible:
+                    cached_result = load_cached_validation_result(
+                        conn,
+                        candidate_id=spec.candidate_id,
+                        check_type=spec.check_type,
+                        ttl_s=max(1, int(getattr(args, 'cheap_cache_ttl_s', 3600))),
+                        cache_signature=cache_signature,
+                    )
+                if bool(getattr(args, 'track_job_lifecycle', True)):
+                    conn.commit()
 
             try:
-                spec_meta = CHECK_SPECS.get(spec.check_type)
-                cache_eligible = bool(
-                    getattr(args, 'cheap_cache', True)
-                    and spec_meta is not None
-                    and spec_meta.tier == 'cheap'
-                )
-                cache_signature = (
-                    cheap_check_cache_signature(spec.check_type, args)
-                    if cache_eligible
-                    else ''
-                )
-                cached_result: dict | None = None
-                if cache_eligible:
-                    async with db_lock:
-                        cached_result = load_cached_validation_result(
-                            conn,
-                            candidate_id=spec.candidate_id,
-                            check_type=spec.check_type,
-                            ttl_s=max(1, int(getattr(args, 'cheap_cache_ttl_s', 3600))),
-                            cache_signature=cache_signature,
-                        )
-
                 if cached_result is not None:
                     status = str(cached_result['status'])
                     hard_fail = bool(cached_result['hard_fail'])
@@ -1118,17 +1165,18 @@ async def run_single_job(
                 err = f'{type(exc).__name__}: {exc}'
                 should_retry = attempt <= args.max_retries
                 if should_retry:
-                    async with db_lock:
-                        ndb.update_validation_job(
-                            conn,
-                            job_id=spec.job_id,
-                            status='pending',
-                            attempt_count=attempt,
-                            started_at=started_at,
-                            finished_at=None,
-                            last_error=err,
-                        )
-                        conn.commit()
+                    if bool(getattr(args, 'track_job_lifecycle', True)):
+                        async with db_lock:
+                            ndb.update_validation_job(
+                                conn,
+                                job_id=spec.job_id,
+                                status='pending',
+                                attempt_count=attempt,
+                                started_at=started_at,
+                                finished_at=None,
+                                last_error=err,
+                            )
+                            conn.commit()
                     await asyncio.sleep((args.retry_backoff_ms / 1000.0) * attempt)
                     continue
 
@@ -1426,6 +1474,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'memory_db': str(memory_db_path) if memory_db_path is not None else '',
                 'memory_ttl_days': int(args.memory_ttl_days),
                 'sqlite_busy_timeout_ms': int(sqlite_busy_timeout_ms),
+                'track_job_lifecycle': bool(args.track_job_lifecycle),
                 'memory_policy_signature': memory_policy_signature if memory_conn is not None else '',
                 'memory_prefilter_count': int(memory_prefilter_count),
             },
@@ -1454,7 +1503,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
             )
         conn.commit()
 
-        db_lock = asyncio.Lock()
+        db_lock = InstrumentedLock()
         semaphore = asyncio.Semaphore(max(1, args.concurrency))
         progress_lock = asyncio.Lock()
         progress_state = ProgressState(
@@ -1573,6 +1622,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
             checks=expensive_checks,
             finalist_count=len(expensive_finalists),
         )
+        lock_metrics = db_lock.snapshot()
         latency_ms = int((time.monotonic() - started_monotonic) * 1000)
         emit_stage_event(
             args.stage_events,
@@ -1588,6 +1638,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
             memory_hard_fail_count=memory_hard_fail_count,
             memory_exclusions_upserted=memory_exclusions_upserted,
             latency_ms=latency_ms,
+            **lock_metrics,
         )
         conn.execute(
             """
@@ -1607,6 +1658,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                         'memory_prefilter_count': memory_prefilter_count,
                         'memory_hard_fail_count': memory_hard_fail_count,
                         'memory_exclusions_upserted': memory_exclusions_upserted,
+                        **lock_metrics,
                     },
                     ensure_ascii=False,
                 ),
@@ -1633,6 +1685,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'memory_prefilter_count': memory_prefilter_count,
                 'memory_hard_fail_count': memory_hard_fail_count,
                 'memory_exclusions_upserted': memory_exclusions_upserted,
+                **lock_metrics,
             },
             ensure_ascii=False,
         )

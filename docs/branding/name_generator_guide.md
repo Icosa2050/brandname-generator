@@ -221,12 +221,15 @@ Notes:
 - `--generator-only-llm-candidates` keeps generator output focused on model candidates (avoids deterministic legacy families in the same run).
 - `--validator-state-filter=new` avoids revalidating `checked` names in follow-up runs; use `new,checked` only for explicit refresh.
 - `--sqlite-busy-timeout-ms` tunes SQLite lock wait behavior for validator primary/memory DB connections.
+- `--no-track-job-lifecycle` skips intermediate `running/pending` job-state writes in validator for max throughput.
 - `--validator-memory-db` stores persistent hard-fail exclusions across campaigns so eliminated names are skipped in later runs.
 - `--validator-memory-ttl-days` controls exclusion memory lifetime; policy signature + scope + gate must match to apply.
 - Campaign default memory DB is `test_outputs/branding/naming_exclusion_memory.db` (override per branch/experiment if needed).
 - DB reuse is default when the same `--db` path exists; add `--reset-db` for a clean slate.
 - OpenRouter calls use a compatibility fallback chain (`json_schema+require_parameters` -> `json_object` -> plain chat) so models that reject strict routing still return candidates.
 - Campaign `llm_stage_status` now distinguishes empty/error cases (`empty_with_errors`, `empty`) instead of reporting `ok` with zero candidates.
+- Validator `run_summary` now includes SQLite lock contention metrics:
+  `lock_acquisitions`, `lock_total_wait_ms`, `lock_max_wait_ms`, `lock_contended_count`.
 - A/B mode writes `ab_report.json` and `ab_report.md` in campaign output root.
 
 ## Output
