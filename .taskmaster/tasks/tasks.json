@@ -1,0 +1,195 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Stabilize OpenRouter ideation stage",
+        "description": "Harden OpenRouter generation so candidate output remains valid and deterministic under retries, model catalog drift, and budget/time constraints.",
+        "details": "Audit and strengthen ideation stage contracts, retries, cache keys, and fallback behavior. Ensure candidate provenance is complete per run.",
+        "testStrategy": "Run fixture and live smoke modes; verify schema-conformant candidate output and deterministic fail-open behavior.",
+        "status": "pending",
+        "dependencies": [],
+        "priority": "high",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Codify ideation SLOs and failure modes",
+            "description": "Define explicit SLOs for success rate, timeout rate, and empty-response handling.",
+            "details": "",
+            "status": "pending",
+            "dependencies": [],
+            "parentTaskId": 1
+          },
+          {
+            "id": 2,
+            "title": "Add fixture parity checks",
+            "description": "Ensure fixture mode mirrors provider response shape and parser paths.",
+            "details": "",
+            "status": "pending",
+            "dependencies": [
+              "1.1"
+            ],
+            "parentTaskId": 1
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Parallelize validation safely",
+        "description": "Increase validator throughput with bounded parallelism and stronger DB contention controls.",
+        "details": "Evaluate in-process asyncio scaling versus shard-level parallel workers. Add guardrails for SQLite lock pressure.",
+        "testStrategy": "Benchmark jobs/sec across representative candidate/check counts and validate stable summaries.",
+        "status": "pending",
+        "dependencies": [
+          "1"
+        ],
+        "priority": "high",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Enable WAL mode and busy_timeout for SQLite contention resilience",
+            "description": "Configure SQLite connections in naming_db.py and naming_validate_async.py to use WAL journal mode and a busy_timeout, reducing lock contention for concurrent readers/writers.",
+            "dependencies": [],
+            "details": "In `naming_db.py:ensure_schema()` (line 44), add `PRAGMA journal_mode=WAL;` and `PRAGMA busy_timeout=5000;` before the existing `PRAGMA foreign_keys = ON;`. Also add the same PRAGMAs in `naming_validate_async.py` for the memory DB connection opened at line 1291. WAL mode allows concurrent reads during writes, and busy_timeout prevents immediate SQLITE_BUSY errors under contention. Ensure the PRAGMAs are set before any schema or data operations. Add a `--sqlite-busy-timeout-ms` CLI arg to `naming_validate_async.py` (default 5000) so the timeout is tunable.",
+            "status": "pending",
+            "testStrategy": "Unit test: open two connections to same DB, start a write transaction on one, verify the second connection can still read (WAL) and that a write on the second connection waits up to busy_timeout before failing. Verify PRAGMA values with `PRAGMA journal_mode` and `PRAGMA busy_timeout` queries after ensure_schema()."
+          },
+          {
+            "id": 2,
+            "title": "Extract DB connection factory with configurable PRAGMAs",
+            "description": "Create a shared connection factory function in naming_db.py that centralizes SQLite connection setup (WAL, busy_timeout, foreign_keys) for use by all scripts.",
+            "dependencies": [
+              1
+            ],
+            "details": "Add a `def open_connection(db_path: Path, *, busy_timeout_ms: int = 5000, wal: bool = True) -> sqlite3.Connection` function in `naming_db.py`. This function calls `sqlite3.connect(db_path)`, sets `PRAGMA journal_mode=WAL` (if wal=True), `PRAGMA busy_timeout={busy_timeout_ms}`, `PRAGMA foreign_keys=ON`, and returns the connection. Update `naming_validate_async.py:orchestrate()` (line 1285) and `naming_campaign_runner.py` (which calls subprocess scripts that open their own connections) to use this factory. The campaign runner itself doesn't open SQLite directly (it shells out), but ensure the validator and naming_db CLI entry points use the factory.",
+            "status": "pending",
+            "testStrategy": "Unit test: call open_connection with a temp DB path, verify journal_mode is 'wal', busy_timeout matches the provided value, and foreign_keys is ON. Verify ensure_schema still works when called on the returned connection."
+          },
+          {
+            "id": 3,
+            "title": "Batch DB writes in run_single_job to reduce lock acquisition frequency",
+            "description": "Reduce the number of db_lock acquisitions in naming_validate_async.py's run_single_job by batching status updates and result writes into fewer critical sections.",
+            "dependencies": [
+              1
+            ],
+            "details": "In `naming_validate_async.py:run_single_job()` (lines 1015-1153), the function acquires `db_lock` up to 4 times per job (set running, check cache, write result+update job, retry/error paths). Refactor to: (1) combine the 'set running' update and cache lookup into a single `async with db_lock` block, (2) combine the result write and job completion update into a single block (already done). For the retry path, keep the single lock acquisition. This reduces lock round-trips from ~3-4 to ~2 per successful job. Also consider making the 'set running' update optional behind a `--track-job-lifecycle` flag (default True) so users can skip it for maximum throughput.",
+            "status": "pending",
+            "testStrategy": "Run the existing test suite in test_naming_validate_async.py to verify no regressions. Add a timing assertion or counter that tracks db_lock acquisition count per job in a test scenario with mock runners, verifying the count is <= 2 for a successful non-cached job."
+          },
+          {
+            "id": 4,
+            "title": "Add per-shard DB isolation with merge step in campaign runner",
+            "description": "Modify naming_campaign_runner.py to give each shard its own SQLite database, then merge results into a unified DB after the campaign completes, eliminating cross-shard write contention entirely.",
+            "dependencies": [
+              2
+            ],
+            "details": "In `naming_campaign_runner.py:main()` (line 801), when `shard_count > 1`, derive a shard-specific DB path: `db_path_shard = db_path.with_stem(f'{db_path.stem}_shard{args.shard_id}')`. Pass this shard-local DB to all subprocess invocations (generator, validator, assert-contract). After the campaign loop completes (around line 1355), if `shard_id == 0` and `shard_count > 1`, add a merge step that attaches each shard DB and copies candidates/results/scores into the main DB using `INSERT OR IGNORE` (keyed on name_normalized for candidates). Add a `--merge-shards` flag (default True when shard_id=0) and a `--no-shard-db-isolation` flag to opt out. Each shard still runs the curated ingest independently into its own DB.",
+            "status": "pending",
+            "testStrategy": "Integration test: run 2 shards with small sweep configs against fixture data, verify each creates its own DB file. Then simulate the merge step and verify the unified DB contains candidates from both shards with no duplicates (by name_normalized). Verify campaign_summary.json reflects merged totals."
+          },
+          {
+            "id": 5,
+            "title": "Add configurable asyncio concurrency scaling with backpressure",
+            "description": "Enhance the asyncio semaphore in naming_validate_async.py with adaptive concurrency that scales based on error rate and DB lock wait time, plus expose tuning knobs.",
+            "dependencies": [
+              3
+            ],
+            "details": "In `naming_validate_async.py:orchestrate()`, replace the fixed `asyncio.Semaphore(max(1, args.concurrency))` (line 1450) with an adaptive wrapper. Add `--min-concurrency` (default 2) and `--max-concurrency` (default 24) args. Start at `args.concurrency` and track: (a) consecutive DB lock wait times via a timing wrapper around db_lock acquisitions, (b) error/retry rate from on_job_complete. If error rate exceeds 20% over the last 50 jobs, halve concurrency (down to min). If error rate is below 5% for 50 jobs, increase by 25% (up to max). Implement as an `AdaptiveSemaphore` class wrapping `asyncio.Semaphore` with a `adjust()` method called from `on_job_complete`. Log concurrency changes via the progress reporting system.",
+            "status": "pending",
+            "testStrategy": "Unit test: create AdaptiveSemaphore with min=2, max=10, initial=5. Simulate 50 'success' signals and verify concurrency increases. Simulate 50 mixed signals with >20% errors and verify concurrency decreases. Verify bounds are respected. Integration: run validator with --min-concurrency=1 --max-concurrency=4 against a test DB and verify it completes without errors."
+          },
+          {
+            "id": 6,
+            "title": "Add SQLite contention metrics and lock-wait instrumentation",
+            "description": "Instrument db_lock acquisitions in naming_validate_async.py to measure contention (wait time, acquisition count) and emit metrics in the run summary.",
+            "dependencies": [
+              3
+            ],
+            "details": "Create an `InstrumentedLock` wrapper class around `asyncio.Lock` in `naming_validate_async.py` that tracks: total acquisitions, total wait time (monotonic), max wait time, and acquisitions where wait > 1ms. Replace `db_lock = asyncio.Lock()` (line 1449) with `db_lock = InstrumentedLock()`. The wrapper's `__aenter__` records time before `await self._lock.acquire()` and after, accumulating stats. At run completion (around line 1568), include lock metrics in the stage event and run summary: `lock_acquisitions`, `lock_total_wait_ms`, `lock_max_wait_ms`, `lock_contended_count`. This data feeds the benchmark harness (subtask 7) and helps users tune concurrency.",
+            "status": "pending",
+            "testStrategy": "Unit test: create InstrumentedLock, acquire/release it from multiple concurrent coroutines, verify stats are non-negative and acquisition count matches expected. Verify that the lock metrics appear in the run summary JSON after a full orchestrate() call with a test DB."
+          },
+          {
+            "id": 7,
+            "title": "Build benchmark harness for parallelism tuning",
+            "description": "Create a benchmark script that runs the validation pipeline at various concurrency levels and shard counts, collecting throughput and contention metrics for comparison.",
+            "dependencies": [
+              5,
+              6
+            ],
+            "details": "Create `scripts/branding/benchmark_validation.py` that: (1) accepts `--db` (test DB path), `--candidate-counts` (comma-separated, e.g. '50,100,200'), `--concurrency-levels` (e.g. '1,4,8,16'), `--shard-counts` (e.g. '1,2,4'), `--checks` (default 'adversarial,psych,descriptive'), `--rounds` (default 3). (2) For each combination, seeds a temp DB with N synthetic candidates (random 6-8 char names), runs `naming_validate_async.py` via subprocess, captures the stage_event JSON output for 'complete' stage (which now includes lock metrics from subtask 6), and records: wall time, jobs/sec, lock_total_wait_ms, lock_contended_count. (3) Outputs a CSV summary and prints a formatted comparison table. Use only cheap checks (no network) for deterministic benchmarking. Include a `--quick` flag that runs minimal combos (50 candidates, concurrency 1 vs 8, 1 round) for CI smoke testing.",
+            "status": "pending",
+            "testStrategy": "Run `benchmark_validation.py --quick` and verify it produces a valid CSV with expected columns (concurrency, candidates, wall_time_ms, jobs_per_sec, lock_wait_ms). Verify the benchmark completes without errors on a fresh temp DB. Verify that higher concurrency shows equal or better throughput for cheap-only checks."
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Introduce run-level observability",
+        "description": "Make campaign progress visible without tailing multiple logs.",
+        "details": "Emit structured progress events to stdout plus a compact JSONL heartbeat file in the run directory.",
+        "testStrategy": "Run campaign smoke; confirm periodic heartbeat with run/stage percent, ETA, and shard context.",
+        "status": "pending",
+        "dependencies": [
+          "1"
+        ],
+        "priority": "high",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Define event schema",
+            "description": "Standardize stage, run_id, shard_id, counters, and latency fields.",
+            "details": "",
+            "status": "pending",
+            "dependencies": [],
+            "parentTaskId": 3
+          },
+          {
+            "id": 2,
+            "title": "Add runner heartbeat emission",
+            "description": "Emit progress at stage boundaries and fixed intervals in long stages.",
+            "details": "",
+            "status": "pending",
+            "dependencies": [
+              "3.1"
+            ],
+            "parentTaskId": 3
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Optimize campaign sharding strategy",
+        "description": "Improve shard balancing across sweep combinations to avoid uneven runtime.",
+        "details": "Assess current slice-based assignment and add optional weighted scheduling based on historical run durations.",
+        "testStrategy": "Compare per-shard completion variance before/after scheduler change.",
+        "status": "pending",
+        "dependencies": [
+          "2",
+          "3"
+        ],
+        "priority": "medium",
+        "subtasks": []
+      },
+      {
+        "id": 5,
+        "title": "CI canary for OpenRouter workflow",
+        "description": "Add deterministic CI smoke and periodic live canary for provider schema/routing drift.",
+        "details": "Run fixture on each PR and live canary on schedule with strict budget and timeout caps.",
+        "testStrategy": "Verify CI artifacts include candidate artifact, validator summary, and run-level telemetry snapshot.",
+        "status": "pending",
+        "dependencies": [
+          "1",
+          "3"
+        ],
+        "priority": "medium",
+        "subtasks": []
+      }
+    ],
+    "metadata": {
+      "created": "2026-02-21",
+      "context": "brandname-generator OpenRouter pipeline analysis",
+      "description": "Tasks for master context"
+    }
+  }
+}
