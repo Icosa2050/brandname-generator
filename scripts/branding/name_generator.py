@@ -712,6 +712,39 @@ def emit_stage_event(enabled: bool, stage: str, **fields: object) -> None:
     print(f'stage_event={json.dumps(payload, ensure_ascii=False)}', flush=True)
 
 
+def load_failed_history_names(*, db_path: Path, candidate_names: Iterable[str]) -> set[str]:
+    """Return normalized candidate names that already failed in persisted history."""
+    normalized_names = sorted({normalize_alpha(name) for name in candidate_names if normalize_alpha(name)})
+    if not normalized_names:
+        return set()
+    if not db_path.exists():
+        return set()
+
+    placeholders = ','.join('?' for _ in normalized_names)
+    query = f"""
+        SELECT c.name_normalized
+        FROM candidates c
+        WHERE c.name_normalized IN ({placeholders})
+          AND (
+            LOWER(COALESCE(c.status, '')) IN ('rejected', 'memory_excluded')
+            OR LOWER(COALESCE(c.state, '')) IN ('memory_excluded')
+            OR COALESCE(c.rejection_reason, '') <> ''
+            OR EXISTS (
+                SELECT 1
+                FROM validation_results vr
+                WHERE vr.candidate_id = c.id
+                  AND COALESCE(vr.hard_fail, 0) = 1
+            )
+          )
+    """
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(query, tuple(normalized_names)).fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[0]) for row in rows if row and row[0]}
+
+
 def extract_json_object(raw: str) -> str | None:
     start = raw.find('{')
     if start < 0:
@@ -3150,6 +3183,18 @@ def parse_args() -> argparse.Namespace:
         help='SQLite DB path used when --persist-db is enabled.',
     )
     parser.add_argument(
+        '--skip-failed-history',
+        dest='skip_failed_history',
+        action='store_true',
+        default=True,
+        help='Skip candidates that already failed in persisted DB history.',
+    )
+    parser.add_argument(
+        '--no-skip-failed-history',
+        dest='skip_failed_history',
+        action='store_false',
+    )
+    parser.add_argument(
         '--run-log',
         default='docs/branding/name_generator_runs.jsonl',
         help='Append run summary JSONL history to this path (set empty string to disable).',
@@ -3388,6 +3433,35 @@ def main() -> int:
             if c:
                 to_check.append(c)
                 in_check.add(c.name)
+
+    history_skipped_names: set[str] = set()
+    if bool(args.skip_failed_history):
+        history_skipped_names = load_failed_history_names(
+            db_path=Path(args.db).expanduser(),
+            candidate_names=[candidate.name for candidate in to_check],
+        )
+        if history_skipped_names:
+            before_filter = len(to_check)
+            to_check = [
+                candidate
+                for candidate in to_check
+                if normalize_alpha(candidate.name) not in history_skipped_names
+            ]
+            skipped_count = max(0, before_filter - len(to_check))
+            sample = sorted(history_skipped_names)[:20]
+            emit_stage_event(
+                args.stage_events,
+                'history_skip',
+                skipped_count=skipped_count,
+                history_db=str(Path(args.db).expanduser()),
+                skipped_names_sample=sample,
+            )
+            if args.progress:
+                print(
+                    f'history_skip skipped={skipped_count} db={Path(args.db).expanduser()} '
+                    f'sample={sample}',
+                    flush=True,
+                )
     source_tokens = source_token_set(source_atoms)
     pool_influenced_count = sum(
         1 for candidate in pool if candidate_is_source_influenced(candidate, source_tokens)

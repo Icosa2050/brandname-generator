@@ -232,6 +232,9 @@ Notes:
 - `--validator-memory-ttl-days` controls exclusion memory lifetime; policy signature + scope + gate must match to apply.
 - Campaign default memory DB is `test_outputs/branding/naming_exclusion_memory.db` (override per branch/experiment if needed).
 - DB reuse is default when the same `--db` path exists; add `--reset-db` for a clean slate.
+- Generator default `--skip-failed-history` skips names that already failed in DB history before external checks.
+- Use `--no-skip-failed-history` only if you intentionally want to re-screen failed names.
+- Fresh start: remove the DB file (`--db` target) to clear history.
 - `--live-progress` (default on) now forwards selected generator/validator child lines to campaign stdout.
 - `--live-progress-patterns` controls forwarded line matching (default includes `stage_event=`, `async_validation_`, `run_summary=`).
 - `--heartbeat-events` (default on) emits `campaign_event=` lifecycle records and writes JSONL heartbeat to `<out-dir>/runs/campaign_heartbeat.jsonl`.

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,66 @@ class _PassthroughFilter:
 
 
 class NameGeneratorTest(unittest.TestCase):
+    def test_load_failed_history_names_detects_rejected_and_validator_hard_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / 'history.db'
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE candidates (
+                      id INTEGER PRIMARY KEY,
+                      name_normalized TEXT NOT NULL UNIQUE,
+                      status TEXT NOT NULL,
+                      state TEXT NOT NULL,
+                      rejection_reason TEXT NOT NULL
+                    );
+                    CREATE TABLE validation_results (
+                      id INTEGER PRIMARY KEY,
+                      candidate_id INTEGER NOT NULL,
+                      hard_fail INTEGER NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO candidates(id, name_normalized, status, state, rejection_reason)
+                    VALUES(1, 'verodomo', 'rejected', 'scored', '')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO candidates(id, name_normalized, status, state, rejection_reason)
+                    VALUES(2, 'clarivio', 'checked', 'checked', '')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO candidates(id, name_normalized, status, state, rejection_reason)
+                    VALUES(3, 'novanta', 'checked', 'checked', '')
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO validation_results(candidate_id, hard_fail)
+                    VALUES(2, 1)
+                    """
+                )
+                conn.commit()
+
+            got = ng.load_failed_history_names(
+                db_path=db_path,
+                candidate_names=['Verodomo', 'Clarivio', 'Novanta', 'Unknown'],
+            )
+            self.assertEqual(got, {'verodomo', 'clarivio'})
+
+    def test_load_failed_history_names_missing_db_returns_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            got = ng.load_failed_history_names(
+                db_path=Path(td) / 'does_not_exist.db',
+                candidate_names=['verodomo'],
+            )
+        self.assertEqual(got, set())
+
     def test_load_llm_fallback_candidates_rereads_file_on_retry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'llm_candidates.json'
