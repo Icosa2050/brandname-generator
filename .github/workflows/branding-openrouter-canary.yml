@@ -51,10 +51,11 @@ jobs:
             --llm-openrouter-x-title "Kostula Naming Pipeline" \
             --llm-context-file docs/branding/llm_context.example.json \
             --llm-rounds 1 \
-            --llm-candidates-per-round 12 \
-            --llm-max-call-latency-ms 45000 \
-            --llm-stage-timeout-ms 90000 \
+            --llm-candidates-per-round 10 \
+            --llm-max-call-latency-ms 30000 \
+            --llm-stage-timeout-ms 60000 \
             --llm-max-retries 1 \
+            --llm-max-usd-per-run 0.25 \
             --out-dir /tmp/branding_openrouter_canary
 
       - name: Assert Canary Produced LLM Candidates
@@ -71,6 +72,57 @@ jobs:
           if count <= 0 or status != 'ok':
               raise SystemExit(f'canary failed: llm_candidate_count={count} llm_stage_status={status}')
           print(f'canary ok: model={row.get("llm_model")} count={count} status={status}')
+          PY
+
+      - name: Assert Canary Artifact Contract
+        run: |
+          python3 - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          root = Path('/tmp/branding_openrouter_canary')
+          summary_path = root / 'campaign_summary.json'
+          progress_path = root / 'campaign_progress.csv'
+          runs_dir = root / 'runs'
+          logs_dir = root / 'logs'
+
+          summary = json.loads(summary_path.read_text(encoding='utf-8'))
+          rows = list(csv.DictReader(progress_path.open('r', encoding='utf-8', newline='')))
+          if not rows:
+              raise SystemExit('missing progress rows')
+
+          run_artifacts = sorted(runs_dir.glob('run_*.json'))
+          if not run_artifacts:
+              raise SystemExit('missing candidate artifact run_*.json')
+
+          validator_logs = sorted(logs_dir.glob('run_*_validator.log'))
+          if not validator_logs:
+              raise SystemExit('missing validator logs')
+          has_run_summary = any(
+              'run_summary=' in path.read_text(encoding='utf-8', errors='replace')
+              for path in validator_logs
+          )
+          if not has_run_summary:
+              raise SystemExit('validator summary not found in validator logs')
+
+          heartbeat_path = Path(str(summary.get('heartbeat_jsonl') or ''))
+          if not heartbeat_path.exists():
+              raise SystemExit(f'missing heartbeat snapshot: {heartbeat_path}')
+          heartbeat_text = heartbeat_path.read_text(encoding='utf-8', errors='replace')
+          for marker in ('"event": "campaign_start"', '"event": "campaign_complete"'):
+              if marker not in heartbeat_text:
+                  raise SystemExit(f'missing heartbeat marker {marker}')
+
+          first = rows[0]
+          cost = float(first.get('llm_cost_usd') or 0.0)
+          if cost > 0.26:
+              raise SystemExit(f'cost cap exceeded: llm_cost_usd={cost}')
+
+          print(
+              f'canary artifact contract ok: model={first.get("llm_model")} '
+              f'cost={cost:.4f} candidates={len(run_artifacts)} heartbeat={heartbeat_path}'
+          )
           PY
 
       - name: Upload Canary Artifacts

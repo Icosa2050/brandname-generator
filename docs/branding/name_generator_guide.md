@@ -225,6 +225,9 @@ Notes:
 - `--min-concurrency` / `--max-concurrency` bound adaptive validator concurrency scaling (50-job error-rate windows).
 - `--shard-db-isolation` (default) writes each shard to its own DB (`*_shard<N>.db`) when `--shard-count > 1`.
 - `--merge-shards` (default on shard 0) merges shard DBs into `--db` at campaign completion.
+- `--shard-scheduling=weighted` balances sweep combos across shards using historical `duration_s` estimates.
+- `--shard-history-progress-csv=<path>` points weighted scheduling at a previous `campaign_progress.csv` file.
+- `--shard-weight-fallback-s=<seconds>` sets the default duration estimate when a combo has no history.
 - `--validator-memory-db` stores persistent hard-fail exclusions across campaigns so eliminated names are skipped in later runs.
 - `--validator-memory-ttl-days` controls exclusion memory lifetime; policy signature + scope + gate must match to apply.
 - Campaign default memory DB is `test_outputs/branding/naming_exclusion_memory.db` (override per branch/experiment if needed).
@@ -253,6 +256,14 @@ python3 scripts/branding/benchmark_validation.py \
   --rounds=3 \
   --checks=adversarial,psych,descriptive
 ```
+
+### 15) CI and canary checks
+- `.github/workflows/branding-ci.yml` runs deterministic fixture smoke on PRs and uploads run artifacts.
+- `.github/workflows/branding-openrouter-canary.yml` runs scheduled live OpenRouter canary with timeout + cost caps.
+- Both workflows assert artifact contract signals:
+  - candidate artifact exists (`runs/run_*.json`),
+  - validator emitted `run_summary=` in logs,
+  - heartbeat telemetry snapshot contains `campaign_start` and `campaign_complete`.
 
 ## Output
 The script writes a CSV to:

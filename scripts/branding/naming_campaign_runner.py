@@ -25,7 +25,7 @@ import socket
 import statistics
 import subprocess
 import time
-from collections import deque
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ import naming_ideation_stage as nide
 
 TRUTHY_VALUES = {'1', 'true', 'yes', 'y'}
 DEFAULT_GENERATOR_FAMILIES = ['coined', 'stem', 'suggestive', 'morphology', 'seed', 'expression', 'source_pool', 'blend']
+SweepCombo = tuple[float, str, str, str]
 
 
 def parse_csv_list(raw: str) -> list[str]:
@@ -43,6 +44,142 @@ def parse_csv_list(raw: str) -> list[str]:
 
 def clamp_share(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def combo_history_key(*, share: float, scope: str, gate: str, quota_profile: str) -> str:
+    return f'{clamp_share(float(share)):.4f}|{scope.strip()}|{gate.strip()}|{quota_profile.strip()}'
+
+
+def load_combo_duration_history(progress_csv: Path) -> dict[str, float]:
+    if not progress_csv.exists():
+        return {}
+    samples: dict[str, list[float]] = defaultdict(list)
+    with progress_csv.open('r', encoding='utf-8', newline='') as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            status = str(row.get('status') or '').strip().lower()
+            if status and status not in {'ok', 'completed'}:
+                continue
+            scope = str(row.get('scope') or '').strip()
+            gate = str(row.get('gate') or '').strip()
+            quota_profile = str(row.get('quota_profile') or '').strip()
+            if not scope or not gate or not quota_profile:
+                continue
+            try:
+                share = float(row.get('source_influence_share') or 0.0)
+                duration_s = float(row.get('duration_s') or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if duration_s <= 0:
+                continue
+            key = combo_history_key(
+                share=share,
+                scope=scope,
+                gate=gate,
+                quota_profile=quota_profile,
+            )
+            samples[key].append(duration_s)
+    out: dict[str, float] = {}
+    for key, values in samples.items():
+        if not values:
+            continue
+        out[key] = float(round(sum(values) / len(values), 3))
+    return out
+
+
+def assign_sweep_combos_to_shards(
+    *,
+    sweep_combos: list[SweepCombo],
+    shard_count: int,
+    scheduling: str,
+    history_seconds_by_combo: dict[str, float] | None = None,
+    fallback_duration_s: float = 180.0,
+) -> tuple[list[list[SweepCombo]], dict[str, Any]]:
+    if shard_count < 1:
+        raise ValueError('shard_count must be >= 1')
+    if not sweep_combos:
+        return ([[] for _ in range(shard_count)], {'mode': 'empty', 'predicted_load_s': [0.0] * shard_count})
+    if scheduling != 'weighted':
+        assignments = [sweep_combos[idx::shard_count] for idx in range(shard_count)]
+        return (
+            assignments,
+            {
+                'mode': 'slice',
+                'requested_mode': scheduling,
+                'history_matches': 0,
+                'history_entries': 0,
+                'fallback_duration_s': float(max(1.0, fallback_duration_s)),
+                'predicted_load_s': [float(len(chunk)) for chunk in assignments],
+            },
+        )
+
+    history = {
+        key: float(value)
+        for key, value in (history_seconds_by_combo or {}).items()
+        if isinstance(value, (float, int)) and float(value) > 0
+    }
+    if not history:
+        assignments = [sweep_combos[idx::shard_count] for idx in range(shard_count)]
+        return (
+            assignments,
+            {
+                'mode': 'slice_fallback_no_history',
+                'requested_mode': scheduling,
+                'history_matches': 0,
+                'history_entries': 0,
+                'fallback_duration_s': float(max(1.0, fallback_duration_s)),
+                'predicted_load_s': [float(len(chunk)) for chunk in assignments],
+            },
+        )
+
+    observed: list[float] = []
+    weighted: list[tuple[SweepCombo, str, float]] = []
+    for combo in sweep_combos:
+        share, scope, gate, quota_profile = combo
+        key = combo_history_key(share=share, scope=scope, gate=gate, quota_profile=quota_profile)
+        duration_s = history.get(key)
+        if duration_s is not None:
+            observed.append(duration_s)
+        weighted.append((combo, key, float(duration_s or 0.0)))
+
+    if not observed:
+        assignments = [sweep_combos[idx::shard_count] for idx in range(shard_count)]
+        return (
+            assignments,
+            {
+                'mode': 'slice_fallback_no_matches',
+                'requested_mode': scheduling,
+                'history_matches': 0,
+                'history_entries': int(len(history)),
+                'fallback_duration_s': float(max(1.0, fallback_duration_s)),
+                'predicted_load_s': [float(len(chunk)) for chunk in assignments],
+            },
+        )
+
+    fallback = float(max(1.0, statistics.median(observed) if observed else fallback_duration_s))
+    normalized: list[tuple[SweepCombo, str, float]] = []
+    for combo, key, duration_s in weighted:
+        normalized.append((combo, key, duration_s if duration_s > 0 else fallback))
+    normalized.sort(key=lambda item: (-item[2], item[1]))
+
+    assignments: list[list[SweepCombo]] = [[] for _ in range(shard_count)]
+    loads: list[float] = [0.0 for _ in range(shard_count)]
+    for combo, _key, weight_s in normalized:
+        shard_idx = min(range(shard_count), key=lambda idx: (loads[idx], len(assignments[idx]), idx))
+        assignments[shard_idx].append(combo)
+        loads[shard_idx] += float(weight_s)
+
+    return (
+        assignments,
+        {
+            'mode': 'weighted',
+            'requested_mode': scheduling,
+            'history_matches': int(len(observed)),
+            'history_entries': int(len(history)),
+            'fallback_duration_s': fallback,
+            'predicted_load_s': [round(value, 3) for value in loads],
+        },
+    )
 
 
 def is_truthy(raw: str) -> bool:
@@ -435,6 +572,8 @@ def append_progress_row(path: Path, row: dict[str, object]) -> None:
         'shard_id',
         'shard_count',
         'shard_combo_count',
+        'shard_scheduling',
+        'combo_key',
         'timestamp',
         'scope',
         'gate',
@@ -1206,6 +1345,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--no-merge-shards', dest='merge_shards', action='store_false')
     parser.add_argument('--shard-id', type=int, default=0, help='0-based shard id for parallel campaign workers.')
     parser.add_argument('--shard-count', type=int, default=1, help='Total number of shard workers.')
+    parser.add_argument(
+        '--shard-scheduling',
+        choices=['slice', 'weighted'],
+        default='slice',
+        help='Shard assignment strategy for sweep combos (weighted uses historical duration estimates).',
+    )
+    parser.add_argument(
+        '--shard-history-progress-csv',
+        default='',
+        help='Optional campaign_progress.csv used for weighted shard scheduling history.',
+    )
+    parser.add_argument(
+        '--shard-weight-fallback-s',
+        type=float,
+        default=180.0,
+        help='Fallback duration estimate in seconds for weighted scheduling combos with no history.',
+    )
     return parser.parse_args()
 
 
@@ -1272,13 +1428,30 @@ def main() -> int:
         print('Invalid config: --generator-only-llm-candidates requires --llm-ideation-enabled.')
         return 1
 
-    sweep_combos: list[tuple[float, str, str, str]] = []
+    sweep_combos: list[SweepCombo] = []
     for quota_profile in quota_profiles:
         for gate in gates:
             for scope in scopes:
                 for share in shares:
                     sweep_combos.append((share, scope, gate, quota_profile))
-    shard_combos = sweep_combos[args.shard_id :: args.shard_count]
+    shard_history_csv: Path | None = None
+    if str(args.shard_history_progress_csv).strip():
+        shard_history_csv = Path(str(args.shard_history_progress_csv).strip()).expanduser()
+    elif progress_csv.exists():
+        shard_history_csv = progress_csv
+    shard_history_seconds = (
+        load_combo_duration_history(shard_history_csv)
+        if shard_history_csv is not None
+        else {}
+    )
+    shard_assignments, shard_schedule_meta = assign_sweep_combos_to_shards(
+        sweep_combos=sweep_combos,
+        shard_count=int(args.shard_count),
+        scheduling=str(args.shard_scheduling),
+        history_seconds_by_combo=shard_history_seconds,
+        fallback_duration_s=float(args.shard_weight_fallback_s),
+    )
+    shard_combos = shard_assignments[args.shard_id]
     if not shard_combos:
         print(
             'Invalid shard configuration: no sweep combinations assigned '
@@ -1294,11 +1467,17 @@ def main() -> int:
         out_dir=str(out_dir),
         shard_id=int(args.shard_id),
         shard_count=int(args.shard_count),
+        shard_scheduling=str(shard_schedule_meta.get('mode') or args.shard_scheduling),
+        shard_predicted_load_s=shard_schedule_meta.get('predicted_load_s', []),
     )
     print(
         f'campaign_config hours={args.hours} max_runs={args.max_runs} sleep_s={args.sleep_s} '
         f'shares={shares} scopes={scopes} gates={gates} quota_profiles={len(quota_profiles)} '
         f'shard={args.shard_id + 1}/{args.shard_count} shard_combo_count={len(shard_combos)} '
+        f'shard_scheduling={shard_schedule_meta.get("mode")} '
+        f'shard_history_path={shard_history_csv or ""} '
+        f'shard_history_matches={shard_schedule_meta.get("history_matches", 0)} '
+        f'shard_predicted_load_s={shard_schedule_meta.get("predicted_load_s", [])} '
         f'shard_db_isolation={shard_db_isolation_enabled} db_main={db_path_main} db_worker={db_path_worker} '
         f'merge_shards={merge_shards_enabled} '
         f'check_limit={args.check_limit} validator_tier={args.validator_tier} '
@@ -1477,6 +1656,12 @@ def main() -> int:
         )
 
         share, scope, gate, quota_profile = shard_combos[(run_count - 1) % len(shard_combos)]
+        combo_key = combo_history_key(
+            share=share,
+            scope=scope,
+            gate=gate,
+            quota_profile=quota_profile,
+        )
         quota_profile_effective = quota_profile
         quota_adjust_meta = {'adjusted': False}
         if args.adapt_family_quotas:
@@ -1509,7 +1694,8 @@ def main() -> int:
         print(
             f'run_start idx={run_count} id={run_id} arm={arm} '
             f'shard={args.shard_id + 1}/{args.shard_count} '
-            f'share={share:.2f} scope={scope} gate={gate}'
+            f'share={share:.2f} scope={scope} gate={gate} '
+            f'combo_key={combo_key}'
         )
 
         llm_artifact: Path | None = None
@@ -1564,6 +1750,8 @@ def main() -> int:
                     'shard_id': args.shard_id,
                     'shard_count': args.shard_count,
                     'shard_combo_count': len(shard_combos),
+                    'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
+                    'combo_key': combo_key,
                     'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                     'scope': scope,
                     'gate': gate,
@@ -1669,6 +1857,8 @@ def main() -> int:
                     'shard_id': args.shard_id,
                     'shard_count': args.shard_count,
                     'shard_combo_count': len(shard_combos),
+                    'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
+                    'combo_key': combo_key,
                     'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                     'scope': scope,
                     'gate': gate,
@@ -1741,6 +1931,8 @@ def main() -> int:
                     'shard_id': args.shard_id,
                     'shard_count': args.shard_count,
                     'shard_combo_count': len(shard_combos),
+                    'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
+                    'combo_key': combo_key,
                     'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                     'scope': scope,
                     'gate': gate,
@@ -1813,6 +2005,8 @@ def main() -> int:
                 'shard_id': args.shard_id,
                 'shard_count': args.shard_count,
                 'shard_combo_count': len(shard_combos),
+                'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
+                'combo_key': combo_key,
                 'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                 'scope': scope,
                 'gate': gate,
@@ -1910,6 +2104,27 @@ def main() -> int:
         'shard_id': int(args.shard_id),
         'shard_count': int(args.shard_count),
         'shard_combo_count': int(len(shard_combos)),
+        'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
+        'shard_scheduling_requested': str(args.shard_scheduling),
+        'shard_scheduling_history_csv': str(shard_history_csv) if shard_history_csv is not None else '',
+        'shard_history_entries': int(shard_schedule_meta.get('history_entries', 0)),
+        'shard_history_matches': int(shard_schedule_meta.get('history_matches', 0)),
+        'shard_predicted_load_s': shard_schedule_meta.get('predicted_load_s', []),
+        'shard_assigned_combos': [
+            {
+                'share': round(float(combo[0]), 4),
+                'scope': str(combo[1]),
+                'gate': str(combo[2]),
+                'quota_profile': str(combo[3]),
+                'combo_key': combo_history_key(
+                    share=float(combo[0]),
+                    scope=str(combo[1]),
+                    gate=str(combo[2]),
+                    quota_profile=str(combo[3]),
+                ),
+            }
+            for combo in shard_combos
+        ],
         'runs_executed': int(run_count),
         'errors': int(error_count),
         'status': last_status,

@@ -163,13 +163,45 @@
         "description": "Improve shard balancing across sweep combinations to avoid uneven runtime.",
         "details": "Assess current slice-based assignment and add optional weighted scheduling based on historical run durations.",
         "testStrategy": "Compare per-shard completion variance before/after scheduler change.",
-        "status": "pending",
+        "status": "done",
         "dependencies": [
           "2",
           "3"
         ],
         "priority": "medium",
-        "subtasks": []
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Add weighted shard scheduling helpers",
+            "description": "Implement weighted assignment using historical combo durations with deterministic fallback to slice mode.",
+            "details": "Completed in `scripts/branding/naming_campaign_runner.py` via `load_combo_duration_history(...)` and `assign_sweep_combos_to_shards(...)`, including graceful fallback modes (`slice_fallback_no_history`, `slice_fallback_no_matches`).",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 4
+          },
+          {
+            "id": 2,
+            "title": "Expose scheduling knobs and telemetry",
+            "description": "Add CLI flags and summary/progress telemetry for shard scheduling decisions and predicted load.",
+            "details": "Added CLI options `--shard-scheduling`, `--shard-history-progress-csv`, `--shard-weight-fallback-s`; run rows now include `shard_scheduling` + `combo_key`; campaign summary includes scheduling mode, history metadata, predicted per-shard loads, and assigned combo payload.",
+            "status": "done",
+            "dependencies": [
+              "4.1"
+            ],
+            "parentTaskId": 4
+          },
+          {
+            "id": 3,
+            "title": "Add scheduling unit tests and docs",
+            "description": "Add deterministic tests for history parsing and weighted balancing and document usage in the guide.",
+            "details": "Added `scripts/branding/test_naming_campaign_runner.py` covering history aggregation, weighted balancing, and fallback behavior; documented weighted sharding knobs in `docs/branding/name_generator_guide.md`.",
+            "status": "done",
+            "dependencies": [
+              "4.2"
+            ],
+            "parentTaskId": 4
+          }
+        ]
       },
       {
         "id": 5,
@@ -177,13 +209,45 @@
         "description": "Add deterministic CI smoke and periodic live canary for provider schema/routing drift.",
         "details": "Run fixture on each PR and live canary on schedule with strict budget and timeout caps.",
         "testStrategy": "Verify CI artifacts include candidate artifact, validator summary, and run-level telemetry snapshot.",
-        "status": "pending",
+        "status": "done",
         "dependencies": [
           "1",
           "3"
         ],
         "priority": "medium",
-        "subtasks": []
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Tighten live canary budget and timeout caps",
+            "description": "Add strict latency/stage and spend limits for live OpenRouter canary runs.",
+            "details": "Updated `.github/workflows/branding-openrouter-canary.yml` with `--llm-max-call-latency-ms 30000`, `--llm-stage-timeout-ms 60000`, `--llm-max-retries 1`, and `--llm-max-usd-per-run 0.25`.",
+            "status": "done",
+            "dependencies": [],
+            "parentTaskId": 5
+          },
+          {
+            "id": 2,
+            "title": "Assert artifact contract in CI smoke",
+            "description": "Enforce required run artifacts in deterministic fixture workflow.",
+            "details": "Added `Verify Smoke Artifact Contract` step in `.github/workflows/branding-ci.yml` to assert candidate artifact presence (`runs/run_*.json`), validator `run_summary=` lines, and heartbeat markers (`campaign_start`, `campaign_complete`).",
+            "status": "done",
+            "dependencies": [
+              "5.1"
+            ],
+            "parentTaskId": 5
+          },
+          {
+            "id": 3,
+            "title": "Assert artifact contract in live canary",
+            "description": "Enforce artifact contract and cap check in scheduled OpenRouter canary.",
+            "details": "Added `Assert Canary Artifact Contract` step in `.github/workflows/branding-openrouter-canary.yml` with candidate/validator/heartbeat assertions and a hard check that `llm_cost_usd` remains under cap.",
+            "status": "done",
+            "dependencies": [
+              "5.1"
+            ],
+            "parentTaskId": 5
+          }
+        ]
       }
     ],
     "metadata": {

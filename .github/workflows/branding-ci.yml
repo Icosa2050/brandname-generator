@@ -88,6 +88,54 @@ jobs:
           test -f /tmp/branding_ci_smoke/campaign_summary.json
           test -f /tmp/branding_ci_smoke/campaign_progress.csv
 
+      - name: Verify Smoke Artifact Contract
+        run: |
+          python3 - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          root = Path('/tmp/branding_ci_smoke')
+          summary_path = root / 'campaign_summary.json'
+          progress_path = root / 'campaign_progress.csv'
+          runs_dir = root / 'runs'
+          logs_dir = root / 'logs'
+
+          summary = json.loads(summary_path.read_text(encoding='utf-8'))
+          rows = list(csv.DictReader(progress_path.open('r', encoding='utf-8', newline='')))
+          if not rows:
+              raise SystemExit('missing progress rows')
+          if int(summary.get('runs_executed', 0)) < 1:
+              raise SystemExit(f'invalid runs_executed={summary.get("runs_executed")}')
+
+          run_artifacts = sorted(runs_dir.glob('run_*.json'))
+          if not run_artifacts:
+              raise SystemExit('missing candidate artifact run_*.json')
+
+          validator_logs = sorted(logs_dir.glob('run_*_validator.log'))
+          if not validator_logs:
+              raise SystemExit('missing validator logs')
+          has_run_summary = any(
+              'run_summary=' in path.read_text(encoding='utf-8', errors='replace')
+              for path in validator_logs
+          )
+          if not has_run_summary:
+              raise SystemExit('validator summary not found in validator logs')
+
+          heartbeat_path = Path(str(summary.get('heartbeat_jsonl') or ''))
+          if not heartbeat_path.exists():
+              raise SystemExit(f'missing heartbeat snapshot: {heartbeat_path}')
+          heartbeat_text = heartbeat_path.read_text(encoding='utf-8', errors='replace')
+          for marker in ('"event": "campaign_start"', '"event": "campaign_complete"'):
+              if marker not in heartbeat_text:
+                  raise SystemExit(f'missing heartbeat marker {marker}')
+
+          print(
+              f'smoke artifact contract ok: candidates={len(run_artifacts)} '
+              f'validator_logs={len(validator_logs)} heartbeat={heartbeat_path}'
+          )
+          PY
+
       - name: Upload Branding Smoke Artifacts
         if: always()
         uses: actions/upload-artifact@v4
