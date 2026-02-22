@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -193,6 +197,91 @@ class NameGeneratorTest(unittest.TestCase):
         self.assertEqual(out['coined'], 200)
         self.assertLess(out['source_pool'], 200)
         self.assertLess(out['blend'], 200)
+
+    def test_main_skips_failed_history_during_generation_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / 'history.db'
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE candidates (
+                      id INTEGER PRIMARY KEY,
+                      name_normalized TEXT NOT NULL UNIQUE,
+                      status TEXT NOT NULL,
+                      state TEXT NOT NULL,
+                      rejection_reason TEXT NOT NULL
+                    );
+                    CREATE TABLE validation_results (
+                      id INTEGER PRIMARY KEY,
+                      candidate_id INTEGER NOT NULL,
+                      hard_fail INTEGER NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO candidates(id, name_normalized, status, state, rejection_reason)
+                    VALUES(1, 'tenant', 'rejected', 'scored', 'manual_test')
+                    """
+                )
+                conn.commit()
+
+            output_csv = Path(td) / 'out.csv'
+            output_json = Path(td) / 'out.json'
+            run_log = Path(td) / 'run.jsonl'
+
+            cmd = [
+                sys.executable,
+                str(Path(ng.__file__).resolve()),
+                '--scope=global',
+                '--gate=balanced',
+                '--generator-families=seed',
+                '--family-quotas=seed:5',
+                '--seeds=tenant,clarity',
+                '--source-influence-share=0',
+                '--pool-size=40',
+                '--check-limit=20',
+                '--shortlist-size=10',
+                f'--db={db_path}',
+                f'--output={output_csv}',
+                f'--json-output={output_json}',
+                f'--run-log={run_log}',
+                '--degraded-network-mode',
+                '--no-domain-check',
+                '--no-store-check',
+                '--no-web-check',
+                '--no-package-check',
+                '--no-social-check',
+                '--no-progress',
+            ]
+            completed = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+            generated_history_events: list[dict[str, object]] = []
+            for raw in completed.stdout.splitlines():
+                line = raw.strip()
+                if not line.startswith('stage_event='):
+                    continue
+                payload = json.loads(line[len('stage_event=') :])
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get('stage') != 'history_skip':
+                    continue
+                if payload.get('phase') != 'generated':
+                    continue
+                generated_history_events.append(payload)
+
+            self.assertTrue(generated_history_events)
+            final_event = generated_history_events[-1]
+            self.assertGreaterEqual(int(final_event.get('skipped_count') or 0), 1)
+            self.assertIn('tenant', list(final_event.get('skipped_names_sample') or []))
+
+            with output_csv.open('r', encoding='utf-8', newline='') as handle:
+                reader = csv.DictReader(handle)
+                names = {
+                    (str(row.get('name_normalized') or row.get('name') or '')).strip().lower()
+                    for row in reader
+                }
+            self.assertNotIn('tenant', names)
 
 
 if __name__ == '__main__':

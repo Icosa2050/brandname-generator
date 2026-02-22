@@ -134,12 +134,45 @@ class NamingCampaignRunnerShardSchedulingTest(unittest.TestCase):
             )
             got = ncr.extract_generator_history_skip(path)
             self.assertEqual(got.get('skipped_count'), 3)
+            self.assertEqual(got.get('skipped_generated_count'), 0)
+            self.assertEqual(got.get('skipped_finalist_count'), 0)
             self.assertEqual(got.get('skipped_names_sample'), ['verodomo', 'clarivio'])
 
     def test_extract_generator_history_skip_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             got = ncr.extract_generator_history_skip(Path(td) / 'missing.log')
         self.assertEqual(got.get('skipped_count'), 0)
+        self.assertEqual(got.get('skipped_generated_count'), 0)
+        self.assertEqual(got.get('skipped_finalist_count'), 0)
+
+    def test_extract_generator_history_skip_aggregates_phased_events(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'generator.log'
+            events = [
+                {
+                    'event': 'naming_pipeline_stage',
+                    'stage': 'history_skip',
+                    'phase': 'generated',
+                    'skipped_count': 2,
+                    'skipped_names_sample': ['tenant', 'saldo'],
+                },
+                {
+                    'event': 'naming_pipeline_stage',
+                    'stage': 'history_skip',
+                    'phase': 'finalist',
+                    'skipped_count': 1,
+                    'skipped_names_sample': ['claritya'],
+                },
+            ]
+            path.write_text(
+                '\n'.join(f"stage_event={json.dumps(event, ensure_ascii=False)}" for event in events) + '\n',
+                encoding='utf-8',
+            )
+            got = ncr.extract_generator_history_skip(path)
+            self.assertEqual(got.get('skipped_generated_count'), 2)
+            self.assertEqual(got.get('skipped_finalist_count'), 1)
+            self.assertEqual(got.get('skipped_count'), 3)
+            self.assertEqual(got.get('skipped_names_sample'), ['tenant', 'saldo'])
 
 
 if __name__ == '__main__':
