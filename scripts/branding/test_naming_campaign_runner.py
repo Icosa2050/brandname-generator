@@ -209,6 +209,76 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
         self.assertEqual(args.validator_max_concurrency, 12)
         self.assertAlmostEqual(args.validator_timeout_s, 4.5, places=6)
 
+    def test_parse_args_accepts_openai_compat_provider_flags(self) -> None:
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-provider',
+            'openai_compat',
+            '--llm-openai-base-url',
+            'http://localhost:11434/v1',
+            '--llm-openai-api-key-env',
+            'LOCAL_LLM_KEY',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        self.assertEqual(args.llm_provider, 'openai_compat')
+        self.assertEqual(args.llm_openai_base_url, 'http://localhost:11434/v1')
+        self.assertEqual(args.llm_openai_api_key_env, 'LOCAL_LLM_KEY')
+
+    @mock.patch('naming_campaign_runner.nide.call_openai_compat_candidates')
+    @mock.patch('naming_campaign_runner.nide.list_openai_models')
+    def test_run_active_llm_ideation_openai_compat_enforces_length_filter(
+        self,
+        mock_list_models: mock.Mock,
+        mock_call_openai: mock.Mock,
+    ) -> None:
+        mock_list_models.return_value = {'qwen2.5:14b'}
+        mock_call_openai.return_value = (
+            ['short', 'verodomo', 'waytoolongcandidatehere', 'tenantia'],
+            {'cost': 0.01},
+            '',
+        )
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-ideation-enabled',
+            '--llm-provider',
+            'openai_compat',
+            '--llm-model',
+            'qwen2.5:14b',
+            '--llm-openai-base-url',
+            'http://localhost:11434/v1',
+            '--llm-rounds',
+            '1',
+            '--llm-candidates-per-round',
+            '8',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs_dir = root / 'runs'
+            logs_dir = root / 'logs'
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path, report = ncr.run_active_llm_ideation(
+                args=args,
+                runs_dir=runs_dir,
+                logs_dir=logs_dir,
+                run_id='run_001_test',
+                run_index=1,
+                scope='global',
+                seen_shortlist=set(),
+                context_packet={},
+            )
+            self.assertEqual(report.get('status'), 'ok')
+            self.assertEqual(report.get('candidate_count'), 2)
+            self.assertIsNotNone(artifact_path)
+            assert artifact_path is not None
+            payload = json.loads(artifact_path.read_text(encoding='utf-8'))
+            got = sorted(item.get('name') for item in payload.get('candidates', []))
+            self.assertEqual(got, ['tenantia', 'verodomo'])
+
 
 if __name__ == '__main__':
     unittest.main()

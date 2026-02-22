@@ -26,10 +26,15 @@ MODE_TRIPLETS: tuple[tuple[str, str, str], ...] = (
     ('crisp', 'hybrid', 'trust'),
     ('balanced', 'blend', 'precision'),
 )
+VALID_NAME_RE = re.compile(r'^[a-z]{6,14}$')
 
 
 def normalize_alpha_name(raw: str) -> str:
     return re.sub(r'[^a-z]', '', str(raw or '').strip().lower())
+
+
+def is_valid_candidate_name(name: str) -> bool:
+    return bool(VALID_NAME_RE.fullmatch(str(name or '').strip()))
 
 
 def _sanitize_text(raw: Any, *, max_chars: int) -> str:
@@ -240,14 +245,14 @@ def parse_candidate_payload(raw_text: str) -> list[str]:
     for item in source:
         if isinstance(item, str):
             name = normalize_alpha_name(item)
-            if 5 <= len(name) <= 12:
+            if is_valid_candidate_name(name):
                 out.append(name)
             continue
         if isinstance(item, dict):
             raw_name = item.get('name') or item.get('candidate')
             if isinstance(raw_name, str):
                 name = normalize_alpha_name(raw_name)
-                if 5 <= len(name) <= 12:
+                if is_valid_candidate_name(name):
                     out.append(name)
     return sorted(set(out))
 
@@ -303,7 +308,7 @@ def load_fixture_candidates_with_usage(path: str) -> tuple[list[str], dict[str, 
     fallback: list[str] = []
     for line in raw.splitlines():
         name = normalize_alpha_name(line.strip().strip('-*').strip())
-        if 5 <= len(name) <= 12:
+        if is_valid_candidate_name(name):
             fallback.append(name)
     deduped = sorted(set(fallback))
     if deduped:
@@ -503,7 +508,7 @@ def build_prompt(
         f'Banned prefixes: {banned_prefixes}\n'
         f'{context_block}'
         'Rules:\n'
-        '- lowercase latin letters only, 5-12 chars\n'
+        '- lowercase latin letters only, 6-14 chars\n'
         '- no spaces, punctuation, digits\n'
         '- align with context packet priorities when provided\n'
         '- no availability claims (domain/store/trademark/social)\n'
@@ -522,6 +527,45 @@ def list_openrouter_models(*, api_key: str, timeout_ms: int) -> set[str] | None:
             'Authorization': f'Bearer {api_key}',
             'Accept': 'application/json',
         },
+        method='GET',
+    )
+    try:
+        with request.urlopen(req, timeout=max(1.0, timeout_ms / 1000.0)) as resp:
+            raw = resp.read().decode('utf-8')
+        payload = json.loads(raw)
+    except (error.URLError, error.HTTPError, TimeoutError, json.JSONDecodeError):
+        return None
+    data = payload.get('data') if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        return None
+    ids: set[str] = set()
+    for item in data:
+        if isinstance(item, dict) and isinstance(item.get('id'), str):
+            ids.add(item['id'])
+    return ids
+
+
+def normalize_openai_compat_base_url(raw: str) -> str:
+    value = str(raw or '').strip().rstrip('/')
+    if not value:
+        return 'https://api.openai.com/v1'
+    parsed = parse.urlparse(value)
+    if parsed.scheme in {'http', 'https'} and parsed.netloc:
+        return value
+    if '://' in value or any(ch.isspace() for ch in value):
+        return 'https://api.openai.com/v1'
+    return f'http://{value}'
+
+
+def list_openai_models(*, api_key: str, base_url: str, timeout_ms: int) -> set[str] | None:
+    root = normalize_openai_compat_base_url(base_url)
+    headers = {'Accept': 'application/json'}
+    token = str(api_key or '').strip()
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    req = request.Request(
+        f'{root}/models',
+        headers=headers,
         method='GET',
     )
     try:
@@ -625,6 +669,110 @@ def call_openrouter_candidates(
 
         req = request.Request(
             'https://openrouter.ai/api/v1/chat/completions',
+            data=data,
+            headers=headers,
+            method='POST',
+        )
+        try:
+            with request.urlopen(req, timeout=max(1.0, timeout_ms / 1000.0)) as resp:
+                raw = resp.read().decode('utf-8')
+        except error.HTTPError as exc:
+            return '', {}, f'http_{exc.code}'
+        except error.URLError:
+            return '', {}, 'network_error'
+        except TimeoutError:
+            return '', {}, 'timeout'
+
+        try:
+            response = json.loads(raw)
+        except json.JSONDecodeError:
+            return '', {}, 'response_json_decode_error'
+        if not isinstance(response, dict):
+            return '', {}, 'response_invalid_root'
+        return extract_openrouter_response_content(response)
+
+    fallback_http_errors = {'http_400', 'http_404', 'http_422'}
+    last_usage: dict[str, Any] = {}
+    last_err = 'unknown'
+    for idx, payload_body in enumerate(attempts):
+        content, usage, err = request_once(payload_body)
+        if usage:
+            last_usage = usage
+        if err:
+            last_err = err
+            if idx + 1 < len(attempts) and err in fallback_http_errors:
+                continue
+            return [], last_usage, err
+
+        names = parse_candidate_payload(content)
+        if names:
+            return names, usage, ''
+        last_err = 'candidate_parse_failed'
+        if idx + 1 < len(attempts):
+            continue
+        return [], last_usage, last_err
+
+    return [], last_usage, last_err
+
+
+def call_openai_compat_candidates(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout_ms: int,
+    strict_json: bool,
+) -> tuple[list[str], dict[str, Any], str]:
+    schema = {
+        'name': 'name_candidates',
+        'strict': bool(strict_json),
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'candidates': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {'name': {'type': 'string'}},
+                        'required': ['name'],
+                        'additionalProperties': False,
+                    },
+                }
+            },
+            'required': ['candidates'],
+            'additionalProperties': False,
+        },
+    }
+    base_body = {
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'temperature': 0.8,
+    }
+    attempts: list[dict[str, Any]] = [
+        {
+            **base_body,
+            'response_format': {'type': 'json_schema', 'json_schema': schema},
+        },
+        {
+            **base_body,
+            'response_format': {'type': 'json_object'},
+        },
+        base_body,
+    ]
+    endpoint = f'{normalize_openai_compat_base_url(base_url)}/chat/completions'
+
+    def request_once(payload_body: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+        data = json.dumps(payload_body, ensure_ascii=False).encode('utf-8')
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        }
+        token = str(api_key or '').strip()
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+        req = request.Request(
+            endpoint,
             data=data,
             headers=headers,
             method='POST',

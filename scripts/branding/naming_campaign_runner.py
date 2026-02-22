@@ -718,7 +718,7 @@ def load_cached_candidates(*, cache_dir: Path, cache_key: str, ttl_days: int) ->
     for item in source:
         if isinstance(item, str):
             name = nide.normalize_alpha_name(item)
-            if 5 <= len(name) <= 12:
+            if nide.is_valid_candidate_name(name):
                 out.append(name)
     return sorted(set(out))
 
@@ -842,16 +842,55 @@ def run_active_llm_ideation(
             if fixture_err:
                 report['errors'].append(f'pal_fixture:{fixture_err}')
             report['errors'].append('pal mode requires fixture input in CLI runner')
-    else:
-        api_key = os.environ.get(args.llm_api_key_env, '').strip()
-        if not api_key:
-            report['status'] = 'missing_api_key'
-            report['errors'].append(f'missing env {args.llm_api_key_env}')
+    elif args.llm_provider in {'openrouter_http', 'openai_compat'}:
+        source_label = 'openrouter'
+        api_key = ''
+        models: set[str] | None = None
+
+        def call_provider(_prompt: str) -> tuple[list[str], dict[str, Any], str]:
+            return [], {}, 'provider_unavailable'
+
+        if args.llm_provider == 'openrouter_http':
+            api_key = os.environ.get(args.llm_api_key_env, '').strip()
+            if not api_key:
+                report['status'] = 'missing_api_key'
+                report['errors'].append(f'missing env {args.llm_api_key_env}')
+            else:
+                models = nide.list_openrouter_models(
+                    api_key=api_key,
+                    timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
+                )
+
+                def call_provider(_prompt: str) -> tuple[list[str], dict[str, Any], str]:
+                    return nide.call_openrouter_candidates(
+                        api_key=api_key,
+                        model=args.llm_model,
+                        prompt=_prompt,
+                        timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
+                        strict_json=bool(args.llm_strict_json),
+                        http_referer=args.llm_openrouter_http_referer,
+                        x_title=args.llm_openrouter_x_title,
+                    )
         else:
-            models = nide.list_openrouter_models(
+            source_label = 'openai_compat'
+            api_key = os.environ.get(args.llm_openai_api_key_env, '').strip() or 'ollama'
+            models = nide.list_openai_models(
                 api_key=api_key,
+                base_url=args.llm_openai_base_url,
                 timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
             )
+
+            def call_provider(_prompt: str) -> tuple[list[str], dict[str, Any], str]:
+                return nide.call_openai_compat_candidates(
+                    api_key=api_key,
+                    base_url=args.llm_openai_base_url,
+                    model=args.llm_model,
+                    prompt=_prompt,
+                    timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
+                    strict_json=bool(args.llm_strict_json),
+                )
+
+        if report['status'] != 'missing_api_key':
             if models is not None and args.llm_model not in models:
                 report['status'] = 'model_not_in_catalog'
                 report['errors'].append(f'model={args.llm_model}')
@@ -880,6 +919,12 @@ def run_active_llm_ideation(
                     mode_key = ':'.join(mode)
                     cache_key_blob = json.dumps(
                         {
+                            'provider': args.llm_provider,
+                            'base_url': (
+                                nide.normalize_openai_compat_base_url(args.llm_openai_base_url)
+                                if args.llm_provider == 'openai_compat'
+                                else 'https://openrouter.ai/api/v1'
+                            ),
                             'model': args.llm_model,
                             'prompt': prompt,
                             'schema_version': 'llm_candidates_v1',
@@ -913,15 +958,7 @@ def run_active_llm_ideation(
                         usage: dict[str, Any] = {}
                         err = 'unknown'
                         for attempt in range(retries + 1):
-                            call_names, usage, err = nide.call_openrouter_candidates(
-                                api_key=api_key,
-                                model=args.llm_model,
-                                prompt=prompt,
-                                timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
-                                strict_json=bool(args.llm_strict_json),
-                                http_referer=args.llm_openrouter_http_referer,
-                                x_title=args.llm_openrouter_x_title,
-                            )
+                            call_names, usage, err = call_provider(prompt)
                             if call_names:
                                 round_names = call_names
                                 successful_rounds += 1
@@ -933,7 +970,7 @@ def run_active_llm_ideation(
                                 total_cost += call_cost
                                 last_call_cost = call_cost
                                 append_log(
-                                    f'round={round_idx + 1} mode={mode_key} source=openrouter '
+                                    f'round={round_idx + 1} mode={mode_key} source={source_label} '
                                     f'names={len(round_names)} usage={usage} cost_usd={call_cost:.6f}'
                                 )
                                 if args.llm_cache_dir and round_names:
@@ -961,7 +998,7 @@ def run_active_llm_ideation(
 
                     for name in round_names:
                         normalized = nide.normalize_alpha_name(name)
-                        if not (5 <= len(normalized) <= 12):
+                        if not nide.is_valid_candidate_name(normalized):
                             continue
                         if normalized in names_seen:
                             continue
@@ -977,6 +1014,9 @@ def run_active_llm_ideation(
                         report['status'] = 'empty_with_errors'
                     else:
                         report['status'] = 'empty'
+    else:
+        report['status'] = 'unsupported_provider'
+        report['errors'].append(f'provider={args.llm_provider}')
 
     names = names[:target_total]
     report['candidate_count'] = len(names)
@@ -1335,7 +1375,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--no-llm-ideation-enabled', dest='llm_ideation_enabled', action='store_false')
     parser.add_argument(
         '--llm-provider',
-        choices=['openrouter_http', 'pal', 'fixture'],
+        choices=['openrouter_http', 'openai_compat', 'pal', 'fixture'],
         default='openrouter_http',
         help='LLM provider mode for ideation stage.',
     )
@@ -1348,6 +1388,16 @@ def parse_args() -> argparse.Namespace:
         '--llm-api-key-env',
         default='OPENROUTER_API_KEY',
         help='Environment variable name containing API key for openrouter_http mode.',
+    )
+    parser.add_argument(
+        '--llm-openai-api-key-env',
+        default='OPENAI_API_KEY',
+        help='Environment variable name containing API key for openai_compat mode (optional for local runtimes).',
+    )
+    parser.add_argument(
+        '--llm-openai-base-url',
+        default=os.environ.get('OPENAI_COMPAT_BASE_URL', 'http://localhost:11434/v1'),
+        help='Base URL for openai_compat mode (for example http://localhost:11434/v1).',
     )
     parser.add_argument(
         '--llm-openrouter-http-referer',
@@ -1596,6 +1646,7 @@ def main() -> int:
         f'validator_memory_ttl_days={int(args.validator_memory_ttl_days)} '
         f'reset_db={args.reset_db} '
         f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} llm_model={args.llm_model} '
+        f'llm_base_url={nide.normalize_openai_compat_base_url(args.llm_openai_base_url) if args.llm_provider == "openai_compat" else ""} '
         f'llm_slo_min_success_rate={float(args.llm_slo_min_success_rate):.2f} '
         f'llm_slo_max_timeout_rate={float(args.llm_slo_max_timeout_rate):.2f} '
         f'llm_slo_max_empty_rate={float(args.llm_slo_max_empty_rate):.2f} '
