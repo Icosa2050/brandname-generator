@@ -43,12 +43,16 @@ jobs:
             --check-limit 80 \
             --validator-candidate-limit 40 \
             --validator-expensive-finalist-limit 20 \
+            --validator-concurrency 8 \
+            --validator-min-concurrency 4 \
+            --validator-max-concurrency 12 \
+            --validator-timeout-s 6 \
             --generator-no-external-checks \
             --llm-ideation-enabled \
             --llm-provider openrouter_http \
             --llm-model "$OPENROUTER_MODEL" \
-            --llm-openrouter-http-referer "https://github.com/Icosa2050/kostula" \
-            --llm-openrouter-x-title "Kostula Naming Pipeline" \
+            --llm-openrouter-http-referer "https://github.com/Icosa2050/brandname-generator" \
+            --llm-openrouter-x-title "brand-name-generator" \
             --llm-context-file docs/branding/llm_context.example.json \
             --llm-rounds 1 \
             --llm-candidates-per-round 10 \
