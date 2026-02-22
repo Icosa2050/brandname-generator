@@ -3318,6 +3318,35 @@ def main() -> int:
         for item in explicit_generated:
             by_name[item.name] = item
         generated_items = sorted(by_name.values(), key=lambda item: item.name)
+    history_db_path = Path(args.db).expanduser()
+    if bool(args.skip_failed_history):
+        skipped_from_generated = load_failed_history_names(
+            db_path=history_db_path,
+            candidate_names=[item.name for item in generated_items],
+        )
+        if skipped_from_generated:
+            before_filter = len(generated_items)
+            generated_items = [
+                item
+                for item in generated_items
+                if normalize_alpha(item.name) not in skipped_from_generated
+            ]
+            skipped_count = max(0, before_filter - len(generated_items))
+            sample = sorted(skipped_from_generated)[:20]
+            emit_stage_event(
+                args.stage_events,
+                'history_skip',
+                phase='generated',
+                skipped_count=skipped_count,
+                history_db=str(history_db_path),
+                skipped_names_sample=sample,
+            )
+            if args.progress:
+                print(
+                    f'history_skip_generated skipped={skipped_count} db={history_db_path} '
+                    f'sample={sample}',
+                    flush=True,
+                )
     generation_latency_ms = int((time.monotonic() - generation_started) * 1000)
     family_generation_counts = dict(sorted(Counter(item.generator_family for item in generated_items).items()))
     emit_stage_event(
@@ -3437,7 +3466,7 @@ def main() -> int:
     history_skipped_names: set[str] = set()
     if bool(args.skip_failed_history):
         history_skipped_names = load_failed_history_names(
-            db_path=Path(args.db).expanduser(),
+            db_path=history_db_path,
             candidate_names=[candidate.name for candidate in to_check],
         )
         if history_skipped_names:
@@ -3452,13 +3481,14 @@ def main() -> int:
             emit_stage_event(
                 args.stage_events,
                 'history_skip',
+                phase='finalist',
                 skipped_count=skipped_count,
-                history_db=str(Path(args.db).expanduser()),
+                history_db=str(history_db_path),
                 skipped_names_sample=sample,
             )
             if args.progress:
                 print(
-                    f'history_skip skipped={skipped_count} db={Path(args.db).expanduser()} '
+                    f'history_skip_finalist skipped={skipped_count} db={history_db_path} '
                     f'sample={sample}',
                     flush=True,
                 )

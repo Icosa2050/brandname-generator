@@ -539,9 +539,20 @@ def extract_run_summary(validator_log: Path) -> dict[str, object]:
 
 def extract_generator_history_skip(generator_log: Path) -> dict[str, object]:
     if not generator_log.exists():
-        return {'skipped_count': 0, 'skipped_names_sample': []}
+        return {
+            'skipped_count': 0,
+            'skipped_generated_count': 0,
+            'skipped_finalist_count': 0,
+            'skipped_names_sample': [],
+        }
     skipped_count = 0
+    skipped_generated_count = 0
+    skipped_finalist_count = 0
+    legacy_skipped_count = 0
     skipped_sample: list[str] = []
+    skipped_generated_sample: list[str] = []
+    skipped_finalist_sample: list[str] = []
+    saw_phased_event = False
     for raw in generator_log.read_text(encoding='utf-8', errors='replace').splitlines():
         line = raw.strip()
         if not line.startswith('stage_event='):
@@ -563,10 +574,34 @@ def extract_generator_history_skip(generator_log: Path) -> dict[str, object]:
         sample_values: list[str] = []
         if isinstance(sample_raw, list):
             sample_values = [str(item).strip() for item in sample_raw if str(item).strip()]
-        if current_count >= skipped_count:
-            skipped_count = max(0, current_count)
+        phase = str(value.get('phase') or '').strip().lower()
+        if phase == 'generated':
+            saw_phased_event = True
+            if current_count >= skipped_generated_count:
+                skipped_generated_count = max(0, current_count)
+                skipped_generated_sample = sample_values[:20]
+            continue
+        if phase in {'finalist', 'finalists'}:
+            saw_phased_event = True
+            if current_count >= skipped_finalist_count:
+                skipped_finalist_count = max(0, current_count)
+                skipped_finalist_sample = sample_values[:20]
+            continue
+        if current_count >= legacy_skipped_count:
+            legacy_skipped_count = max(0, current_count)
             skipped_sample = sample_values[:20]
-    return {'skipped_count': int(skipped_count), 'skipped_names_sample': skipped_sample}
+
+    if saw_phased_event:
+        skipped_count = skipped_generated_count + skipped_finalist_count
+        skipped_sample = skipped_generated_sample or skipped_finalist_sample or skipped_sample
+    else:
+        skipped_count = legacy_skipped_count
+    return {
+        'skipped_count': int(skipped_count),
+        'skipped_generated_count': int(skipped_generated_count),
+        'skipped_finalist_count': int(skipped_finalist_count),
+        'skipped_names_sample': skipped_sample,
+    }
 
 
 def load_shortlist_names(csv_path: Path) -> list[str]:
@@ -607,6 +642,7 @@ def append_progress_row(path: Path, row: dict[str, object]) -> None:
         'shard_scheduling',
         'combo_key',
         'history_skip_count',
+        'history_skip_generated_count',
         'timestamp',
         'scope',
         'gate',
@@ -1670,6 +1706,7 @@ def main() -> int:
     error_count = 0
     last_status = 'completed'
     history_skip_total_count = 0
+    history_skip_generated_total_count = 0
     history_skip_runs_count = 0
     ab_metrics: list[dict[str, float]] = []
     ab_arms = nide.build_ab_arms(max_runs=max(1, args.max_runs), seed=int(args.ab_seed), block_size=4) if args.ab_mode else []
@@ -1735,6 +1772,7 @@ def main() -> int:
 
         llm_artifact: Path | None = None
         history_skip_count = 0
+        history_skip_generated_count = 0
         llm_report: dict[str, Any] = {
             'provider': args.llm_provider,
             'model': args.llm_model,
@@ -1789,6 +1827,7 @@ def main() -> int:
                     'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
                     'combo_key': combo_key,
                     'history_skip_count': history_skip_count,
+                    'history_skip_generated_count': history_skip_generated_count,
                     'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                     'scope': scope,
                     'gate': gate,
@@ -1874,12 +1913,15 @@ def main() -> int:
         )
         history_skip_meta = extract_generator_history_skip(gen_log)
         history_skip_count = max(0, int(history_skip_meta.get('skipped_count') or 0))
+        history_skip_generated_count = max(0, int(history_skip_meta.get('skipped_generated_count') or 0))
         history_skip_total_count += history_skip_count
+        history_skip_generated_total_count += history_skip_generated_count
         if history_skip_count > 0:
             history_skip_runs_count += 1
             sample = history_skip_meta.get('skipped_names_sample', [])
             print(
-                f'history_skip_count run={run_id} skipped={history_skip_count} sample={sample}',
+                f'history_skip_count run={run_id} skipped={history_skip_count} '
+                f'generated={history_skip_generated_count} sample={sample}',
                 flush=True,
             )
         if code != 0:
@@ -1907,6 +1949,7 @@ def main() -> int:
                     'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
                     'combo_key': combo_key,
                     'history_skip_count': history_skip_count,
+                    'history_skip_generated_count': history_skip_generated_count,
                     'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                     'scope': scope,
                     'gate': gate,
@@ -1982,6 +2025,7 @@ def main() -> int:
                     'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
                     'combo_key': combo_key,
                     'history_skip_count': history_skip_count,
+                    'history_skip_generated_count': history_skip_generated_count,
                     'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                     'scope': scope,
                     'gate': gate,
@@ -2057,6 +2101,7 @@ def main() -> int:
                 'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
                 'combo_key': combo_key,
                 'history_skip_count': history_skip_count,
+                'history_skip_generated_count': history_skip_generated_count,
                 'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
                 'scope': scope,
                 'gate': gate,
@@ -2089,7 +2134,7 @@ def main() -> int:
             f'run_done idx={run_count} arm={arm} duration_s={duration_s} shortlist={len(shortlist)} '
             f'new={len(new_names)} unique_total={len(seen_shortlist)} '
             f'hard_fail_ratio={hard_fail_ratio:.4f} validator_total_jobs={total_jobs} '
-            f'history_skip={history_skip_count} '
+            f'history_skip={history_skip_count} history_skip_generated={history_skip_generated_count} '
             f'remaining_s={remaining_s} shard={args.shard_id + 1}/{args.shard_count}'
         )
         emit_campaign_event(
@@ -2104,6 +2149,7 @@ def main() -> int:
             new_shortlist_count=len(new_names),
             validator_total_jobs=int(total_jobs),
             history_skip_count=int(history_skip_count),
+            history_skip_generated_count=int(history_skip_generated_count),
         )
         last_status = 'ok'
 
@@ -2181,6 +2227,7 @@ def main() -> int:
         'errors': int(error_count),
         'status': last_status,
         'history_skip_total_count': int(history_skip_total_count),
+        'history_skip_generated_total_count': int(history_skip_generated_total_count),
         'history_skip_runs_count': int(history_skip_runs_count),
         'unique_shortlist_names': int(len(seen_shortlist)),
         'progress_csv': str(progress_csv),
@@ -2199,6 +2246,7 @@ def main() -> int:
         runs_executed=int(run_count),
         errors=int(error_count),
         history_skip_total_count=int(history_skip_total_count),
+        history_skip_generated_total_count=int(history_skip_generated_total_count),
         history_skip_runs_count=int(history_skip_runs_count),
         summary_path=str(campaign_summary_path),
     )
