@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -114,6 +115,31 @@ class NamingCampaignRunnerShardSchedulingTest(unittest.TestCase):
         self.assertEqual(meta.get('mode'), 'slice_fallback_no_history')
         self.assertEqual(assignments[0], combos[0::2])
         self.assertEqual(assignments[1], combos[1::2])
+
+    def test_extract_generator_history_skip_reads_stage_event(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'generator.log'
+            events = [
+                {'event': 'naming_pipeline_stage', 'stage': 'cheap_gate', 'evaluated_count': 10},
+                {
+                    'event': 'naming_pipeline_stage',
+                    'stage': 'history_skip',
+                    'skipped_count': 3,
+                    'skipped_names_sample': ['verodomo', 'clarivio'],
+                },
+            ]
+            path.write_text(
+                '\n'.join(f"stage_event={json.dumps(event, ensure_ascii=False)}" for event in events) + '\n',
+                encoding='utf-8',
+            )
+            got = ncr.extract_generator_history_skip(path)
+            self.assertEqual(got.get('skipped_count'), 3)
+            self.assertEqual(got.get('skipped_names_sample'), ['verodomo', 'clarivio'])
+
+    def test_extract_generator_history_skip_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            got = ncr.extract_generator_history_skip(Path(td) / 'missing.log')
+        self.assertEqual(got.get('skipped_count'), 0)
 
 
 if __name__ == '__main__':

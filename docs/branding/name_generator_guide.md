@@ -240,6 +240,7 @@ Notes:
 - `--heartbeat-events` (default on) emits `campaign_event=` lifecycle records and writes JSONL heartbeat to `<out-dir>/runs/campaign_heartbeat.jsonl`.
 - `--heartbeat-interval-s` controls periodic `stage_heartbeat` events for long-running child stages.
 - `--heartbeat-jsonl` can override the default heartbeat file path.
+- `campaign_progress.csv` now includes `history_skip_count` so skipped failed-history names are visible per run.
 - OpenRouter calls use a compatibility fallback chain (`json_schema+require_parameters` -> `json_object` -> plain chat) so models that reject strict routing still return candidates.
 - Campaign `llm_stage_status` now distinguishes empty/error cases (`empty_with_errors`, `empty`) instead of reporting `ok` with zero candidates.
 - Validator `run_summary` now includes SQLite lock contention metrics:
