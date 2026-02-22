@@ -196,6 +196,25 @@ def should_stream_line(line: str, patterns: list[str]) -> bool:
     return False
 
 
+def derive_validator_runtime_settings(
+    *,
+    requested_concurrency: int,
+    requested_min_concurrency: int,
+    requested_max_concurrency: int,
+    requested_timeout_s: float,
+) -> dict[str, float | int]:
+    min_concurrency = max(1, int(requested_min_concurrency))
+    max_concurrency = max(min_concurrency, int(requested_max_concurrency))
+    concurrency = max(min_concurrency, min(max_concurrency, int(requested_concurrency)))
+    timeout_s = max(0.5, float(requested_timeout_s))
+    return {
+        'concurrency': int(concurrency),
+        'min_concurrency': int(min_concurrency),
+        'max_concurrency': int(max_concurrency),
+        'timeout_s': float(timeout_s),
+    }
+
+
 def emit_campaign_event(
     *,
     enabled: bool,
@@ -1183,6 +1202,24 @@ def parse_args() -> argparse.Namespace:
         help='Validator concurrency.',
     )
     parser.add_argument(
+        '--validator-min-concurrency',
+        type=int,
+        default=2,
+        help='Lower bound for adaptive validator concurrency.',
+    )
+    parser.add_argument(
+        '--validator-max-concurrency',
+        type=int,
+        default=24,
+        help='Upper bound for adaptive validator concurrency.',
+    )
+    parser.add_argument(
+        '--validator-timeout-s',
+        type=float,
+        default=8.0,
+        help='Per-check timeout seconds passed to async validator.',
+    )
+    parser.add_argument(
         '--validator-state-filter',
         default='new',
         help='Candidate states for async validator (comma-separated). Use "new,checked" to revalidate old names.',
@@ -1551,6 +1588,10 @@ def main() -> int:
         f'merge_shards={merge_shards_enabled} '
         f'check_limit={args.check_limit} validator_tier={args.validator_tier} '
         f'validator_candidate_limit={args.validator_candidate_limit} validator_state_filter={args.validator_state_filter} '
+        f'validator_concurrency={int(args.validator_concurrency)} '
+        f'validator_min_concurrency={int(args.validator_min_concurrency)} '
+        f'validator_max_concurrency={int(args.validator_max_concurrency)} '
+        f'validator_timeout_s={float(args.validator_timeout_s):.2f} '
         f'validator_memory_enabled={bool(str(args.validator_memory_db).strip())} '
         f'validator_memory_ttl_days={int(args.validator_memory_ttl_days)} '
         f'reset_db={args.reset_db} '
@@ -1969,6 +2010,12 @@ def main() -> int:
 
         hard_fail_ratio = nide.compute_hard_fail_ratio(run_csv)
 
+        validator_runtime = derive_validator_runtime_settings(
+            requested_concurrency=int(args.validator_concurrency),
+            requested_min_concurrency=int(args.validator_min_concurrency),
+            requested_max_concurrency=int(args.validator_max_concurrency),
+            requested_timeout_s=float(args.validator_timeout_s),
+        )
         validator_cmd = [
             'python3',
             str(root / 'scripts' / 'branding' / 'naming_validate_async.py'),
@@ -1984,7 +2031,10 @@ def main() -> int:
             f'--checks={args.validator_checks}',
             f'--validation-tier={args.validator_tier}',
             f'--candidate-limit={max(1, int(args.validator_candidate_limit))}',
-            f'--concurrency={max(1, int(args.validator_concurrency))}',
+            f'--concurrency={int(validator_runtime["concurrency"])}',
+            f'--min-concurrency={int(validator_runtime["min_concurrency"])}',
+            f'--max-concurrency={int(validator_runtime["max_concurrency"])}',
+            f'--timeout-s={float(validator_runtime["timeout_s"]):.2f}',
             f'--memory-ttl-days={max(1, int(args.validator_memory_ttl_days))}',
         ]
         if str(args.validator_memory_db).strip():

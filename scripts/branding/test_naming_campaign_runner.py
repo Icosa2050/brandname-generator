@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import naming_campaign_runner as ncr
 
@@ -173,6 +175,39 @@ class NamingCampaignRunnerShardSchedulingTest(unittest.TestCase):
             self.assertEqual(got.get('skipped_finalist_count'), 1)
             self.assertEqual(got.get('skipped_count'), 3)
             self.assertEqual(got.get('skipped_names_sample'), ['tenant', 'saldo'])
+
+
+class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
+    def test_derive_validator_runtime_settings_clamps_values(self) -> None:
+        got = ncr.derive_validator_runtime_settings(
+            requested_concurrency=64,
+            requested_min_concurrency=7,
+            requested_max_concurrency=5,
+            requested_timeout_s=0.1,
+        )
+        self.assertEqual(got['min_concurrency'], 7)
+        self.assertEqual(got['max_concurrency'], 7)
+        self.assertEqual(got['concurrency'], 7)
+        self.assertEqual(got['timeout_s'], 0.5)
+
+    def test_parse_args_accepts_validator_runtime_flags(self) -> None:
+        argv = [
+            'naming_campaign_runner.py',
+            '--validator-concurrency',
+            '8',
+            '--validator-min-concurrency',
+            '3',
+            '--validator-max-concurrency',
+            '12',
+            '--validator-timeout-s',
+            '4.5',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        self.assertEqual(args.validator_concurrency, 8)
+        self.assertEqual(args.validator_min_concurrency, 3)
+        self.assertEqual(args.validator_max_concurrency, 12)
+        self.assertAlmostEqual(args.validator_timeout_s, 4.5, places=6)
 
 
 if __name__ == '__main__':

@@ -15,7 +15,7 @@ import random
 import re
 from pathlib import Path
 from typing import Any
-from urllib import error, request
+from urllib import error, parse, request
 
 
 MODE_TRIPLETS: tuple[tuple[str, str, str], ...] = (
@@ -588,6 +588,27 @@ def call_openrouter_candidates(
         base_body,
     ]
 
+    def normalize_openrouter_http_referer(raw: str) -> str:
+        value = str(raw or '').strip().strip('"').strip("'")
+        if not value:
+            return ''
+        parsed = parse.urlparse(value)
+        if parsed.scheme in {'http', 'https'} and parsed.netloc:
+            return value
+        if '://' in value or any(ch.isspace() for ch in value):
+            return ''
+
+        candidate = value.lstrip('/')
+        if not candidate:
+            return ''
+        if '/' in candidate:
+            host, path = candidate.split('/', 1)
+            host = host.strip()
+            if not host:
+                return ''
+            return f'https://{host}/{path}'
+        return f'https://{candidate}'
+
     def request_once(payload_body: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
         data = json.dumps(payload_body, ensure_ascii=False).encode('utf-8')
         headers = {
@@ -595,7 +616,7 @@ def call_openrouter_candidates(
             'Content-Type': 'application/json',
             'Accept': 'application/json',
         }
-        referer = str(http_referer or '').strip()
+        referer = normalize_openrouter_http_referer(http_referer)
         title = str(x_title or '').strip()
         if referer:
             headers['HTTP-Referer'] = referer

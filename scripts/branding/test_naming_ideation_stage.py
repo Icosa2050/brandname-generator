@@ -209,6 +209,32 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertEqual(captured_headers.get('http-referer'), 'https://example.com/app')
         self.assertEqual(captured_headers.get('x-title'), 'Kostula Naming Pipeline')
 
+    @mock.patch('naming_ideation_stage.request.urlopen')
+    def test_call_openrouter_candidates_normalizes_non_url_referer(self, mock_urlopen: mock.Mock) -> None:
+        captured_headers: dict[str, str] = {}
+
+        def _fake_urlopen(req: object, timeout: float) -> _FakeHTTPResponse:
+            del timeout
+            if hasattr(req, 'header_items'):
+                captured_headers.update({k.lower(): v for k, v in req.header_items()})
+            payload = json.dumps({'choices': [{'message': {'content': '{"candidates":[{"name":"Verodomo"}]}'}}]})
+            return _FakeHTTPResponse(payload)
+
+        mock_urlopen.side_effect = _fake_urlopen
+        names, _usage, err = nide.call_openrouter_candidates(
+            api_key='k',
+            model='mistralai/mistral-small-creative',
+            prompt='hello',
+            timeout_ms=500,
+            strict_json=True,
+            http_referer='brand-name-generator',
+            x_title='brand-name-generator',
+        )
+        self.assertEqual(err, '')
+        self.assertEqual(names, ['verodomo'])
+        self.assertEqual(captured_headers.get('http-referer'), 'https://brand-name-generator')
+        self.assertEqual(captured_headers.get('x-title'), 'brand-name-generator')
+
     def test_extract_openrouter_response_content_missing_choices(self) -> None:
         content, usage, err = nide.extract_openrouter_response_content({'usage': {'cost': 0.01}})
         self.assertEqual(content, '')
