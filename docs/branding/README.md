@@ -7,6 +7,8 @@ This folder now contains only active documentation.
 - `docs/branding/naming_brief.md`: product/problem framing for naming.
 - `docs/branding/naming_rubric.md`: scoring rubric.
 - `docs/branding/naming_input_corpus_spec_v2.md`: source-input schema/spec.
+- `docs/branding/continuous_pipeline_test_plan.md`: mostly-automated validation plan for 24/7 loop.
+- `docs/branding/continuous_pipeline_deferred_backlog.md`: intentionally deferred architecture/tuning backlog.
 
 ## Non-doc locations
 - `resources/branding/`: static inputs, templates, prompt/context examples.

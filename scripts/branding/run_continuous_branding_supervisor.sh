@@ -38,8 +38,9 @@ Options:
                                    Backend fallback on failed cycle (default: ollama)
   --profile-plan <csv>             Profile rotation per cycle (default: fast,fast,quality)
                                    Allowed profiles: fast, quality, balanced
-  --target-good <n>                Stop when checked strong+consider >= n (default: 120)
-  --target-strong <n>              Stop when checked strong >= n (default: 40)
+  --target-good <n>                Stop when strict checked strong+consider >= n (default: 120)
+                                   strict = no expensive check fail/error (domain,web,app_store,package,social)
+  --target-strong <n>              Stop when strict checked strong >= n (default: 40)
   --max-cycles <n>                 Max supervisor cycles; 0 => unlimited (default: 0)
   --sleep-ok-s <seconds>           Sleep after successful cycle (default: 20)
   --sleep-fail-base-s <seconds>    Failure backoff base (default: 30)
@@ -347,7 +348,10 @@ sqlite_text() {
 
 GOOD_COUNT=0
 STRONG_COUNT=0
+STRICT_GOOD_COUNT=0
+STRICT_STRONG_COUNT=0
 SHORTLIST_GOOD_COUNT=0
+SHORTLIST_STRICT_GOOD_COUNT=0
 UNIQUE_SHORTLIST_COUNT=0
 TOTAL_CANDIDATES=0
 RUN_COUNT=0
@@ -356,7 +360,10 @@ LAST_RUN_STATUS=""
 collect_metrics() {
   GOOD_COUNT="$(sqlite_scalar "SELECT COUNT(*) FROM candidates WHERE state='checked' AND current_recommendation IN ('strong','consider');")"
   STRONG_COUNT="$(sqlite_scalar "SELECT COUNT(*) FROM candidates WHERE state='checked' AND current_recommendation='strong';")"
+  STRICT_GOOD_COUNT="$(sqlite_scalar "WITH exp_bad AS (SELECT candidate_id, MAX(CASE WHEN check_type IN ('domain','web','app_store','package','social') AND status IN ('fail','error') THEN 1 ELSE 0 END) AS has_bad FROM validation_results GROUP BY candidate_id) SELECT COUNT(*) FROM candidates c LEFT JOIN exp_bad e ON e.candidate_id=c.id WHERE c.state='checked' AND c.current_recommendation IN ('strong','consider') AND IFNULL(e.has_bad,0)=0;")"
+  STRICT_STRONG_COUNT="$(sqlite_scalar "WITH exp_bad AS (SELECT candidate_id, MAX(CASE WHEN check_type IN ('domain','web','app_store','package','social') AND status IN ('fail','error') THEN 1 ELSE 0 END) AS has_bad FROM validation_results GROUP BY candidate_id) SELECT COUNT(*) FROM candidates c LEFT JOIN exp_bad e ON e.candidate_id=c.id WHERE c.state='checked' AND c.current_recommendation='strong' AND IFNULL(e.has_bad,0)=0;")"
   SHORTLIST_GOOD_COUNT="$(sqlite_scalar "SELECT COUNT(DISTINCT c.id) FROM candidates c JOIN shortlist_decisions s ON s.candidate_id=c.id WHERE s.selected=1 AND c.state='checked' AND c.current_recommendation IN ('strong','consider');")"
+  SHORTLIST_STRICT_GOOD_COUNT="$(sqlite_scalar "WITH exp_bad AS (SELECT candidate_id, MAX(CASE WHEN check_type IN ('domain','web','app_store','package','social') AND status IN ('fail','error') THEN 1 ELSE 0 END) AS has_bad FROM validation_results GROUP BY candidate_id) SELECT COUNT(DISTINCT c.id) FROM shortlist_decisions s JOIN candidates c ON c.id=s.candidate_id LEFT JOIN exp_bad e ON e.candidate_id=c.id WHERE s.selected=1 AND c.state='checked' AND c.current_recommendation IN ('strong','consider') AND IFNULL(e.has_bad,0)=0;")"
   UNIQUE_SHORTLIST_COUNT="$(sqlite_scalar "SELECT COUNT(DISTINCT c.name_normalized) FROM candidates c JOIN shortlist_decisions s ON s.candidate_id=c.id WHERE s.selected=1;")"
   TOTAL_CANDIDATES="$(sqlite_scalar "SELECT COUNT(*) FROM candidates;")"
   RUN_COUNT="$(sqlite_scalar "SELECT IFNULL(MAX(id),0) FROM naming_runs;")"
@@ -373,8 +380,16 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   if [[ -f "$LOCK_DIR/pid" ]]; then
     existing_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
   fi
-  echo "Supervisor lock already exists: $LOCK_DIR (pid=${existing_pid:-unknown})" >&2
-  exit 3
+  if [[ -n "$existing_pid" && "$existing_pid" == <-> ]] && kill -0 "$existing_pid" >/dev/null 2>&1; then
+    echo "Supervisor lock already exists: $LOCK_DIR (pid=$existing_pid)" >&2
+    exit 3
+  fi
+  echo "Recovering stale supervisor lock: $LOCK_DIR (stale_pid=${existing_pid:-unknown})"
+  rm -rf "$LOCK_DIR"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "Failed to recover lock directory: $LOCK_DIR" >&2
+    exit 3
+  fi
 fi
 echo "$$" > "$LOCK_DIR/pid"
 
@@ -383,6 +398,8 @@ log_event event=start out_dir="$OUT_DIR" backend="$PRIMARY_BACKEND" fallback="$F
 collect_metrics
 prev_good_count="$GOOD_COUNT"
 prev_strong_count="$STRONG_COUNT"
+prev_strict_good_count="$STRICT_GOOD_COUNT"
+prev_strict_strong_count="$STRICT_STRONG_COUNT"
 prev_total_candidates="$TOTAL_CANDIDATES"
 
 cycle=0
@@ -473,25 +490,29 @@ while true; do
   collect_metrics
   new_good_count=$(( GOOD_COUNT - prev_good_count ))
   new_strong_count=$(( STRONG_COUNT - prev_strong_count ))
+  new_strict_good_count=$(( STRICT_GOOD_COUNT - prev_strict_good_count ))
+  new_strict_strong_count=$(( STRICT_STRONG_COUNT - prev_strict_strong_count ))
   new_total_candidates=$(( TOTAL_CANDIDATES - prev_total_candidates ))
   prev_good_count="$GOOD_COUNT"
   prev_strong_count="$STRONG_COUNT"
+  prev_strict_good_count="$STRICT_GOOD_COUNT"
+  prev_strict_strong_count="$STRICT_STRONG_COUNT"
   prev_total_candidates="$TOTAL_CANDIDATES"
 
   if (( rc == 0 )); then
     fail_streak=0
-    log_event event=cycle_ok cycle="$cycle" profile="$profile" backend="$backend" used_fallback="$used_fallback" new_good="$new_good_count" new_strong="$new_strong_count" new_candidates="$new_total_candidates" good_total="$GOOD_COUNT" strong_total="$STRONG_COUNT" shortlist_good_total="$SHORTLIST_GOOD_COUNT" unique_shortlist="$UNIQUE_SHORTLIST_COUNT" candidates_total="$TOTAL_CANDIDATES" run_count="$RUN_COUNT" last_run_status="${LAST_RUN_STATUS:-none}" log="$cycle_log"
+    log_event event=cycle_ok cycle="$cycle" profile="$profile" backend="$backend" used_fallback="$used_fallback" new_good="$new_good_count" new_strong="$new_strong_count" new_strict_good="$new_strict_good_count" new_strict_strong="$new_strict_strong_count" new_candidates="$new_total_candidates" good_total="$GOOD_COUNT" strong_total="$STRONG_COUNT" strict_good_total="$STRICT_GOOD_COUNT" strict_strong_total="$STRICT_STRONG_COUNT" shortlist_good_total="$SHORTLIST_GOOD_COUNT" shortlist_strict_good_total="$SHORTLIST_STRICT_GOOD_COUNT" unique_shortlist="$UNIQUE_SHORTLIST_COUNT" candidates_total="$TOTAL_CANDIDATES" run_count="$RUN_COUNT" last_run_status="${LAST_RUN_STATUS:-none}" log="$cycle_log"
 
     target_good_ok=1
     target_strong_ok=1
-    if (( TARGET_GOOD > 0 && GOOD_COUNT < TARGET_GOOD )); then
+    if (( TARGET_GOOD > 0 && STRICT_GOOD_COUNT < TARGET_GOOD )); then
       target_good_ok=0
     fi
-    if (( TARGET_STRONG > 0 && STRONG_COUNT < TARGET_STRONG )); then
+    if (( TARGET_STRONG > 0 && STRICT_STRONG_COUNT < TARGET_STRONG )); then
       target_strong_ok=0
     fi
     if (( (TARGET_GOOD > 0 || TARGET_STRONG > 0) && target_good_ok == 1 && target_strong_ok == 1 )); then
-      log_event event=target_reached cycle="$cycle" good_total="$GOOD_COUNT" strong_total="$STRONG_COUNT" shortlist_good_total="$SHORTLIST_GOOD_COUNT" unique_shortlist="$UNIQUE_SHORTLIST_COUNT"
+      log_event event=target_reached cycle="$cycle" strict_good_total="$STRICT_GOOD_COUNT" strict_strong_total="$STRICT_STRONG_COUNT" good_total="$GOOD_COUNT" strong_total="$STRONG_COUNT" shortlist_good_total="$SHORTLIST_GOOD_COUNT" shortlist_strict_good_total="$SHORTLIST_STRICT_GOOD_COUNT" unique_shortlist="$UNIQUE_SHORTLIST_COUNT"
       exit 0
     fi
 

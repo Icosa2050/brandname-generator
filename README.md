@@ -99,6 +99,9 @@ zsh scripts/branding/run_continuous_branding_supervisor.sh \
   --target-strong 40
 ```
 
+`--target-good` / `--target-strong` use strict survivors
+(checked recommendations with no expensive-check `fail/error`).
+
 LaunchAgent installer (background, survives terminal close/relogin):
 
 ```zsh
@@ -121,6 +124,10 @@ zsh scripts/branding/report_campaign_progress.sh \
   - `docs/branding/README.md`
 - Detailed operational guide:
   - `docs/branding/name_generator_guide.md`
+- Continuous test plan (mostly automated):
+  - `docs/branding/continuous_pipeline_test_plan.md`
+- Deferred improvement backlog:
+  - `docs/branding/continuous_pipeline_deferred_backlog.md`
 - Static inputs/examples:
   - `resources/branding/`
 - Historical output artifacts:

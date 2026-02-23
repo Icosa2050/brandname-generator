@@ -47,5 +47,6 @@
   - Continuous supervisor (foreground): `zsh scripts/branding/run_continuous_branding_supervisor.sh --backend auto --fallback-backend ollama --profile-plan fast,fast,quality --target-good 120 --target-strong 40`
   - Continuous supervisor (LaunchAgent): `zsh scripts/branding/install_launchd_continuous_branding.sh --install`
   - Progress summary: `zsh scripts/branding/report_campaign_progress.sh --out-dir test_outputs/branding/continuous_hybrid --top-n 25`
+  - Continuous targets are strict survivors (checked recommendation + no expensive-check fail/error).
 - Hybrid campaign example:
   - `direnv exec . python3 scripts/branding/naming_campaign_runner.py --llm-ideation-enabled --llm-provider=hybrid --llm-hybrid-local-models=llama-3.3-8b-instruct-omniwriter --llm-hybrid-remote-models=mistralai/mistral-small-creative --llm-hybrid-local-share=0.75 --llm-openai-base-url=http://127.0.0.1:1234/v1 --llm-openai-ttl-s=3600`

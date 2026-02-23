@@ -350,7 +350,8 @@ What it adds:
 - profile rotation (`fast` + `quality`) for throughput vs quality balance,
 - health-based backend selection with fallback (`lmstudio`/`ollama`),
 - failure backoff + fail-streak cap,
-- automatic stop once target quality counts are reached.
+- automatic stop once strict target counts are reached
+  (checked `strong/consider` with no expensive-check `fail/error`).
 
 LaunchAgent install (macOS background service):
 ```zsh
@@ -364,6 +365,10 @@ zsh scripts/branding/report_campaign_progress.sh \
   --out-dir test_outputs/branding/continuous_hybrid \
   --top-n 25
 ```
+
+Further references:
+- `docs/branding/continuous_pipeline_test_plan.md`
+- `docs/branding/continuous_pipeline_deferred_backlog.md`
 
 ### 14) Benchmark validator parallelism
 ```zsh

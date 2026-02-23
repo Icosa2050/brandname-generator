@@ -54,8 +54,8 @@ Options:
   --backend <auto|lmstudio|ollama> Supervisor backend (default: auto)
   --fallback-backend <none|lmstudio|ollama>
   --profile-plan <csv>             fast,fast,quality (default)
-  --target-good <n>                Stop threshold for strong+consider
-  --target-strong <n>              Stop threshold for strong
+  --target-good <n>                Stop threshold for strict strong+consider
+  --target-strong <n>              Stop threshold for strict strong
   --max-cycles <n>                 0 => unlimited
   --sleep-ok-s <seconds>
   --sleep-fail-base-s <seconds>
@@ -213,7 +213,10 @@ EOF
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>EnvironmentVariables</key>
