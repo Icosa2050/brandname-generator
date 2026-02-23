@@ -27,6 +27,7 @@ from typing import Awaitable, Callable, Protocol
 
 import name_generator as ng
 import naming_db as ndb
+import path_config as bpaths
 
 
 @dataclass
@@ -178,7 +179,7 @@ class ValidationCheckSpec:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Async validator orchestration for naming pipeline.')
-    parser.add_argument('--db', default='docs/branding/naming_pipeline.db', help='SQLite DB path.')
+    parser.add_argument('--db', default=str(bpaths.NAMING_PIPELINE_DB), help='SQLite DB path.')
     parser.add_argument(
         '--pipeline-version',
         choices=['v2', 'v3'],

@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Iterable, Protocol
 from urllib import error, parse, request
 
+import path_config as bpaths
+
 PROTECTED_MARKS = [
     'immoscout24',
     'immoscout',
@@ -2962,7 +2964,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--source-pool-db',
-        default='docs/branding/naming_pipeline_v1.db',
+        default=str(bpaths.NAMING_PIPELINE_V1_DB),
         help='SQLite DB path used to load curated source atoms for source_pool/blend families.',
     )
     parser.add_argument(
@@ -3025,7 +3027,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--false-friend-lexicon',
-        default='docs/branding/naming_false_friend_lexicon_v1.md',
+        default=str(bpaths.FALSE_FRIEND_LEXICON_V1),
         help='Markdown lexicon table file for false-friend and negative-association checks.',
     )
     parser.add_argument(
@@ -3179,7 +3181,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--db',
-        default='docs/branding/naming_pipeline.db',
+        default=str(bpaths.NAMING_PIPELINE_DB),
         help='SQLite DB path used when --persist-db is enabled.',
     )
     parser.add_argument(
@@ -3196,7 +3198,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--run-log',
-        default='docs/branding/name_generator_runs.jsonl',
+        default=str(bpaths.NAME_GENERATOR_RUNS_JSONL),
         help='Append run summary JSONL history to this path (set empty string to disable).',
     )
     return parser.parse_args()
@@ -3602,7 +3604,7 @@ def main() -> int:
     out_path = args.output
     if not out_path:
         ts = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-        out_path = f'docs/branding/generated_name_candidates_{args.scope}_{args.gate}_{ts}.csv'
+        out_path = str(bpaths.GENERATED_CANDIDATES_DIR / f'generated_name_candidates_{args.scope}_{args.gate}_{ts}.csv')
     output_file = Path(out_path)
     write_csv(output_file, args.scope, final_ranked, args.gate)
     if args.json_output:

@@ -31,6 +31,7 @@ from typing import Any
 
 import naming_db as ndb
 import naming_ideation_stage as nide
+import path_config as bpaths
 
 try:
     import tomllib  # type: ignore[attr-defined]
@@ -165,8 +166,14 @@ def load_llm_model_config(path: str) -> dict[str, list[str]]:
     return _parse_txt_model_config(raw_text)
 
 
-def resolve_llm_models(*, args: argparse.Namespace, provider: str) -> tuple[list[str], str, str]:
-    explicit_models = parse_model_list(getattr(args, 'llm_models', ''))
+def resolve_llm_models_for_provider(
+    *,
+    args: argparse.Namespace,
+    provider: str,
+    cli_models_raw: str,
+    fallback_model_raw: str,
+) -> tuple[list[str], str, str]:
+    explicit_models = parse_model_list(cli_models_raw)
     if explicit_models:
         return explicit_models, 'cli_models', ''
 
@@ -184,10 +191,53 @@ def resolve_llm_models(*, args: argparse.Namespace, provider: str) -> tuple[list
             return configured, 'model_config', ''
         return [], 'model_config', f'no_models_for_provider:{provider_key}'
 
-    fallback_model = str(getattr(args, 'llm_model', '') or '').strip()
+    fallback_model = str(fallback_model_raw or '').strip()
     if fallback_model:
         return [fallback_model], 'single_model', ''
     return [], 'none', 'no_models_configured'
+
+
+def resolve_llm_models(*, args: argparse.Namespace, provider: str) -> tuple[list[str], str, str]:
+    return resolve_llm_models_for_provider(
+        args=args,
+        provider=provider,
+        cli_models_raw=str(getattr(args, 'llm_models', '') or ''),
+        fallback_model_raw=str(getattr(args, 'llm_model', '') or ''),
+    )
+
+
+def build_hybrid_provider_round_schedule(*, total_rounds: int, local_rounds: int, remote_rounds: int) -> list[str]:
+    planned_total = max(0, int(total_rounds))
+    local_target = max(0, int(local_rounds))
+    remote_target = max(0, int(remote_rounds))
+    if planned_total <= 0:
+        return []
+    if local_target + remote_target <= 0:
+        return []
+
+    provider_order = ['openai_compat', 'openrouter_http']
+    targets = {
+        'openai_compat': local_target,
+        'openrouter_http': remote_target,
+    }
+    assigned = {
+        'openai_compat': 0,
+        'openrouter_http': 0,
+    }
+    schedule: list[str] = []
+    while len(schedule) < planned_total:
+        candidates = [provider for provider in provider_order if assigned[provider] < targets[provider]]
+        if not candidates:
+            break
+
+        def progress_ratio(provider: str) -> float:
+            target = max(1, int(targets[provider]))
+            return float(assigned[provider]) / float(target)
+
+        chosen = min(candidates, key=lambda provider: (progress_ratio(provider), provider_order.index(provider)))
+        schedule.append(chosen)
+        assigned[chosen] += 1
+    return schedule
 
 
 def select_round_model(*, models: list[str], round_idx: int, selection: str, rng: random.Random) -> str:
@@ -1052,6 +1102,18 @@ def run_active_llm_ideation(
         elif report['status'] != 'model_config_error':
             source_label = 'openai_compat'
             api_key = os.environ.get(args.llm_openai_api_key_env, '').strip() or 'ollama'
+            openai_request_extras: dict[str, Any] = {}
+            ttl_s = max(0, int(getattr(args, 'llm_openai_ttl_s', 0)))
+            if ttl_s > 0:
+                openai_request_extras['ttl'] = ttl_s
+            keep_alive_raw = str(getattr(args, 'llm_openai_keep_alive', '') or '').strip()
+            if keep_alive_raw:
+                keep_alive_value: Any = keep_alive_raw
+                if keep_alive_raw.lstrip('-').isdigit():
+                    keep_alive_value = int(keep_alive_raw)
+                openai_request_extras['keep_alive'] = keep_alive_value
+            if openai_request_extras:
+                report['openai_request_extras'] = dict(openai_request_extras)
             model_catalog = nide.list_openai_models(
                 api_key=api_key,
                 base_url=args.llm_openai_base_url,
@@ -1066,6 +1128,7 @@ def run_active_llm_ideation(
                     prompt=_prompt,
                     timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                     strict_json=bool(args.llm_strict_json),
+                    request_extras=openai_request_extras,
                 )
 
         if report['status'] not in {'missing_api_key', 'model_config_error'}:
@@ -1225,6 +1288,327 @@ def run_active_llm_ideation(
                         report['status'] = 'empty_with_errors'
                     else:
                         report['status'] = 'empty'
+    elif args.llm_provider == 'hybrid':
+        local_provider = 'openai_compat'
+        remote_provider = 'openrouter_http'
+        hybrid_local_share = clamp_share(float(getattr(args, 'llm_hybrid_local_share', 0.75)))
+        report['model_source'] = 'hybrid'
+        report['hybrid_local_share'] = hybrid_local_share
+        report['hybrid_providers'] = [local_provider, remote_provider]
+        requested_by_provider: dict[str, list[str]] = {}
+        source_by_provider: dict[str, str] = {}
+        provider_contexts: dict[str, dict[str, Any]] = {}
+
+        openai_request_extras: dict[str, Any] = {}
+        ttl_s = max(0, int(getattr(args, 'llm_openai_ttl_s', 0)))
+        if ttl_s > 0:
+            openai_request_extras['ttl'] = ttl_s
+        keep_alive_raw = str(getattr(args, 'llm_openai_keep_alive', '') or '').strip()
+        if keep_alive_raw:
+            keep_alive_value: Any = keep_alive_raw
+            if keep_alive_raw.lstrip('-').isdigit():
+                keep_alive_value = int(keep_alive_raw)
+            openai_request_extras['keep_alive'] = keep_alive_value
+        if openai_request_extras:
+            report['openai_request_extras'] = dict(openai_request_extras)
+
+        local_models, local_source, local_err = resolve_llm_models_for_provider(
+            args=args,
+            provider=local_provider,
+            cli_models_raw=str(getattr(args, 'llm_hybrid_local_models', '') or ''),
+            fallback_model_raw=str(getattr(args, 'llm_hybrid_local_model', '') or ''),
+        )
+        requested_by_provider[local_provider] = list(local_models)
+        source_by_provider[local_provider] = local_source
+        if local_err:
+            report['errors'].append(f'{local_provider}:{local_err}')
+        else:
+            local_api_key = os.environ.get(args.llm_openai_api_key_env, '').strip() or 'ollama'
+            local_catalog = nide.list_openai_models(
+                api_key=local_api_key,
+                base_url=args.llm_openai_base_url,
+                timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
+            )
+            if local_catalog is not None:
+                local_unavailable = [model for model in local_models if model not in local_catalog]
+                if local_unavailable:
+                    report['errors'].append(f'{local_provider}:models_not_in_catalog={",".join(local_unavailable)}')
+                    local_models = [model for model in local_models if model in local_catalog]
+                    requested_by_provider[local_provider] = list(local_models)
+            if local_models:
+
+                def call_local(_prompt: str, _model: str) -> tuple[list[str], dict[str, Any], str]:
+                    return nide.call_openai_compat_candidates(
+                        api_key=local_api_key,
+                        base_url=args.llm_openai_base_url,
+                        model=_model,
+                        prompt=_prompt,
+                        timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
+                        strict_json=bool(args.llm_strict_json),
+                        request_extras=openai_request_extras,
+                    )
+
+                provider_contexts[local_provider] = {
+                    'models': list(local_models),
+                    'call_provider': call_local,
+                    'source_label': 'openai_compat',
+                    'base_url': nide.normalize_openai_compat_base_url(args.llm_openai_base_url),
+                }
+            else:
+                report['errors'].append(f'{local_provider}:model_not_configured')
+
+        remote_models, remote_source, remote_err = resolve_llm_models_for_provider(
+            args=args,
+            provider=remote_provider,
+            cli_models_raw=str(getattr(args, 'llm_hybrid_remote_models', '') or ''),
+            fallback_model_raw=str(getattr(args, 'llm_hybrid_remote_model', '') or ''),
+        )
+        requested_by_provider[remote_provider] = list(remote_models)
+        source_by_provider[remote_provider] = remote_source
+        if remote_err:
+            report['errors'].append(f'{remote_provider}:{remote_err}')
+        else:
+            remote_api_key = os.environ.get(args.llm_api_key_env, '').strip()
+            if not remote_api_key:
+                report['errors'].append(f'{remote_provider}:missing env {args.llm_api_key_env}')
+            else:
+                remote_catalog = nide.list_openrouter_models(
+                    api_key=remote_api_key,
+                    timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
+                )
+                if remote_catalog is not None:
+                    remote_unavailable = [model for model in remote_models if model not in remote_catalog]
+                    if remote_unavailable:
+                        report['errors'].append(f'{remote_provider}:models_not_in_catalog={",".join(remote_unavailable)}')
+                        remote_models = [model for model in remote_models if model in remote_catalog]
+                        requested_by_provider[remote_provider] = list(remote_models)
+                if remote_models:
+
+                    def call_remote(_prompt: str, _model: str) -> tuple[list[str], dict[str, Any], str]:
+                        return nide.call_openrouter_candidates(
+                            api_key=remote_api_key,
+                            model=_model,
+                            prompt=_prompt,
+                            timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
+                            strict_json=bool(args.llm_strict_json),
+                            http_referer=args.llm_openrouter_http_referer,
+                            x_title=args.llm_openrouter_x_title,
+                        )
+
+                    provider_contexts[remote_provider] = {
+                        'models': list(remote_models),
+                        'call_provider': call_remote,
+                        'source_label': 'openrouter',
+                        'base_url': 'https://openrouter.ai/api/v1',
+                    }
+                else:
+                    report['errors'].append(f'{remote_provider}:model_not_configured')
+
+        report['models_requested_by_provider'] = requested_by_provider
+        report['model_source_by_provider'] = source_by_provider
+        flattened_requested: list[str] = []
+        for provider in [local_provider, remote_provider]:
+            models_for_provider = requested_by_provider.get(provider, [])
+            for model in models_for_provider:
+                flattened_requested.append(f'{provider}:{model}')
+        report['models_requested'] = flattened_requested
+        report['model'] = '|'.join(flattened_requested)
+
+        total_rounds = max(1, int(args.llm_rounds))
+        local_round_target = 0
+        remote_round_target = 0
+        if local_provider in provider_contexts and remote_provider in provider_contexts:
+            local_round_target = int(round(float(total_rounds) * hybrid_local_share))
+            local_round_target = max(1, min(total_rounds - 1, local_round_target))
+            remote_round_target = total_rounds - local_round_target
+        elif local_provider in provider_contexts:
+            local_round_target = total_rounds
+        elif remote_provider in provider_contexts:
+            remote_round_target = total_rounds
+        else:
+            report['status'] = 'hybrid_unavailable'
+
+        round_schedule = build_hybrid_provider_round_schedule(
+            total_rounds=total_rounds,
+            local_rounds=local_round_target,
+            remote_rounds=remote_round_target,
+        )
+        report['hybrid_round_targets'] = {
+            local_provider: local_round_target,
+            remote_provider: remote_round_target,
+        }
+        report['hybrid_round_schedule'] = list(round_schedule)
+
+        if report['status'] != 'hybrid_unavailable':
+            report['status'] = 'running' if round_schedule else 'hybrid_unavailable'
+
+        if report['status'] == 'running':
+            used_counts_by_provider: dict[str, dict[str, int]] = {}
+            used_counts_flat: dict[str, int] = {}
+            provider_round_offsets: dict[str, int] = {
+                local_provider: 0,
+                remote_provider: 0,
+            }
+            model_rng_seed = (int(getattr(args, 'ab_seed', 0)) * 1000003) + int(run_index)
+            model_rng = random.Random(model_rng_seed)
+            for round_idx, provider_name in enumerate(round_schedule):
+                attempted_rounds += 1
+                elapsed_ms = int((time.monotonic() - stage_started) * 1000)
+                if elapsed_ms >= max(1000, int(args.llm_stage_timeout_ms)):
+                    report['status'] = 'stage_timeout'
+                    timeout_rounds += 1
+                    break
+                if args.llm_max_usd_per_run > 0:
+                    projected = total_cost + max(last_call_cost, 0.0)
+                    if projected > float(args.llm_max_usd_per_run):
+                        report['status'] = 'budget_stop'
+                        break
+
+                context = provider_contexts.get(provider_name)
+                if context is None:
+                    report['errors'].append(f'round={round_idx + 1}:{provider_name}:provider_unavailable')
+                    empty_rounds += 1
+                    continue
+
+                provider_models = [str(item) for item in context.get('models', []) if str(item)]
+                provider_round_idx = int(provider_round_offsets.get(provider_name, 0))
+                selected_model = select_round_model(
+                    models=provider_models,
+                    round_idx=provider_round_idx,
+                    selection=str(getattr(args, 'llm_model_selection', 'round_robin')),
+                    rng=model_rng,
+                )
+                provider_round_offsets[provider_name] = provider_round_idx + 1
+                if not selected_model:
+                    report['errors'].append(f'round={round_idx + 1}:{provider_name}:model_not_configured')
+                    empty_rounds += 1
+                    continue
+
+                provider_used = used_counts_by_provider.setdefault(provider_name, {})
+                provider_used[selected_model] = int(provider_used.get(selected_model, 0)) + 1
+                flat_key = f'{provider_name}:{selected_model}'
+                used_counts_flat[flat_key] = int(used_counts_flat.get(flat_key, 0)) + 1
+
+                prompt, mode = nide.build_prompt(
+                    scope=scope,
+                    round_index=((run_index - 1) * max(1, int(args.llm_rounds))) + round_idx,
+                    target_count=max(1, int(args.llm_candidates_per_round)),
+                    constraints=constraints,
+                    context_packet=context_packet,
+                    prompt_template=prompt_template,
+                )
+                mode_key = ':'.join(mode)
+                cache_key_blob = json.dumps(
+                    {
+                        'provider': provider_name,
+                        'base_url': str(context.get('base_url', '') or ''),
+                        'model': selected_model,
+                        'prompt': prompt,
+                        'schema_version': 'llm_candidates_v1',
+                        'constraints_hash': nide.constraints_hash(constraints),
+                        'mode_key': mode_key,
+                    },
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+                cache_key = nide.constraints_hash({'blob': cache_key_blob})
+
+                round_names: list[str] = []
+                cached = None
+                if args.llm_cache_dir:
+                    cached = load_cached_candidates(
+                        cache_dir=cache_dir,
+                        cache_key=cache_key,
+                        ttl_days=max(0, int(args.llm_cache_ttl_days)),
+                    )
+                if cached is not None:
+                    round_names = cached
+                    if round_names:
+                        successful_rounds += 1
+                    else:
+                        empty_rounds += 1
+                        report['errors'].append(f'round={round_idx + 1}:{provider_name}:cache_empty')
+                    report['cache_hits'] = int(report['cache_hits']) + 1
+                    append_log(
+                        f'round={round_idx + 1} provider={provider_name} mode={mode_key} model={selected_model} '
+                        f'source=cache names={len(round_names)}'
+                    )
+                else:
+                    retries = max(0, int(args.llm_max_retries))
+                    usage: dict[str, Any] = {}
+                    err = 'unknown'
+                    call_provider_fn = context['call_provider']
+                    for attempt in range(retries + 1):
+                        call_names, usage, err = call_provider_fn(prompt, selected_model)
+                        if call_names:
+                            round_names = call_names
+                            successful_rounds += 1
+                            call_cost = nide.estimate_usage_cost_usd(
+                                usage=usage,
+                                in_price_per_1k=max(0.0, float(args.llm_pricing_input_per_1k)),
+                                out_price_per_1k=max(0.0, float(args.llm_pricing_output_per_1k)),
+                            )
+                            total_cost += call_cost
+                            last_call_cost = call_cost
+                            append_log(
+                                f'round={round_idx + 1} provider={provider_name} mode={mode_key} model={selected_model} '
+                                f'source={context.get("source_label", provider_name)} names={len(round_names)} usage={usage} '
+                                f'cost_usd={call_cost:.6f}'
+                            )
+                            if args.llm_cache_dir and round_names:
+                                store_cached_candidates(
+                                    cache_dir=cache_dir,
+                                    cache_key=cache_key,
+                                    candidates=round_names,
+                                    meta={'usage': usage, 'mode': mode, 'provider': provider_name},
+                                )
+                            break
+                        retriable = err in {'timeout', 'network_error', 'http_429', 'http_500', 'http_502', 'http_503'}
+                        if retriable and attempt < retries:
+                            report['retries'] = int(report['retries']) + 1
+                            sleep_s = (0.35 * (attempt + 1)) + random.uniform(0.0, 0.25)
+                            append_log(
+                                f'round={round_idx + 1} provider={provider_name} model={selected_model} '
+                                f'retry={attempt + 1} err={err} sleep_s={sleep_s:.2f}'
+                            )
+                            time.sleep(sleep_s)
+                            continue
+                        if err == 'timeout':
+                            timeout_rounds += 1
+                        else:
+                            empty_rounds += 1
+                        report['errors'].append(f'round={round_idx + 1}:{provider_name}:{err}')
+                        append_log(
+                            f'round={round_idx + 1} provider={provider_name} model={selected_model} err={err}'
+                        )
+                        break
+
+                for name in round_names:
+                    normalized = nide.normalize_alpha_name(name)
+                    if not nide.is_valid_candidate_name(normalized):
+                        continue
+                    if normalized in names_seen:
+                        continue
+                    names_seen.add(normalized)
+                    names.append(normalized)
+                if len(names) >= target_total:
+                    break
+
+            report['models_used'] = used_counts_flat
+            report['models_used_by_provider'] = {
+                provider: counts for provider, counts in used_counts_by_provider.items() if counts
+            }
+            report['hybrid_rounds_executed_by_provider'] = {
+                provider: int(provider_round_offsets.get(provider, 0))
+                for provider in [local_provider, remote_provider]
+            }
+            if report['status'] == 'running':
+                if names:
+                    report['status'] = 'ok'
+                elif report['errors']:
+                    report['status'] = 'empty_with_errors'
+                else:
+                    report['status'] = 'empty'
     else:
         report['status'] = 'unsupported_provider'
         report['errors'].append(f'provider={args.llm_provider}')
@@ -1257,9 +1641,14 @@ def run_active_llm_ideation(
             'provider': args.llm_provider,
             'model': report.get('model', ''),
             'models_requested': report.get('models_requested', []),
+            'models_requested_by_provider': report.get('models_requested_by_provider', {}),
             'models_used': report.get('models_used', {}),
+            'models_used_by_provider': report.get('models_used_by_provider', {}),
             'model_selection': report.get('model_selection', ''),
             'model_source': report.get('model_source', ''),
+            'model_source_by_provider': report.get('model_source_by_provider', {}),
+            'hybrid_round_targets': report.get('hybrid_round_targets', {}),
+            'hybrid_round_schedule': report.get('hybrid_round_schedule', []),
             'prompt_template_path': report.get('prompt_template_path', ''),
             'run_id': run_id,
             'constraints_path': str(constraints_path),
@@ -1591,7 +1980,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--no-llm-ideation-enabled', dest='llm_ideation_enabled', action='store_false')
     parser.add_argument(
         '--llm-provider',
-        choices=['openrouter_http', 'openai_compat', 'pal', 'fixture'],
+        choices=['openrouter_http', 'openai_compat', 'hybrid', 'pal', 'fixture'],
         default='openrouter_http',
         help='LLM provider mode for ideation stage.',
     )
@@ -1630,6 +2019,43 @@ def parse_args() -> argparse.Namespace:
         '--llm-openai-base-url',
         default=os.environ.get('OPENAI_COMPAT_BASE_URL', 'http://localhost:11434/v1'),
         help='Base URL for openai_compat mode (for example http://localhost:11434/v1).',
+    )
+    parser.add_argument(
+        '--llm-openai-ttl-s',
+        type=int,
+        default=0,
+        help='Optional request TTL seconds for openai_compat runtimes that support model residency (for example LM Studio).',
+    )
+    parser.add_argument(
+        '--llm-openai-keep-alive',
+        default='',
+        help='Optional keep_alive value for openai_compat runtimes that accept it (for example Ollama native adapters).',
+    )
+    parser.add_argument(
+        '--llm-hybrid-local-share',
+        type=float,
+        default=float(os.environ.get('LLM_HYBRID_LOCAL_SHARE', '0.75')),
+        help='Local share for hybrid provider rounds (0-1); remainder uses openrouter_http.',
+    )
+    parser.add_argument(
+        '--llm-hybrid-local-model',
+        default=os.environ.get('LLM_HYBRID_LOCAL_MODEL', ''),
+        help='Single-model fallback for hybrid local provider (openai_compat).',
+    )
+    parser.add_argument(
+        '--llm-hybrid-local-models',
+        default=os.environ.get('LLM_HYBRID_LOCAL_MODELS', ''),
+        help='Comma-separated models for hybrid local provider (openai_compat).',
+    )
+    parser.add_argument(
+        '--llm-hybrid-remote-model',
+        default=os.environ.get('LLM_HYBRID_REMOTE_MODEL', ''),
+        help='Single-model fallback for hybrid remote provider (openrouter_http).',
+    )
+    parser.add_argument(
+        '--llm-hybrid-remote-models',
+        default=os.environ.get('LLM_HYBRID_REMOTE_MODELS', ''),
+        help='Comma-separated models for hybrid remote provider (openrouter_http).',
     )
     parser.add_argument(
         '--llm-openrouter-http-referer',
@@ -1884,9 +2310,12 @@ def main() -> int:
         f'reset_db={args.reset_db} '
         f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} '
         f'llm_model={args.llm_model} llm_models={args.llm_models} '
+        f'llm_hybrid_local_share={float(args.llm_hybrid_local_share):.2f} '
+        f'llm_hybrid_local_model={args.llm_hybrid_local_model} llm_hybrid_local_models={args.llm_hybrid_local_models} '
+        f'llm_hybrid_remote_model={args.llm_hybrid_remote_model} llm_hybrid_remote_models={args.llm_hybrid_remote_models} '
         f'llm_model_config={args.llm_model_config} llm_model_selection={args.llm_model_selection} '
         f'llm_prompt_template_file={args.llm_prompt_template_file} '
-        f'llm_base_url={nide.normalize_openai_compat_base_url(args.llm_openai_base_url) if args.llm_provider == "openai_compat" else ""} '
+        f'llm_base_url={nide.normalize_openai_compat_base_url(args.llm_openai_base_url) if args.llm_provider in {"openai_compat", "hybrid"} else ""} '
         f'llm_slo_min_success_rate={float(args.llm_slo_min_success_rate):.2f} '
         f'llm_slo_max_timeout_rate={float(args.llm_slo_max_timeout_rate):.2f} '
         f'llm_slo_max_empty_rate={float(args.llm_slo_max_empty_rate):.2f} '
@@ -1989,7 +2418,7 @@ def main() -> int:
         '--db',
         str(db_path_worker),
         '--inputs',
-        str(root / 'docs' / 'branding' / 'source_inputs_v2.csv'),
+        str(bpaths.SOURCE_INPUTS_V2),
         '--source-label',
         'curated_lexicon_v2',
         '--scope',

@@ -22,6 +22,8 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
+import path_config as bpaths
+
 
 DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5000
 
@@ -1051,7 +1053,7 @@ def assert_run_contract(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='SQLite candidate lake for naming pipeline.')
-    parser.add_argument('--db', default='docs/branding/naming_pipeline.db', help='SQLite DB path.')
+    parser.add_argument('--db', default=str(bpaths.NAMING_PIPELINE_DB), help='SQLite DB path.')
     sub = parser.add_subparsers(dest='command', required=True)
 
     sub.add_parser('init', help='Initialize DB schema.')

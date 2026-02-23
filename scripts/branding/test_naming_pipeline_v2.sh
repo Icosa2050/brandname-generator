@@ -32,10 +32,10 @@ if [[ "$MODE" == "smoke" || "$MODE" == "kill-switch" ]]; then
     --no-progress
   )
 else
-  DB_PATH="$ROOT_DIR/docs/branding/naming_pipeline_v1.db"
-  CSV_OUT="$ROOT_DIR/docs/branding/candidate_batch_v2.csv"
-  JSON_OUT="$ROOT_DIR/docs/branding/candidate_batch_v2.json"
-  RUN_LOG="$ROOT_DIR/docs/branding/name_generator_runs.jsonl"
+  DB_PATH="$ROOT_DIR/test_outputs/branding/naming_pipeline_v1.db"
+  CSV_OUT="$ROOT_DIR/test_outputs/branding/candidate_batch_v2.csv"
+  JSON_OUT="$ROOT_DIR/test_outputs/branding/candidate_batch_v2.json"
+  RUN_LOG="$ROOT_DIR/test_outputs/branding/name_generator_runs.jsonl"
   CHECK_LIMIT=120
   EXTRA_FLAGS=()
 fi
@@ -85,7 +85,7 @@ fi
 echo "[5/8] Ingesting curated source atoms..."
 python3 "$ROOT_DIR/scripts/branding/name_input_ingest.py" \
   --db "$DB_PATH" \
-  --inputs "$ROOT_DIR/docs/branding/source_inputs_v2.csv" \
+  --inputs "$ROOT_DIR/resources/branding/inputs/source_inputs_v2.csv" \
   --source-label=curated_lexicon_v2 \
   --scope=global \
   --gate=balanced \
@@ -103,7 +103,7 @@ python3 "$ROOT_DIR/scripts/branding/name_generator.py" \
   --source-pool-db="$DB_PATH" \
   --source-pool-limit=600 \
   --source-min-confidence=0.58 \
-  --false-friend-lexicon="$ROOT_DIR/docs/branding/naming_false_friend_lexicon_v1.md" \
+  --false-friend-lexicon="$ROOT_DIR/resources/branding/lexicon/naming_false_friend_lexicon_v1.md" \
   --false-friend-fail-threshold=28 \
   --gibberish-fail-threshold=35 \
   --pool-size=500 \

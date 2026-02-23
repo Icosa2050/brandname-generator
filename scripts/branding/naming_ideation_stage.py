@@ -758,6 +758,7 @@ def call_openai_compat_candidates(
     prompt: str,
     timeout_ms: int,
     strict_json: bool,
+    request_extras: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, Any], str]:
     schema = {
         'name': 'name_candidates',
@@ -779,11 +780,21 @@ def call_openai_compat_candidates(
             'additionalProperties': False,
         },
     }
-    base_body = {
+    extra_payload: dict[str, Any] = {}
+    if isinstance(request_extras, dict):
+        for raw_key, raw_value in request_extras.items():
+            key = str(raw_key or '').strip()
+            if not key or key in {'model', 'messages'}:
+                continue
+            extra_payload[key] = raw_value
+
+    base_body: dict[str, Any] = {
         'model': model,
         'messages': [{'role': 'user', 'content': prompt}],
         'temperature': 0.8,
     }
+    if extra_payload:
+        base_body.update(extra_payload)
     attempts: list[dict[str, Any]] = [
         {
             **base_body,

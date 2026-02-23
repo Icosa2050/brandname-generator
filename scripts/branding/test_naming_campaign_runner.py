@@ -118,6 +118,14 @@ class NamingCampaignRunnerShardSchedulingTest(unittest.TestCase):
         self.assertEqual(assignments[0], combos[0::2])
         self.assertEqual(assignments[1], combos[1::2])
 
+    def test_build_hybrid_provider_round_schedule_respects_targets(self) -> None:
+        schedule = ncr.build_hybrid_provider_round_schedule(
+            total_rounds=4,
+            local_rounds=3,
+            remote_rounds=1,
+        )
+        self.assertEqual(schedule, ['openai_compat', 'openrouter_http', 'openai_compat', 'openai_compat'])
+
     def test_extract_generator_history_skip_reads_stage_event(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'generator.log'
@@ -218,22 +226,47 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             'http://localhost:11434/v1',
             '--llm-openai-api-key-env',
             'LOCAL_LLM_KEY',
+            '--llm-openai-ttl-s',
+            '1800',
+            '--llm-openai-keep-alive',
+            '30m',
         ]
         with mock.patch.object(sys, 'argv', argv):
             args = ncr.parse_args()
         self.assertEqual(args.llm_provider, 'openai_compat')
         self.assertEqual(args.llm_openai_base_url, 'http://localhost:11434/v1')
         self.assertEqual(args.llm_openai_api_key_env, 'LOCAL_LLM_KEY')
+        self.assertEqual(args.llm_openai_ttl_s, 1800)
+        self.assertEqual(args.llm_openai_keep_alive, '30m')
+
+    def test_parse_args_accepts_hybrid_provider_flags(self) -> None:
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-provider',
+            'hybrid',
+            '--llm-hybrid-local-share',
+            '0.8',
+            '--llm-hybrid-local-models',
+            'qwen3-vl-30b-a3b-instruct-mlx',
+            '--llm-hybrid-remote-models',
+            'mistralai/mistral-small-creative',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        self.assertEqual(args.llm_provider, 'hybrid')
+        self.assertAlmostEqual(args.llm_hybrid_local_share, 0.8, places=6)
+        self.assertEqual(args.llm_hybrid_local_models, 'qwen3-vl-30b-a3b-instruct-mlx')
+        self.assertEqual(args.llm_hybrid_remote_models, 'mistralai/mistral-small-creative')
 
     def test_parse_args_accepts_prompt_template_file(self) -> None:
         argv = [
             'naming_campaign_runner.py',
             '--llm-prompt-template-file',
-            'docs/branding/llm_prompt.utility_split_v1.txt',
+            'resources/branding/llm/llm_prompt.utility_split_v1.txt',
         ]
         with mock.patch.object(sys, 'argv', argv):
             args = ncr.parse_args()
-        self.assertEqual(args.llm_prompt_template_file, 'docs/branding/llm_prompt.utility_split_v1.txt')
+        self.assertEqual(args.llm_prompt_template_file, 'resources/branding/llm/llm_prompt.utility_split_v1.txt')
 
     def test_load_llm_model_config_parses_json_provider_map(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -338,6 +371,10 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             'qwen2.5:14b',
             '--llm-openai-base-url',
             'http://localhost:11434/v1',
+            '--llm-openai-ttl-s',
+            '3600',
+            '--llm-openai-keep-alive',
+            '20m',
             '--llm-rounds',
             '1',
             '--llm-candidates-per-round',
@@ -369,6 +406,9 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             payload = json.loads(artifact_path.read_text(encoding='utf-8'))
             got = sorted(item.get('name') for item in payload.get('candidates', []))
             self.assertEqual(got, ['tenantia', 'verodomo'])
+            mock_call_openai.assert_called_once()
+            kwargs = mock_call_openai.call_args.kwargs
+            self.assertEqual(kwargs.get('request_extras'), {'ttl': 3600, 'keep_alive': '20m'})
 
     @mock.patch('naming_campaign_runner.nide.call_openrouter_candidates')
     @mock.patch('naming_campaign_runner.nide.list_openrouter_models')
@@ -441,6 +481,89 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             self.assertEqual(got, ['tenantia', 'verodomo'])
             called_models = [call.kwargs.get('model') for call in mock_call_openrouter.call_args_list]
             self.assertEqual(called_models, [model_a, model_b])
+
+    @mock.patch('naming_campaign_runner.nide.call_openrouter_candidates')
+    @mock.patch('naming_campaign_runner.nide.list_openrouter_models')
+    @mock.patch('naming_campaign_runner.nide.call_openai_compat_candidates')
+    @mock.patch('naming_campaign_runner.nide.list_openai_models')
+    def test_run_active_llm_ideation_hybrid_uses_both_providers(
+        self,
+        mock_list_openai_models: mock.Mock,
+        mock_call_openai: mock.Mock,
+        mock_list_openrouter_models: mock.Mock,
+        mock_call_openrouter: mock.Mock,
+    ) -> None:
+        local_model = 'qwen3-vl-30b-a3b-instruct-mlx'
+        remote_model = 'mistralai/mistral-small-creative'
+        mock_list_openai_models.return_value = {local_model}
+        mock_list_openrouter_models.return_value = {remote_model}
+        mock_call_openai.return_value = (['verodomo'], {'cost': 0.001}, '')
+        mock_call_openrouter.return_value = (['tenantia'], {'cost': 0.002}, '')
+
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-ideation-enabled',
+            '--llm-provider',
+            'hybrid',
+            '--llm-hybrid-local-model',
+            local_model,
+            '--llm-hybrid-remote-model',
+            remote_model,
+            '--llm-hybrid-local-share',
+            '0.50',
+            '--llm-rounds',
+            '2',
+            '--llm-candidates-per-round',
+            '1',
+            '--llm-api-key-env',
+            'OPENROUTER_API_KEY',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs_dir = root / 'runs'
+            logs_dir = root / 'logs'
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            with mock.patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'}, clear=False):
+                artifact_path, report = ncr.run_active_llm_ideation(
+                    args=args,
+                    runs_dir=runs_dir,
+                    logs_dir=logs_dir,
+                    run_id='run_003_hybrid_test',
+                    run_index=3,
+                    scope='global',
+                    seen_shortlist=set(),
+                    context_packet={},
+                )
+
+            self.assertEqual(report.get('status'), 'ok')
+            self.assertEqual(report.get('candidate_count'), 2)
+            self.assertEqual(
+                report.get('models_used_by_provider'),
+                {
+                    'openai_compat': {local_model: 1},
+                    'openrouter_http': {remote_model: 1},
+                },
+            )
+            self.assertIsNotNone(artifact_path)
+            assert artifact_path is not None
+            payload = json.loads(artifact_path.read_text(encoding='utf-8'))
+            got = sorted(item.get('name') for item in payload.get('candidates', []))
+            self.assertEqual(got, ['tenantia', 'verodomo'])
+            metadata = payload.get('metadata', {})
+            self.assertEqual(metadata.get('provider'), 'hybrid')
+            self.assertEqual(
+                metadata.get('models_used_by_provider'),
+                {
+                    'openai_compat': {local_model: 1},
+                    'openrouter_http': {remote_model: 1},
+                },
+            )
+            mock_call_openai.assert_called_once()
+            mock_call_openrouter.assert_called_once()
 
 
 if __name__ == '__main__':

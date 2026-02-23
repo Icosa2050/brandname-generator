@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import naming_db as ndb
+import path_config as bpaths
 
 DEFAULT_TEMPLATE_ID = 'brand_surface_v1'
 DEFAULT_TEMPLATE_REVISION = 'v1.0.0'
@@ -518,7 +519,7 @@ def export_source_atoms_json(path: Path, candidates: list[IdeationCandidate]) ->
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Ingest LLM-generated candidate names into naming DB.')
-    parser.add_argument('--db', default='docs/branding/naming_pipeline.db', help='SQLite DB path.')
+    parser.add_argument('--db', default=str(bpaths.NAMING_PIPELINE_DB), help='SQLite DB path.')
     parser.add_argument('--names', default='', help='Comma-separated candidate names.')
     parser.add_argument('--input', default='', help='Optional input file (.txt or .json).')
     parser.add_argument('--scope', choices=['dach', 'eu', 'global'], default='global')

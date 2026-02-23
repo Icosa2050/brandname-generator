@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import naming_db as ndb
+import path_config as bpaths
 
 
 @dataclass
@@ -497,7 +498,7 @@ def dedupe_records(records: list[SourceRecord]) -> list[SourceRecord]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Ingest curated source atoms into naming DB.')
-    parser.add_argument('--db', default='docs/branding/naming_pipeline.db', help='SQLite DB path.')
+    parser.add_argument('--db', default=str(bpaths.NAMING_PIPELINE_DB), help='SQLite DB path.')
     parser.add_argument('--inputs', nargs='+', required=True, help='Input files (.csv/.json/.txt).')
     parser.add_argument('--source-label', default='curated_v2', help='Default source label.')
     parser.add_argument('--default-language', default='', help='Fallback language hint when missing.')

@@ -28,6 +28,11 @@ last_validated: 2026-02-17
 
 It is a **screening** tool, not legal advice. Final legal clearance still requires professional trademark review.
 
+## Path Conventions
+- Static inputs/examples: `resources/branding/...`
+- Mutable outputs and SQLite working DBs: `test_outputs/branding/...`
+- Historical snapshots moved out of docs: `artifacts/branding/legacy/2026-02/...`
+
 ## Quick Start
 
 ### Worktree Path Rule
@@ -51,7 +56,7 @@ python3 scripts/branding/name_generator.py \
   --seeds="kostula,utilaro,saldaro,ledger" \
   --pool-size=280 \
   --check-limit=70 \
-  --json-output=docs/branding/generated_name_candidates_dach_strict.json
+  --json-output=test_outputs/branding/generated_name_candidates_dach_strict.json
 ```
 
 ### 2) Broader EU run
@@ -82,8 +87,8 @@ python3 scripts/branding/name_generator.py \
   --gate=strict \
   --candidates="utilaro,saldaro,saldio,immosaldo,nebensaldo,objektsaldo" \
   --only-candidates \
-  --output=docs/branding/shortlist_screening.csv \
-  --json-output=docs/branding/shortlist_screening.json
+  --output=test_outputs/branding/shortlist_screening.csv \
+  --json-output=test_outputs/branding/shortlist_screening.json
 ```
 
 ### 5) Long-run exploration (50 candidates, network-degraded tolerant)
@@ -97,29 +102,29 @@ python3 scripts/branding/name_generator.py \
   --pool-size=420 \
   --check-limit=50 \
   --store-countries=de,ch,us \
-  --output=docs/branding/generated_name_candidates_global_balanced_degraded.csv \
-  --json-output=docs/branding/generated_name_candidates_global_balanced_degraded.json \
-  --run-log=docs/branding/name_generator_runs.jsonl
+  --output=test_outputs/branding/generated_name_candidates_global_balanced_degraded.csv \
+  --json-output=test_outputs/branding/generated_name_candidates_global_balanced_degraded.json \
+  --run-log=test_outputs/branding/name_generator_runs.jsonl
 ```
 
 ### 6) Initialize candidate lake DB
 ```zsh
-python3 scripts/branding/naming_db.py --db docs/branding/naming_pipeline.db init
+python3 scripts/branding/naming_db.py --db test_outputs/branding/naming_pipeline.db init
 ```
 
 ### 7) Import historical artifacts into candidate lake
 ```zsh
 python3 scripts/branding/naming_db.py \
-  --db docs/branding/naming_pipeline.db \
+  --db test_outputs/branding/naming_pipeline.db \
   import \
-  --inputs "docs/branding/generated_name_candidates_*.csv" "docs/branding/generated_name_candidates_*.json" \
+  --inputs "test_outputs/branding/generated_name_candidates_*.csv" "test_outputs/branding/generated_name_candidates_*.json" \
   --source-type=import
 ```
 
 ### 8) Ingest AI-generated batches with provenance
 ```zsh
 python3 scripts/branding/name_ideation_ingest.py \
-  --db docs/branding/naming_pipeline.db \
+  --db test_outputs/branding/naming_pipeline.db \
   --names="Amaniro,Imarvia,Nuruvia" \
   --scope=global \
   --gate=balanced \
@@ -132,7 +137,7 @@ python3 scripts/branding/name_ideation_ingest.py \
 ### 9) Run async validator orchestration on candidate lake
 ```zsh
 python3 scripts/branding/naming_validate_async.py \
-  --db docs/branding/naming_pipeline.db \
+  --db test_outputs/branding/naming_pipeline.db \
   --state-filter="new" \
   --checks="adversarial,psych,descriptive,domain,web,app_store,package,social" \
   --candidate-limit=200 \
@@ -143,8 +148,8 @@ python3 scripts/branding/naming_validate_async.py \
 ### 10) Ingest curated source atoms for generator v2
 ```zsh
 python3 scripts/branding/name_input_ingest.py \
-  --db docs/branding/naming_pipeline_v1.db \
-  --inputs docs/branding/source_inputs_v2.csv \
+  --db test_outputs/branding/naming_pipeline_v1.db \
+  --inputs resources/branding/inputs/source_inputs_v2.csv \
   --source-label=curated_lexicon_v2 \
   --scope=global \
   --gate=balanced \
@@ -159,16 +164,16 @@ python3 scripts/branding/name_generator.py \
   --variation-profile=expanded \
   --generator-families=source_pool,blend,seed,suggestive,coined \
   --family-quotas=source_pool:260,blend:220,seed:120,suggestive:90,coined:90 \
-  --source-pool-db=docs/branding/naming_pipeline_v1.db \
+  --source-pool-db=test_outputs/branding/naming_pipeline_v1.db \
   --source-pool-limit=600 \
   --source-min-confidence=0.58 \
-  --false-friend-lexicon=docs/branding/naming_false_friend_lexicon_v1.md \
+  --false-friend-lexicon=resources/branding/lexicon/naming_false_friend_lexicon_v1.md \
   --degraded-network-mode \
   --pool-size=500 \
   --check-limit=120 \
-  --output=docs/branding/candidate_batch_v2.csv \
-  --json-output=docs/branding/candidate_batch_v2.json \
-  --persist-db --db=docs/branding/naming_pipeline_v1.db
+  --output=test_outputs/branding/candidate_batch_v2.csv \
+  --json-output=test_outputs/branding/candidate_batch_v2.json \
+  --persist-db --db=test_outputs/branding/naming_pipeline_v1.db
 ```
 
 ### 12) One-command test runner (smoke/full)
@@ -176,7 +181,7 @@ python3 scripts/branding/name_generator.py \
 # fast smoke run (writes to /tmp)
 zsh scripts/branding/test_naming_pipeline_v2.sh smoke
 
-# full run (writes canonical docs/branding outputs)
+# full run (writes canonical test_outputs/branding outputs)
 zsh scripts/branding/test_naming_pipeline_v2.sh full
 
 # optional black format check (ruff runs by default)
@@ -195,7 +200,7 @@ python3 scripts/branding/naming_campaign_runner.py \
   --llm-model="mistralai/mistral-small-creative" \
   --llm-openrouter-http-referer="https://github.com/Icosa2050/kostula" \
   --llm-openrouter-x-title="Kostula Naming Pipeline" \
-  --llm-context-file=docs/branding/llm_context.example.json \
+  --llm-context-file=resources/branding/llm/llm_context.example.json \
   --llm-rounds=2 \
   --llm-candidates-per-round=20 \
   --llm-max-call-latency-ms=8000 \
@@ -223,10 +228,16 @@ Notes:
 - Set `OPENROUTER_API_KEY` for `openrouter_http` mode.
 - Optional attribution headers: `--llm-openrouter-http-referer` and `--llm-openrouter-x-title`
   (or env vars `OPENROUTER_HTTP_REFERER`, `OPENROUTER_X_TITLE`).
+- Local OpenAI-compatible runtimes can use residency hints:
+  `--llm-openai-ttl-s=<seconds>` (LM Studio) and `--llm-openai-keep-alive=<value>`
+  (runtimes that accept keep-alive fields).
+- Hybrid mode combines local + remote ideation in one run:
+  `--llm-provider=hybrid --llm-hybrid-local-models=<local> --llm-hybrid-remote-models=<remote>`
+  with `--llm-hybrid-local-share=<0..1>` controlling round split.
 - `--llm-provider=fixture --llm-fixture-input=<file>` is useful for offline smoke tests.
 - Fixture mode can now consume OpenRouter-style response envelopes (`choices[].message.content`) to mirror live parser behavior.
 - `--llm-context-file=<json>` injects product/user/tone guidance into the LLM prompt.
-- Example context packet: `docs/branding/llm_context.example.json`.
+- Example context packet: `resources/branding/llm/llm_context.example.json`.
 - `llm_cost_usd` now prefers provider-reported `usage.cost` when available; token-price flags remain fallback estimation.
 - Ideation SLO thresholds are configurable via `--llm-slo-min-success-rate`, `--llm-slo-max-timeout-rate`,
   `--llm-slo-max-empty-rate`, and `--llm-slo-min-samples`; breach metadata is emitted in progress rows.
@@ -260,6 +271,68 @@ Notes:
   `lock_acquisitions`, `lock_total_wait_ms`, `lock_max_wait_ms`, `lock_contended_count`.
 - A/B mode writes `ab_report.json` and `ab_report.md` in campaign output root.
 
+### 13b) Local runtime warm-cache probe (LM Studio / Ollama)
+```zsh
+# one-command LM Studio local smoke (probe + one campaign run)
+zsh scripts/branding/test_lmstudio_local_smoke.sh
+
+# one-command Ollama local smoke (probe + one campaign run)
+zsh scripts/branding/test_ollama_local_smoke.sh --model gemma3:12b --keep-alive 30m
+
+# one-command benchmark across 3 local lanes (lmstudio fast + ollama + lmstudio quality)
+zsh scripts/branding/benchmark_local_llm_profiles.sh
+
+# LM Studio (OpenAI-compatible endpoint, keep model resident for 1 hour)
+python3 scripts/branding/test_local_llm_warm_cache.py \
+  --provider=openai_compat \
+  --base-url=http://localhost:1234/v1 \
+  --model=llama-3.3-8b-instruct-omniwriter \
+  --ttl-s=3600 \
+  --runs=5 \
+  --gap-s=1.0 \
+  --eviction-gap-s=70 \
+  --output-json=/tmp/lmstudio_warm_probe.json
+
+# Ollama native API (pin model in memory for 30 minutes)
+python3 scripts/branding/test_local_llm_warm_cache.py \
+  --provider=ollama_native \
+  --base-url=http://localhost:11434 \
+  --model=qwen2.5:14b \
+  --keep-alive=30m \
+  --runs=5 \
+  --gap-s=1.0 \
+  --eviction-gap-s=70 \
+  --output-json=/tmp/ollama_warm_probe.json
+```
+
+Interpretation:
+- `cold_ms`: first request latency (usually includes load time).
+- `warm_median_ms`: steady-state latency once model is resident.
+- `post_idle_ms`: latency after idle gap; if this jumps, model likely evicted.
+
+### 13c) Hybrid local + OpenRouter ideation
+```zsh
+python3 scripts/branding/naming_campaign_runner.py \
+  --hours=1 \
+  --max-runs=2 \
+  --sleep-s=0 \
+  --llm-ideation-enabled \
+  --llm-provider=hybrid \
+  --llm-hybrid-local-models=llama-3.3-8b-instruct-omniwriter \
+  --llm-hybrid-remote-models=mistralai/mistral-small-creative \
+  --llm-hybrid-local-share=0.75 \
+  --llm-openai-base-url=http://127.0.0.1:1234/v1 \
+  --llm-openai-ttl-s=3600
+```
+
+Notes:
+- Local provider is `openai_compat`; remote provider is `openrouter_http`.
+- Remote side still needs `OPENROUTER_API_KEY`.
+- Quality-first local mode (slower) can switch to `qwen3-vl-30b-a3b-instruct-mlx`.
+- Shortcut wrappers:
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh`
+  - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
+
 ### 14) Benchmark validator parallelism
 ```zsh
 # quick benchmark (CI-friendly)
@@ -284,7 +357,7 @@ python3 scripts/branding/benchmark_validation.py \
 
 ## Output
 The script writes a CSV to:
-- default: `docs/branding/generated_name_candidates_<scope>_<timestamp>.csv`
+- default: `test_outputs/branding/generated_name_candidates_<scope>_<timestamp>.csv`
 - or your custom `--output` path.
 
 Key columns:
@@ -361,7 +434,7 @@ Important flags:
 4. Use generated trademark URLs for manual registry pre-screen (DPMA, IGE/Swissreg, EUIPO/TMview, Zefix).
 5. Merge top candidates into the naming framework shortlist.
 6. Run 5-second user trust/comprehension test before final choice.
-7. Track every run in `docs/branding/name_generator_runs.jsonl` to monitor drift and avoid repeating dead-end candidate clusters.
+7. Track every run in `test_outputs/branding/name_generator_runs.jsonl` to monitor drift and avoid repeating dead-end candidate clusters.
 
 ## Notes
 - The built-in protected list is heuristic and intentionally conservative.

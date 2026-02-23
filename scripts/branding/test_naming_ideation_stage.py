@@ -235,6 +235,38 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertEqual(headers.get('authorization'), 'Bearer ollama')
 
     @mock.patch('naming_ideation_stage.request.urlopen')
+    def test_call_openai_compat_candidates_includes_request_extras(self, mock_urlopen: mock.Mock) -> None:
+        captured_body: dict[str, object] = {}
+
+        def _fake_urlopen(req: object, timeout: float) -> _FakeHTTPResponse:
+            del timeout
+            data = getattr(req, 'data', b'') if hasattr(req, 'data') else b''
+            if isinstance(data, (bytes, bytearray)):
+                captured_body.update(json.loads(bytes(data).decode('utf-8')))
+            payload = json.dumps(
+                {
+                    'choices': [{'message': {'content': '{"candidates":[{"name":"verodomo"}]}'}}],
+                    'usage': {'prompt_tokens': 10, 'completion_tokens': 5},
+                }
+            )
+            return _FakeHTTPResponse(payload)
+
+        mock_urlopen.side_effect = _fake_urlopen
+        names, _usage, err = nide.call_openai_compat_candidates(
+            api_key='ollama',
+            base_url='http://localhost:11434/v1',
+            model='qwen2.5:14b',
+            prompt='hello',
+            timeout_ms=500,
+            strict_json=True,
+            request_extras={'ttl': 1800, 'keep_alive': '20m'},
+        )
+        self.assertEqual(err, '')
+        self.assertEqual(names, ['verodomo'])
+        self.assertEqual(captured_body.get('ttl'), 1800)
+        self.assertEqual(captured_body.get('keep_alive'), '20m')
+
+    @mock.patch('naming_ideation_stage.request.urlopen')
     def test_list_openai_models_reads_ids(self, mock_urlopen: mock.Mock) -> None:
         mock_urlopen.return_value = _FakeHTTPResponse(
             json.dumps({'data': [{'id': 'qwen2.5:14b'}, {'id': 'gemma3:12b'}]})

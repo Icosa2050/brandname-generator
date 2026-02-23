@@ -191,7 +191,7 @@ CMD=(
   --llm-model "$MODEL"
   --llm-openrouter-http-referer "$HTTP_REFERER"
   --llm-openrouter-x-title "$X_TITLE"
-  --llm-context-file "$ROOT_DIR/docs/branding/llm_context.example.json"
+  --llm-context-file "$ROOT_DIR/resources/branding/llm/llm_context.example.json"
   --llm-rounds "$LLM_ROUNDS"
   --llm-candidates-per-round "$LLM_CANDIDATES_PER_ROUND"
   --shard-id "$LANE"
