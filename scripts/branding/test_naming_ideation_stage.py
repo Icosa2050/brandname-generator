@@ -29,6 +29,13 @@ class _FakeHTTPResponse:
 
 
 class NamingIdeationStageTest(unittest.TestCase):
+    def test_is_valid_candidate_name_uses_6_to_14_range(self) -> None:
+        self.assertFalse(nide.is_valid_candidate_name('abcde'))
+        self.assertTrue(nide.is_valid_candidate_name('abcdef'))
+        self.assertTrue(nide.is_valid_candidate_name('abcdefghijklmn'))
+        self.assertFalse(nide.is_valid_candidate_name('abcdefghijklmno'))
+        self.assertFalse(nide.is_valid_candidate_name('abc123'))
+
     def test_parse_candidate_payload_valid_json(self) -> None:
         raw = json.dumps({'candidates': [{'name': 'Veribill'}, {'name': 'Nexum1'}, {'name': 'x1'}]})
         got = nide.parse_candidate_payload(raw)
@@ -128,6 +135,44 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertIn('target_users: landlords, property managers', prompt)
         self.assertIn('align with context packet priorities when provided', prompt)
 
+    def test_load_prompt_template_reads_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'prompt.txt'
+            path.write_text('name ideation template', encoding='utf-8')
+            got = nide.load_prompt_template(str(path))
+        self.assertEqual(got, 'name ideation template')
+
+    def test_load_prompt_template_missing_file(self) -> None:
+        with self.assertRaisesRegex(ValueError, 'prompt_template_not_found'):
+            nide.load_prompt_template('/tmp/does-not-exist-prompt-template.txt')
+
+    def test_build_prompt_uses_template_placeholders(self) -> None:
+        template = (
+            'scope={scope}\n'
+            'round={round_index}\n'
+            'target={target_count}\n'
+            'mode={phonetic}/{morphology}/{semantic}\n'
+            'banned={banned_tokens}\n'
+            'prefixes={banned_prefixes}\n'
+            '{context_block}'
+            'json={"candidates":[{"name":"string"}]}'
+        )
+        prompt, _mode = nide.build_prompt(
+            scope='eu',
+            round_index=1,
+            target_count=12,
+            constraints={'banned_tokens': ['fair'], 'banned_prefixes': ['fai']},
+            context_packet={'product_core': 'utility settlement'},
+            prompt_template=template,
+        )
+        self.assertIn('scope=eu', prompt)
+        self.assertIn('round=2', prompt)
+        self.assertIn('target=12', prompt)
+        self.assertIn('banned=fair', prompt)
+        self.assertIn('prefixes=fai', prompt)
+        self.assertIn('Context packet:', prompt)
+        self.assertIn('json={"candidates":[{"name":"string"}]}', prompt)
+
     @mock.patch('naming_ideation_stage.request.urlopen', side_effect=TimeoutError())
     def test_call_openrouter_candidates_timeout(self, _mock_urlopen: mock.Mock) -> None:
         names, usage, err = nide.call_openrouter_candidates(
@@ -140,6 +185,66 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertEqual(names, [])
         self.assertEqual(usage, {})
         self.assertEqual(err, 'timeout')
+
+    @mock.patch('naming_ideation_stage.request.urlopen', side_effect=TimeoutError())
+    def test_call_openai_compat_candidates_timeout(self, _mock_urlopen: mock.Mock) -> None:
+        names, usage, err = nide.call_openai_compat_candidates(
+            api_key='k',
+            base_url='http://localhost:11434/v1',
+            model='qwen2.5:14b',
+            prompt='hello',
+            timeout_ms=500,
+            strict_json=True,
+        )
+        self.assertEqual(names, [])
+        self.assertEqual(usage, {})
+        self.assertEqual(err, 'timeout')
+
+    @mock.patch('naming_ideation_stage.request.urlopen')
+    def test_call_openai_compat_candidates_respects_base_url(self, mock_urlopen: mock.Mock) -> None:
+        captured: dict[str, object] = {}
+
+        def _fake_urlopen(req: object, timeout: float) -> _FakeHTTPResponse:
+            del timeout
+            if hasattr(req, 'full_url'):
+                captured['url'] = getattr(req, 'full_url')
+            if hasattr(req, 'header_items'):
+                captured['headers'] = {k.lower(): v for k, v in req.header_items()}
+            payload = json.dumps(
+                {
+                    'choices': [{'message': {'content': '{"candidates":[{"name":"verodomo"},{"name":"short"}]}'}}],
+                    'usage': {'cost': 0.0011},
+                }
+            )
+            return _FakeHTTPResponse(payload)
+
+        mock_urlopen.side_effect = _fake_urlopen
+        names, usage, err = nide.call_openai_compat_candidates(
+            api_key='ollama',
+            base_url='http://localhost:11434/v1',
+            model='qwen2.5:14b',
+            prompt='hello',
+            timeout_ms=500,
+            strict_json=True,
+        )
+        headers = captured.get('headers') if isinstance(captured.get('headers'), dict) else {}
+        self.assertEqual(err, '')
+        self.assertEqual(names, ['verodomo'])
+        self.assertEqual(usage.get('cost'), 0.0011)
+        self.assertEqual(captured.get('url'), 'http://localhost:11434/v1/chat/completions')
+        self.assertEqual(headers.get('authorization'), 'Bearer ollama')
+
+    @mock.patch('naming_ideation_stage.request.urlopen')
+    def test_list_openai_models_reads_ids(self, mock_urlopen: mock.Mock) -> None:
+        mock_urlopen.return_value = _FakeHTTPResponse(
+            json.dumps({'data': [{'id': 'qwen2.5:14b'}, {'id': 'gemma3:12b'}]})
+        )
+        got = nide.list_openai_models(
+            api_key='ollama',
+            base_url='http://localhost:11434/v1',
+            timeout_ms=800,
+        )
+        self.assertEqual(got, {'qwen2.5:14b', 'gemma3:12b'})
 
     @mock.patch('naming_ideation_stage.request.urlopen')
     def test_call_openrouter_candidates_fallback_after_http_404(self, mock_urlopen: mock.Mock) -> None:
