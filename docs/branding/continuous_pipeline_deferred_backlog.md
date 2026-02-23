@@ -26,7 +26,8 @@ This document tracks intentionally deferred work while we prioritize throughput 
 
 ## Not deferred (already implemented)
 - Strict target gating in continuous supervisor:
-  - Targets now use strict survivors (no expensive `fail/error`) rather than raw `checked` counts.
+  - Targets now use strict survivors (all expensive checks pass/warn with zero expensive `fail/error`)
+    rather than raw `checked` counts.
 - LaunchAgent completion semantics:
   - Service restarts on failure but not on clean target completion.
 - Stale lock recovery:

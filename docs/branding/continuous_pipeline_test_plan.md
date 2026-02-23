@@ -18,6 +18,8 @@ Goal: verify that the 24/7 loop converges toward **strict survivors** (checked `
   - LaunchAgent does not restart after clean target completion.
 - Quality progress:
   - `strict_good` and `strict_strong` show non-zero growth over soak window.
+  - Strict definition: all expensive checks (`domain, web, app_store, package, social`)
+    have `pass/warn` coverage and zero `fail/error`.
 - Operational:
   - Logs and metrics are inspectable from one output root.
 

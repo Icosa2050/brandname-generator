@@ -351,7 +351,7 @@ What it adds:
 - health-based backend selection with fallback (`lmstudio`/`ollama`),
 - failure backoff + fail-streak cap,
 - automatic stop once strict target counts are reached
-  (checked `strong/consider` with no expensive-check `fail/error`).
+  (checked `strong/consider` with full expensive-check pass/warn coverage and no fail/error).
 
 LaunchAgent install (macOS background service):
 ```zsh

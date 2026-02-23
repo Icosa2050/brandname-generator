@@ -100,7 +100,7 @@ zsh scripts/branding/run_continuous_branding_supervisor.sh \
 ```
 
 `--target-good` / `--target-strong` use strict survivors
-(checked recommendations with no expensive-check `fail/error`).
+(checked recommendations with full expensive-check pass/warn coverage and no fail/error).
 
 LaunchAgent installer (background, survives terminal close/relogin):
 
