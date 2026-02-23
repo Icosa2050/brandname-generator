@@ -30,6 +30,19 @@ It is a **screening** tool, not legal advice. Final legal clearance still requir
 
 ## Quick Start
 
+### Worktree Path Rule
+- Keep editable task worktrees under a stable development root:
+  - `/Users/bernhard/Development/brandname-generator-worktrees/`
+- Do not use `/tmp` or `/private/tmp` for active coding worktrees.
+  - Reason: path-alias/sandbox prefix mismatches can trigger avoidable edit approval friction.
+- Canonical task start command:
+```zsh
+git -C /Users/bernhard/Development/brandname-generator worktree add \
+  -b codex/<task-slug> \
+  /Users/bernhard/Development/brandname-generator-worktrees/<task-slug> \
+  main
+```
+
 ### 1) DACH-first run
 ```zsh
 python3 scripts/branding/name_generator.py \
