@@ -82,6 +82,9 @@ Quality mode (slower, stronger): switch local model to `qwen3-vl-30b-a3b-instruc
 Shortcut wrappers:
 - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh`
 - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
+- Profile shortcuts (LM Studio hybrid):
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
 
 ## More
 - Full runner flags:

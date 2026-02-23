@@ -42,5 +42,7 @@
 - One-command hybrid shortcuts:
   - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh`
   - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
+  - Fast profile: `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
+  - Quality profile: `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
 - Hybrid campaign example:
   - `direnv exec . python3 scripts/branding/naming_campaign_runner.py --llm-ideation-enabled --llm-provider=hybrid --llm-hybrid-local-models=llama-3.3-8b-instruct-omniwriter --llm-hybrid-remote-models=mistralai/mistral-small-creative --llm-hybrid-local-share=0.75 --llm-openai-base-url=http://127.0.0.1:1234/v1 --llm-openai-ttl-s=3600`

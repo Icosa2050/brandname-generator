@@ -13,9 +13,14 @@ MAX_RUNS="${HYBRID_MAX_RUNS:-1}"
 SLEEP_S="${HYBRID_SLEEP_S:-0}"
 LLM_ROUNDS="${HYBRID_LLM_ROUNDS:-2}"
 LLM_CANDIDATES_PER_ROUND="${HYBRID_LLM_CANDIDATES_PER_ROUND:-12}"
+PROFILE="${HYBRID_PROFILE:-}"
 LIVE_PROGRESS=1
 NO_EXTERNAL_CHECKS=1
+PROFILE_ARGS=()
 EXTRA_ARGS=()
+USER_LOCAL_SHARE=""
+USER_LLM_ROUNDS=""
+USER_LLM_CANDIDATES_PER_ROUND=""
 
 usage() {
   cat <<'EOF'
@@ -25,6 +30,9 @@ Usage:
   scripts/branding/run_hybrid_lmstudio_mistral.sh [options] [-- <extra runner args>]
 
 Options:
+  --profile <fast|quality>           Apply preset args (default: custom/manual)
+  --fast                             Alias for --profile fast
+  --quality                          Alias for --profile quality
   --out-dir <path>                   Campaign output root (default: /tmp/branding_hybrid_lmstudio)
   --local-model <id>                 LM Studio model id (default: llama-3.3-8b-instruct-omniwriter)
   --remote-model <id>                OpenRouter model id (default: mistralai/mistral-small-creative)
@@ -38,11 +46,72 @@ Options:
   --with-external-checks             Keep generator external checks enabled
   --no-live-progress                 Disable live progress stream
   -h, --help                         Show this help
+
+Profiles:
+  fast:
+    --local-share 1.0
+    --llm-rounds 1
+    --llm-candidates-per-round 24
+    --validator-tier cheap
+
+  quality:
+    --local-share 0.75
+    --llm-rounds 4
+    --llm-candidates-per-round 12
+    --validator-expensive-finalist-limit 20
+    --validator-timeout-s 12
+    --validator-max-concurrency 16
+
+Notes:
+  - Extra runner args after '--' are appended last and can override profile args.
+  - Explicit CLI options (for share/rounds/candidates-per-round) override profile defaults.
 EOF
+}
+
+apply_profile() {
+  PROFILE_ARGS=()
+  case "$PROFILE" in
+    ""|"custom")
+      ;;
+    "fast")
+      LOCAL_SHARE="1.0"
+      LLM_ROUNDS="1"
+      LLM_CANDIDATES_PER_ROUND="24"
+      PROFILE_ARGS=(
+        --validator-tier cheap
+      )
+      ;;
+    "quality")
+      LOCAL_SHARE="0.75"
+      LLM_ROUNDS="4"
+      LLM_CANDIDATES_PER_ROUND="12"
+      PROFILE_ARGS=(
+        --validator-expensive-finalist-limit 20
+        --validator-timeout-s 12
+        --validator-max-concurrency 16
+      )
+      ;;
+    *)
+      echo "Unknown profile: $PROFILE (expected fast|quality)." >&2
+      exit 1
+      ;;
+  esac
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --profile)
+      PROFILE="$2"
+      shift 2
+      ;;
+    --fast)
+      PROFILE="fast"
+      shift
+      ;;
+    --quality)
+      PROFILE="quality"
+      shift
+      ;;
     --out-dir)
       OUT_DIR="$2"
       shift 2
@@ -57,6 +126,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --local-share)
       LOCAL_SHARE="$2"
+      USER_LOCAL_SHARE="$2"
       shift 2
       ;;
     --base-url)
@@ -77,10 +147,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --llm-rounds)
       LLM_ROUNDS="$2"
+      USER_LLM_ROUNDS="$2"
       shift 2
       ;;
     --llm-candidates-per-round)
       LLM_CANDIDATES_PER_ROUND="$2"
+      USER_LLM_CANDIDATES_PER_ROUND="$2"
       shift 2
       ;;
     --with-external-checks)
@@ -107,6 +179,17 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+apply_profile
+if [[ -n "$USER_LOCAL_SHARE" ]]; then
+  LOCAL_SHARE="$USER_LOCAL_SHARE"
+fi
+if [[ -n "$USER_LLM_ROUNDS" ]]; then
+  LLM_ROUNDS="$USER_LLM_ROUNDS"
+fi
+if [[ -n "$USER_LLM_CANDIDATES_PER_ROUND" ]]; then
+  LLM_CANDIDATES_PER_ROUND="$USER_LLM_CANDIDATES_PER_ROUND"
+fi
 
 if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "OPENROUTER_API_KEY is not set." >&2
@@ -140,11 +223,14 @@ if (( LIVE_PROGRESS )); then
 else
   CMD+=(--no-live-progress)
 fi
+if (( ${#PROFILE_ARGS[@]} > 0 )); then
+  CMD+=("${PROFILE_ARGS[@]}")
+fi
 if (( ${#EXTRA_ARGS[@]} > 0 )); then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-echo "running hybrid=lmstudio+openrouter out_dir=$OUT_DIR local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE"
+echo "running hybrid=lmstudio+openrouter out_dir=$OUT_DIR profile=${PROFILE:-custom} local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE llm_rounds=$LLM_ROUNDS"
 printf '$ '
 printf '%q ' "${CMD[@]}"
 echo

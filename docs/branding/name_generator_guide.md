@@ -332,6 +332,8 @@ Notes:
 - Shortcut wrappers:
   - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh`
   - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
 
 ### 14) Benchmark validator parallelism
 ```zsh

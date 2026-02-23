@@ -28,6 +28,7 @@ saldo,it,finance,0.68,curated_lexicon_v2,balance root high descriptive risk
 nova,la,progress,0.76,curated_lexicon_v2,newness root
 alto,it,quality,0.78,curated_lexicon_v2,elevated quality
 alta,it,quality,0.72,curated_lexicon_v2,elevated quality
+allagrande,it,quality,0.62,curated_lexicon_v2,user-provided italian phrase root
 prime,en,quality,0.70,curated_lexicon_v2,quality signal
 merit,en,quality,0.74,curated_lexicon_v2,quality signal
 civis,la,property,0.76,curated_lexicon_v2,civic/residential root
