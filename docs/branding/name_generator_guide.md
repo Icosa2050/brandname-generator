@@ -335,6 +335,36 @@ Notes:
   - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
   - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
 
+### 13d) Continuous robust loop (profile rotation + retry + targets)
+```zsh
+zsh scripts/branding/run_continuous_branding_supervisor.sh \
+  --out-dir test_outputs/branding/continuous_hybrid \
+  --backend auto \
+  --fallback-backend ollama \
+  --profile-plan fast,fast,quality \
+  --target-good 120 \
+  --target-strong 40
+```
+
+What it adds:
+- profile rotation (`fast` + `quality`) for throughput vs quality balance,
+- health-based backend selection with fallback (`lmstudio`/`ollama`),
+- failure backoff + fail-streak cap,
+- automatic stop once target quality counts are reached.
+
+LaunchAgent install (macOS background service):
+```zsh
+zsh scripts/branding/install_launchd_continuous_branding.sh --install
+zsh scripts/branding/install_launchd_continuous_branding.sh --status
+```
+
+Progress summary during long runs:
+```zsh
+zsh scripts/branding/report_campaign_progress.sh \
+  --out-dir test_outputs/branding/continuous_hybrid \
+  --top-n 25
+```
+
 ### 14) Benchmark validator parallelism
 ```zsh
 # quick benchmark (CI-friendly)

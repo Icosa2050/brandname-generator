@@ -191,12 +191,6 @@ if [[ -n "$USER_LLM_CANDIDATES_PER_ROUND" ]]; then
   LLM_CANDIDATES_PER_ROUND="$USER_LLM_CANDIDATES_PER_ROUND"
 fi
 
-if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-  echo "OPENROUTER_API_KEY is not set." >&2
-  echo "Tip: run via direnv (direnv exec . ...)." >&2
-  exit 2
-fi
-
 CMD=(
   python3 "$ROOT_DIR/scripts/branding/naming_campaign_runner.py"
   --max-runs "$MAX_RUNS"
@@ -237,6 +231,16 @@ echo
 
 cd "$ROOT_DIR"
 if command -v direnv >/dev/null 2>&1; then
+  if ! direnv exec . python3 -c 'import os, sys; sys.exit(0 if os.getenv("OPENROUTER_API_KEY") else 1)' >/dev/null 2>&1; then
+    echo "OPENROUTER_API_KEY is not set (after direnv)." >&2
+    echo "Tip: add it to .env/.envrc, then run: direnv allow" >&2
+    exit 2
+  fi
   exec direnv exec . "${CMD[@]}"
+fi
+if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+  echo "OPENROUTER_API_KEY is not set." >&2
+  echo "Tip: run via direnv (direnv exec . ...)." >&2
+  exit 2
 fi
 exec "${CMD[@]}"

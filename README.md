@@ -86,6 +86,34 @@ Shortcut wrappers:
   - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
   - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
 
+## Always-On Robust Mode (macOS 24/7)
+Supervisor loop (foreground):
+
+```zsh
+zsh scripts/branding/run_continuous_branding_supervisor.sh \
+  --out-dir test_outputs/branding/continuous_hybrid \
+  --backend auto \
+  --fallback-backend ollama \
+  --profile-plan fast,fast,quality \
+  --target-good 120 \
+  --target-strong 40
+```
+
+LaunchAgent installer (background, survives terminal close/relogin):
+
+```zsh
+zsh scripts/branding/install_launchd_continuous_branding.sh --install
+zsh scripts/branding/install_launchd_continuous_branding.sh --status
+```
+
+Progress report:
+
+```zsh
+zsh scripts/branding/report_campaign_progress.sh \
+  --out-dir test_outputs/branding/continuous_hybrid \
+  --top-n 25
+```
+
 ## More
 - Full runner flags:
   - `python3 scripts/branding/naming_campaign_runner.py --help`
