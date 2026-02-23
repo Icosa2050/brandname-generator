@@ -107,6 +107,21 @@ def _sanitize_tone_mix(raw: Any, *, max_items: int) -> dict[str, float]:
     return out
 
 
+def load_prompt_template(path: str) -> str:
+    file_path = Path(str(path or '').strip()).expanduser()
+    if not str(path or '').strip():
+        return ''
+    if not file_path.exists():
+        raise ValueError(f'prompt_template_not_found:{file_path}')
+    try:
+        text = file_path.read_text(encoding='utf-8').strip()
+    except OSError as exc:
+        raise ValueError(f'prompt_template_read_error:{file_path}:{exc}') from exc
+    if not text:
+        raise ValueError(f'prompt_template_empty:{file_path}')
+    return text
+
+
 def load_context_packet(path: str) -> dict[str, Any]:
     file_path = Path(path).expanduser()
     if not str(path or '').strip():
@@ -487,6 +502,7 @@ def build_prompt(
     target_count: int,
     constraints: dict[str, Any],
     context_packet: dict[str, Any] | None = None,
+    prompt_template: str = '',
 ) -> tuple[str, tuple[str, str, str]]:
     mode = MODE_TRIPLETS[round_index % len(MODE_TRIPLETS)]
     phonetic, morphology, semantic = mode
@@ -496,27 +512,46 @@ def build_prompt(
     context_block = ''
     if context_lines:
         context_block = 'Context packet:\n' + '\n'.join(f'- {line}' for line in context_lines) + '\n'
-    prompt = (
-        'Generate app brand names for utility-cost settlement software.\n'
-        f'Scope: {scope}\n'
-        f'Round: {round_index + 1}\n'
-        f'Target candidates: {max(1, int(target_count))}\n'
-        f'Phonetic mode: {phonetic}\n'
-        f'Morphology mode: {morphology}\n'
-        f'Semantic mode: {semantic}\n'
-        f'Banned tokens: {banned_tokens}\n'
-        f'Banned prefixes: {banned_prefixes}\n'
-        f'{context_block}'
-        'Rules:\n'
-        '- lowercase latin letters only, 6-14 chars\n'
-        '- no spaces, punctuation, digits\n'
-        '- align with context packet priorities when provided\n'
-        '- no availability claims (domain/store/trademark/social)\n'
-        '- no duplicate names\n'
-        '- no two names with same first 4 letters in this output\n'
-        'Return JSON only with schema: {"candidates":[{"name":"string"}]}.\n'
-        'No markdown, no prose, no additional keys.'
-    )
+
+    template_vars = {
+        'scope': str(scope),
+        'round_index': str(int(round_index) + 1),
+        'target_count': str(max(1, int(target_count))),
+        'phonetic': str(phonetic),
+        'morphology': str(morphology),
+        'semantic': str(semantic),
+        'banned_tokens': str(banned_tokens),
+        'banned_prefixes': str(banned_prefixes),
+        'context_block': str(context_block or 'none\n'),
+    }
+
+    if str(prompt_template or '').strip():
+        prompt = str(prompt_template)
+        for key, value in template_vars.items():
+            prompt = prompt.replace(f'{{{key}}}', value)
+        prompt = prompt.strip()
+    else:
+        prompt = (
+            'Generate app brand names for utility-cost settlement software.\n'
+            f'Scope: {scope}\n'
+            f'Round: {round_index + 1}\n'
+            f'Target candidates: {max(1, int(target_count))}\n'
+            f'Phonetic mode: {phonetic}\n'
+            f'Morphology mode: {morphology}\n'
+            f'Semantic mode: {semantic}\n'
+            f'Banned tokens: {banned_tokens}\n'
+            f'Banned prefixes: {banned_prefixes}\n'
+            f'{context_block}'
+            'Rules:\n'
+            '- lowercase latin letters only, 6-14 chars\n'
+            '- no spaces, punctuation, digits\n'
+            '- align with context packet priorities when provided\n'
+            '- no availability claims (domain/store/trademark/social)\n'
+            '- no duplicate names\n'
+            '- no two names with same first 4 letters in this output\n'
+            'Return JSON only with schema: {"candidates":[{"name":"string"}]}.\n'
+            'No markdown, no prose, no additional keys.'
+        )
     return prompt, mode
 
 

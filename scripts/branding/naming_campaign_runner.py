@@ -32,6 +32,11 @@ from typing import Any
 import naming_db as ndb
 import naming_ideation_stage as nide
 
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover - Python <3.11 fallback
+    tomllib = None  # type: ignore[assignment]
+
 
 TRUTHY_VALUES = {'1', 'true', 'yes', 'y'}
 DEFAULT_GENERATOR_FAMILIES = ['coined', 'stem', 'suggestive', 'morphology', 'seed', 'expression', 'source_pool', 'blend']
@@ -40,6 +45,157 @@ SweepCombo = tuple[float, str, str, str]
 
 def parse_csv_list(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(',') if part.strip()]
+
+
+def parse_model_list(raw: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parse_csv_list(str(raw or '').replace('|', ',')):
+        model = str(part).strip()
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        out.append(model)
+    return out
+
+
+def _append_models_unique(target: list[str], source: list[str]) -> None:
+    seen = set(target)
+    for model in source:
+        key = str(model).strip()
+        if not key or key in seen:
+            continue
+        target.append(key)
+        seen.add(key)
+
+
+def _coerce_models_node(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        return parse_model_list(raw)
+    if isinstance(raw, list):
+        joined = ','.join(str(item).strip() for item in raw if str(item).strip())
+        return parse_model_list(joined)
+    if isinstance(raw, dict):
+        return _coerce_models_node(raw.get('models'))
+    return []
+
+
+def _parse_txt_model_config(raw_text: str) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for line in raw_text.splitlines():
+        trimmed = line.split('#', 1)[0].strip()
+        if not trimmed:
+            continue
+        if '=' in trimmed:
+            provider_raw, blob = trimmed.split('=', 1)
+            provider = provider_raw.strip().lower() or 'default'
+            models = parse_model_list(blob)
+        else:
+            provider = 'default'
+            models = parse_model_list(trimmed)
+        if not models:
+            continue
+        bucket = out.setdefault(provider, [])
+        _append_models_unique(bucket, models)
+    return out
+
+
+def _extract_model_config_map(payload: Any) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+
+    def add(provider: str, models_node: Any) -> None:
+        models = _coerce_models_node(models_node)
+        if not models:
+            return
+        key = str(provider or '').strip().lower() or 'default'
+        bucket = out.setdefault(key, [])
+        _append_models_unique(bucket, models)
+
+    if isinstance(payload, (str, list)):
+        add('default', payload)
+        return out
+    if not isinstance(payload, dict):
+        return out
+
+    providers_node = payload.get('providers')
+    if isinstance(providers_node, dict):
+        for provider, models_node in providers_node.items():
+            add(str(provider), models_node)
+
+    if 'models' in payload and not isinstance(payload.get('models'), dict):
+        add('default', payload.get('models'))
+    if 'default' in payload:
+        add('default', payload.get('default'))
+
+    for key, value in payload.items():
+        if str(key) in {'providers', 'models', 'default', 'scheduler'}:
+            continue
+        add(str(key), value)
+
+    return out
+
+
+def load_llm_model_config(path: str) -> dict[str, list[str]]:
+    config_path = Path(str(path or '').strip()).expanduser()
+    if not str(path or '').strip():
+        return {}
+    if not config_path.exists():
+        raise ValueError(f'llm_model_config_not_found:{config_path}')
+    try:
+        raw_text = config_path.read_text(encoding='utf-8')
+    except OSError as exc:
+        raise ValueError(f'llm_model_config_read_error:{config_path}:{exc}') from exc
+
+    suffix = config_path.suffix.lower()
+    payload: Any
+    if suffix == '.json':
+        try:
+            payload = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f'llm_model_config_invalid_json:{config_path}:{exc}') from exc
+        return _extract_model_config_map(payload)
+    if suffix == '.toml':
+        if tomllib is None:
+            raise ValueError('llm_model_config_toml_requires_python311')
+        try:
+            payload = tomllib.loads(raw_text)
+        except Exception as exc:
+            raise ValueError(f'llm_model_config_invalid_toml:{config_path}:{exc}') from exc
+        return _extract_model_config_map(payload)
+    return _parse_txt_model_config(raw_text)
+
+
+def resolve_llm_models(*, args: argparse.Namespace, provider: str) -> tuple[list[str], str, str]:
+    explicit_models = parse_model_list(getattr(args, 'llm_models', ''))
+    if explicit_models:
+        return explicit_models, 'cli_models', ''
+
+    config_path = str(getattr(args, 'llm_model_config', '') or '').strip()
+    if config_path:
+        try:
+            model_config = load_llm_model_config(config_path)
+        except ValueError as exc:
+            return [], 'model_config', str(exc)
+        provider_key = str(provider or '').strip().lower()
+        configured = model_config.get(provider_key, [])
+        if not configured:
+            configured = model_config.get('default', [])
+        if configured:
+            return configured, 'model_config', ''
+        return [], 'model_config', f'no_models_for_provider:{provider_key}'
+
+    fallback_model = str(getattr(args, 'llm_model', '') or '').strip()
+    if fallback_model:
+        return [fallback_model], 'single_model', ''
+    return [], 'none', 'no_models_configured'
+
+
+def select_round_model(*, models: list[str], round_idx: int, selection: str, rng: random.Random) -> str:
+    if not models:
+        return ''
+    if str(selection or '').strip().lower() == 'random':
+        return rng.choice(models)
+    return models[round_idx % len(models)]
 
 
 def clamp_share(value: float) -> float:
@@ -749,7 +905,12 @@ def run_active_llm_ideation(
     report: dict[str, Any] = {
         'enabled': bool(args.llm_ideation_enabled),
         'provider': args.llm_provider,
-        'model': args.llm_model,
+        'model': '',
+        'models_requested': [],
+        'models_used': {},
+        'model_selection': str(getattr(args, 'llm_model_selection', 'round_robin') or 'round_robin'),
+        'model_source': '',
+        'prompt_template_path': str(getattr(args, 'llm_prompt_template_file', '') or ''),
         'status': 'disabled',
         'candidate_count': 0,
         'cost_usd': 0.0,
@@ -788,6 +949,15 @@ def run_active_llm_ideation(
     constraints_path = runs_dir / f'{run_id}_dynamic_constraints.json'
     constraints_path.write_text(json.dumps(constraints, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     report['constraints_path'] = str(constraints_path)
+    prompt_template = ''
+    template_path = str(getattr(args, 'llm_prompt_template_file', '') or '').strip()
+    if template_path:
+        try:
+            prompt_template = nide.load_prompt_template(template_path)
+        except ValueError as exc:
+            report['status'] = 'prompt_template_error'
+            report['errors'].append(str(exc))
+            return None, report
 
     target_total = max(1, int(args.llm_rounds)) * max(1, int(args.llm_candidates_per_round))
     names: list[str] = []
@@ -845,58 +1015,80 @@ def run_active_llm_ideation(
     elif args.llm_provider in {'openrouter_http', 'openai_compat'}:
         source_label = 'openrouter'
         api_key = ''
-        models: set[str] | None = None
+        model_catalog: set[str] | None = None
 
-        def call_provider(_prompt: str) -> tuple[list[str], dict[str, Any], str]:
+        configured_models, model_source, model_err = resolve_llm_models(args=args, provider=args.llm_provider)
+        report['model_source'] = model_source
+        report['models_requested'] = configured_models
+        report['model'] = '|'.join(configured_models)
+        if model_err:
+            report['status'] = 'model_config_error'
+            report['errors'].append(model_err)
+
+        def call_provider(_prompt: str, _model: str) -> tuple[list[str], dict[str, Any], str]:
             return [], {}, 'provider_unavailable'
 
-        if args.llm_provider == 'openrouter_http':
+        if report['status'] != 'model_config_error' and args.llm_provider == 'openrouter_http':
             api_key = os.environ.get(args.llm_api_key_env, '').strip()
             if not api_key:
                 report['status'] = 'missing_api_key'
                 report['errors'].append(f'missing env {args.llm_api_key_env}')
             else:
-                models = nide.list_openrouter_models(
+                model_catalog = nide.list_openrouter_models(
                     api_key=api_key,
                     timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                 )
 
-                def call_provider(_prompt: str) -> tuple[list[str], dict[str, Any], str]:
+                def call_provider(_prompt: str, _model: str) -> tuple[list[str], dict[str, Any], str]:
                     return nide.call_openrouter_candidates(
                         api_key=api_key,
-                        model=args.llm_model,
+                        model=_model,
                         prompt=_prompt,
                         timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                         strict_json=bool(args.llm_strict_json),
                         http_referer=args.llm_openrouter_http_referer,
                         x_title=args.llm_openrouter_x_title,
                     )
-        else:
+        elif report['status'] != 'model_config_error':
             source_label = 'openai_compat'
             api_key = os.environ.get(args.llm_openai_api_key_env, '').strip() or 'ollama'
-            models = nide.list_openai_models(
+            model_catalog = nide.list_openai_models(
                 api_key=api_key,
                 base_url=args.llm_openai_base_url,
                 timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
             )
 
-            def call_provider(_prompt: str) -> tuple[list[str], dict[str, Any], str]:
+            def call_provider(_prompt: str, _model: str) -> tuple[list[str], dict[str, Any], str]:
                 return nide.call_openai_compat_candidates(
                     api_key=api_key,
                     base_url=args.llm_openai_base_url,
-                    model=args.llm_model,
+                    model=_model,
                     prompt=_prompt,
                     timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                     strict_json=bool(args.llm_strict_json),
                 )
 
-        if report['status'] != 'missing_api_key':
-            if models is not None and args.llm_model not in models:
-                report['status'] = 'model_not_in_catalog'
-                report['errors'].append(f'model={args.llm_model}')
+        if report['status'] not in {'missing_api_key', 'model_config_error'}:
+            if not configured_models:
+                report['status'] = 'model_not_configured'
             else:
-                report['status'] = 'running'
+                if model_catalog is not None:
+                    unavailable_models = [model for model in configured_models if model not in model_catalog]
+                    if unavailable_models:
+                        report['errors'].append(f'models_not_in_catalog={",".join(unavailable_models)}')
+                        configured_models = [model for model in configured_models if model in model_catalog]
+                        report['models_requested'] = configured_models
+                        report['model'] = '|'.join(configured_models)
+                if not configured_models:
+                    report['status'] = 'model_not_in_catalog'
+                else:
+                    report['status'] = 'running'
+                used_counts: dict[str, int] = {}
+                model_rng_seed = (int(getattr(args, 'ab_seed', 0)) * 1000003) + int(run_index)
+                model_rng = random.Random(model_rng_seed)
                 for round_idx in range(max(1, int(args.llm_rounds))):
+                    if report['status'] != 'running':
+                        break
                     attempted_rounds += 1
                     elapsed_ms = int((time.monotonic() - stage_started) * 1000)
                     if elapsed_ms >= max(1000, int(args.llm_stage_timeout_ms)):
@@ -909,12 +1101,24 @@ def run_active_llm_ideation(
                             report['status'] = 'budget_stop'
                             break
 
+                    selected_model = select_round_model(
+                        models=configured_models,
+                        round_idx=round_idx,
+                        selection=str(getattr(args, 'llm_model_selection', 'round_robin')),
+                        rng=model_rng,
+                    )
+                    if not selected_model:
+                        report['status'] = 'model_not_configured'
+                        break
+                    used_counts[selected_model] = int(used_counts.get(selected_model, 0)) + 1
+
                     prompt, mode = nide.build_prompt(
                         scope=scope,
                         round_index=((run_index - 1) * max(1, int(args.llm_rounds))) + round_idx,
                         target_count=max(1, int(args.llm_candidates_per_round)),
                         constraints=constraints,
                         context_packet=context_packet,
+                        prompt_template=prompt_template,
                     )
                     mode_key = ':'.join(mode)
                     cache_key_blob = json.dumps(
@@ -925,7 +1129,7 @@ def run_active_llm_ideation(
                                 if args.llm_provider == 'openai_compat'
                                 else 'https://openrouter.ai/api/v1'
                             ),
-                            'model': args.llm_model,
+                            'model': selected_model,
                             'prompt': prompt,
                             'schema_version': 'llm_candidates_v1',
                             'constraints_hash': nide.constraints_hash(constraints),
@@ -952,13 +1156,16 @@ def run_active_llm_ideation(
                             empty_rounds += 1
                             report['errors'].append(f'round={round_idx + 1}:cache_empty')
                         report['cache_hits'] = int(report['cache_hits']) + 1
-                        append_log(f'round={round_idx + 1} mode={mode_key} source=cache names={len(round_names)}')
+                        append_log(
+                            f'round={round_idx + 1} mode={mode_key} model={selected_model} '
+                            f'source=cache names={len(round_names)}'
+                        )
                     else:
                         retries = max(0, int(args.llm_max_retries))
                         usage: dict[str, Any] = {}
                         err = 'unknown'
                         for attempt in range(retries + 1):
-                            call_names, usage, err = call_provider(prompt)
+                            call_names, usage, err = call_provider(prompt, selected_model)
                             if call_names:
                                 round_names = call_names
                                 successful_rounds += 1
@@ -970,7 +1177,7 @@ def run_active_llm_ideation(
                                 total_cost += call_cost
                                 last_call_cost = call_cost
                                 append_log(
-                                    f'round={round_idx + 1} mode={mode_key} source={source_label} '
+                                    f'round={round_idx + 1} mode={mode_key} model={selected_model} source={source_label} '
                                     f'names={len(round_names)} usage={usage} cost_usd={call_cost:.6f}'
                                 )
                                 if args.llm_cache_dir and round_names:
@@ -985,7 +1192,10 @@ def run_active_llm_ideation(
                             if retriable and attempt < retries:
                                 report['retries'] = int(report['retries']) + 1
                                 sleep_s = (0.35 * (attempt + 1)) + random.uniform(0.0, 0.25)
-                                append_log(f'round={round_idx + 1} retry={attempt + 1} err={err} sleep_s={sleep_s:.2f}')
+                                append_log(
+                                    f'round={round_idx + 1} model={selected_model} retry={attempt + 1} '
+                                    f'err={err} sleep_s={sleep_s:.2f}'
+                                )
                                 time.sleep(sleep_s)
                                 continue
                             if err == 'timeout':
@@ -993,7 +1203,7 @@ def run_active_llm_ideation(
                             else:
                                 empty_rounds += 1
                             report['errors'].append(f'round={round_idx + 1}:{err}')
-                            append_log(f'round={round_idx + 1} err={err}')
+                            append_log(f'round={round_idx + 1} model={selected_model} err={err}')
                             break
 
                     for name in round_names:
@@ -1006,6 +1216,7 @@ def run_active_llm_ideation(
                         names.append(normalized)
                     if len(names) >= target_total:
                         break
+                report['models_used'] = used_counts
 
                 if report['status'] == 'running':
                     if names:
@@ -1044,7 +1255,12 @@ def run_active_llm_ideation(
         'candidates': [{'name': item} for item in names],
         'metadata': {
             'provider': args.llm_provider,
-            'model': args.llm_model,
+            'model': report.get('model', ''),
+            'models_requested': report.get('models_requested', []),
+            'models_used': report.get('models_used', {}),
+            'model_selection': report.get('model_selection', ''),
+            'model_source': report.get('model_source', ''),
+            'prompt_template_path': report.get('prompt_template_path', ''),
             'run_id': run_id,
             'constraints_path': str(constraints_path),
             'status': report['status'],
@@ -1381,8 +1597,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--llm-model',
-        default='mistralai/mistral-small-creative',
-        help='LLM model identifier.',
+        default=os.environ.get('LLM_MODEL', ''),
+        help='Single LLM model identifier fallback (used when --llm-models and --llm-model-config are not set).',
+    )
+    parser.add_argument(
+        '--llm-models',
+        default='',
+        help='Comma-separated model identifiers; rotates per round for openrouter_http/openai_compat providers.',
+    )
+    parser.add_argument(
+        '--llm-model-config',
+        default=os.environ.get('LLM_MODEL_CONFIG', ''),
+        help='Path to provider-aware model config file (.json/.toml/.txt).',
+    )
+    parser.add_argument(
+        '--llm-model-selection',
+        choices=['round_robin', 'random'],
+        default='round_robin',
+        help='Model selection strategy when multiple models are configured.',
     )
     parser.add_argument(
         '--llm-api-key-env',
@@ -1411,6 +1643,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--llm-rounds', type=int, default=2, help='LLM ideation rounds per run.')
     parser.add_argument('--llm-candidates-per-round', type=int, default=20, help='Candidates requested per LLM round.')
+    parser.add_argument(
+        '--llm-prompt-template-file',
+        default=os.environ.get('LLM_PROMPT_TEMPLATE_FILE', ''),
+        help='Optional text template file for ideation prompt placeholders ({scope},{round_index},{target_count},{phonetic},{morphology},{semantic},{banned_tokens},{banned_prefixes},{context_block}).',
+    )
     parser.add_argument('--llm-max-call-latency-ms', type=int, default=8000, help='Per-call timeout in milliseconds.')
     parser.add_argument('--llm-stage-timeout-ms', type=int, default=30000, help='Total ideation stage timeout in milliseconds.')
     parser.add_argument('--llm-max-retries', type=int, default=3, help='Max retries for retriable LLM call errors.')
@@ -1645,7 +1882,10 @@ def main() -> int:
         f'validator_memory_enabled={bool(str(args.validator_memory_db).strip())} '
         f'validator_memory_ttl_days={int(args.validator_memory_ttl_days)} '
         f'reset_db={args.reset_db} '
-        f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} llm_model={args.llm_model} '
+        f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} '
+        f'llm_model={args.llm_model} llm_models={args.llm_models} '
+        f'llm_model_config={args.llm_model_config} llm_model_selection={args.llm_model_selection} '
+        f'llm_prompt_template_file={args.llm_prompt_template_file} '
         f'llm_base_url={nide.normalize_openai_compat_base_url(args.llm_openai_base_url) if args.llm_provider == "openai_compat" else ""} '
         f'llm_slo_min_success_rate={float(args.llm_slo_min_success_rate):.2f} '
         f'llm_slo_max_timeout_rate={float(args.llm_slo_max_timeout_rate):.2f} '

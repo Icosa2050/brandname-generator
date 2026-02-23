@@ -135,6 +135,44 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertIn('target_users: landlords, property managers', prompt)
         self.assertIn('align with context packet priorities when provided', prompt)
 
+    def test_load_prompt_template_reads_text(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'prompt.txt'
+            path.write_text('name ideation template', encoding='utf-8')
+            got = nide.load_prompt_template(str(path))
+        self.assertEqual(got, 'name ideation template')
+
+    def test_load_prompt_template_missing_file(self) -> None:
+        with self.assertRaisesRegex(ValueError, 'prompt_template_not_found'):
+            nide.load_prompt_template('/tmp/does-not-exist-prompt-template.txt')
+
+    def test_build_prompt_uses_template_placeholders(self) -> None:
+        template = (
+            'scope={scope}\n'
+            'round={round_index}\n'
+            'target={target_count}\n'
+            'mode={phonetic}/{morphology}/{semantic}\n'
+            'banned={banned_tokens}\n'
+            'prefixes={banned_prefixes}\n'
+            '{context_block}'
+            'json={"candidates":[{"name":"string"}]}'
+        )
+        prompt, _mode = nide.build_prompt(
+            scope='eu',
+            round_index=1,
+            target_count=12,
+            constraints={'banned_tokens': ['fair'], 'banned_prefixes': ['fai']},
+            context_packet={'product_core': 'utility settlement'},
+            prompt_template=template,
+        )
+        self.assertIn('scope=eu', prompt)
+        self.assertIn('round=2', prompt)
+        self.assertIn('target=12', prompt)
+        self.assertIn('banned=fair', prompt)
+        self.assertIn('prefixes=fai', prompt)
+        self.assertIn('Context packet:', prompt)
+        self.assertIn('json={"candidates":[{"name":"string"}]}', prompt)
+
     @mock.patch('naming_ideation_stage.request.urlopen', side_effect=TimeoutError())
     def test_call_openrouter_candidates_timeout(self, _mock_urlopen: mock.Mock) -> None:
         names, usage, err = nide.call_openrouter_candidates(

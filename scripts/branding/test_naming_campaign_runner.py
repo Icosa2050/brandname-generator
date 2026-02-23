@@ -225,6 +225,97 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
         self.assertEqual(args.llm_openai_base_url, 'http://localhost:11434/v1')
         self.assertEqual(args.llm_openai_api_key_env, 'LOCAL_LLM_KEY')
 
+    def test_parse_args_accepts_prompt_template_file(self) -> None:
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-prompt-template-file',
+            'docs/branding/llm_prompt.utility_split_v1.txt',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        self.assertEqual(args.llm_prompt_template_file, 'docs/branding/llm_prompt.utility_split_v1.txt')
+
+    def test_load_llm_model_config_parses_json_provider_map(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'models.json'
+            path.write_text(
+                json.dumps(
+                    {
+                        'openai_compat': ['gemma3:27b', 'qwen3-vl30b'],
+                        'openrouter_http': {'models': ['mistralai/mistral-small-creative']},
+                    }
+                )
+                + '\n',
+                encoding='utf-8',
+            )
+            got = ncr.load_llm_model_config(str(path))
+        self.assertEqual(got.get('openai_compat'), ['gemma3:27b', 'qwen3-vl30b'])
+        self.assertEqual(got.get('openrouter_http'), ['mistralai/mistral-small-creative'])
+
+    def test_load_llm_model_config_parses_txt_provider_map(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'models.txt'
+            path.write_text(
+                '\n'.join(
+                    [
+                        '# local models',
+                        'openai_compat=gemma3:27b,qwen3-vl30b',
+                        'openrouter_http=mistralai/mistral-small-creative,openai/gpt-4o-mini',
+                    ]
+                )
+                + '\n',
+                encoding='utf-8',
+            )
+            got = ncr.load_llm_model_config(str(path))
+        self.assertEqual(got.get('openai_compat'), ['gemma3:27b', 'qwen3-vl30b'])
+        self.assertEqual(got.get('openrouter_http'), ['mistralai/mistral-small-creative', 'openai/gpt-4o-mini'])
+
+    def test_load_llm_model_config_parses_toml_provider_map(self) -> None:
+        if ncr.tomllib is None:
+            self.skipTest('tomllib unavailable on this Python version')
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'models.toml'
+            path.write_text(
+                '\n'.join(
+                    [
+                        '[providers]',
+                        'openai_compat = ["gemma3:27b", "qwen3-vl30b"]',
+                        'openrouter_http = ["mistralai/mistral-small-creative"]',
+                    ]
+                )
+                + '\n',
+                encoding='utf-8',
+            )
+            got = ncr.load_llm_model_config(str(path))
+        self.assertEqual(got.get('openai_compat'), ['gemma3:27b', 'qwen3-vl30b'])
+        self.assertEqual(got.get('openrouter_http'), ['mistralai/mistral-small-creative'])
+
+    def test_resolve_llm_models_prefers_cli_models_over_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'models.json'
+            path.write_text(
+                json.dumps(
+                    {
+                        'openai_compat': ['gemma3:27b', 'qwen3-vl30b'],
+                    }
+                )
+                + '\n',
+                encoding='utf-8',
+            )
+            argv = [
+                'naming_campaign_runner.py',
+                '--llm-model-config',
+                str(path),
+                '--llm-models',
+                'override-one,override-two',
+            ]
+            with mock.patch.object(sys, 'argv', argv):
+                args = ncr.parse_args()
+        models, source, err = ncr.resolve_llm_models(args=args, provider='openai_compat')
+        self.assertEqual(models, ['override-one', 'override-two'])
+        self.assertEqual(source, 'cli_models')
+        self.assertEqual(err, '')
+
     @mock.patch('naming_campaign_runner.nide.call_openai_compat_candidates')
     @mock.patch('naming_campaign_runner.nide.list_openai_models')
     def test_run_active_llm_ideation_openai_compat_enforces_length_filter(
@@ -278,6 +369,78 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             payload = json.loads(artifact_path.read_text(encoding='utf-8'))
             got = sorted(item.get('name') for item in payload.get('candidates', []))
             self.assertEqual(got, ['tenantia', 'verodomo'])
+
+    @mock.patch('naming_campaign_runner.nide.call_openrouter_candidates')
+    @mock.patch('naming_campaign_runner.nide.list_openrouter_models')
+    def test_run_active_llm_ideation_openrouter_rotates_models_from_config(
+        self,
+        mock_list_models: mock.Mock,
+        mock_call_openrouter: mock.Mock,
+    ) -> None:
+        model_a = 'mistralai/mistral-small-creative'
+        model_b = 'openai/gpt-4o-mini'
+        mock_list_models.return_value = {model_a, model_b}
+
+        def _fake_call(*, model: str, **kwargs: object) -> tuple[list[str], dict[str, float], str]:
+            del kwargs
+            if model == model_a:
+                return ['verodomo'], {'cost': 0.001}, ''
+            if model == model_b:
+                return ['tenantia'], {'cost': 0.001}, ''
+            return [], {}, 'unexpected_model'
+
+        mock_call_openrouter.side_effect = _fake_call
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / 'llm_models.json'
+            config_path.write_text(
+                json.dumps({'openrouter_http': [model_a, model_b]}) + '\n',
+                encoding='utf-8',
+            )
+            argv = [
+                'naming_campaign_runner.py',
+                '--llm-ideation-enabled',
+                '--llm-provider',
+                'openrouter_http',
+                '--llm-model-config',
+                str(config_path),
+                '--llm-rounds',
+                '2',
+                '--llm-candidates-per-round',
+                '1',
+                '--llm-api-key-env',
+                'OPENROUTER_API_KEY',
+            ]
+            with mock.patch.object(sys, 'argv', argv):
+                args = ncr.parse_args()
+
+            runs_dir = root / 'runs'
+            logs_dir = root / 'logs'
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            with mock.patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'}, clear=False):
+                artifact_path, report = ncr.run_active_llm_ideation(
+                    args=args,
+                    runs_dir=runs_dir,
+                    logs_dir=logs_dir,
+                    run_id='run_002_test',
+                    run_index=2,
+                    scope='global',
+                    seen_shortlist=set(),
+                    context_packet={},
+                )
+
+            self.assertEqual(report.get('status'), 'ok')
+            self.assertEqual(report.get('models_requested'), [model_a, model_b])
+            self.assertEqual(report.get('models_used'), {model_a: 1, model_b: 1})
+            self.assertIsNotNone(artifact_path)
+            assert artifact_path is not None
+            payload = json.loads(artifact_path.read_text(encoding='utf-8'))
+            got = sorted(item.get('name') for item in payload.get('candidates', []))
+            self.assertEqual(got, ['tenantia', 'verodomo'])
+            called_models = [call.kwargs.get('model') for call in mock_call_openrouter.call_args_list]
+            self.assertEqual(called_models, [model_a, model_b])
 
 
 if __name__ == '__main__':
