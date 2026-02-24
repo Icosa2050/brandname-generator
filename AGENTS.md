@@ -44,7 +44,9 @@
   - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
   - Fast profile: `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
   - Quality profile: `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
-  - Continuous supervisor (foreground): `zsh scripts/branding/run_continuous_branding_supervisor.sh --backend auto --fallback-backend ollama --profile-plan fast,fast,quality --target-good 120 --target-strong 40`
+  - Creative profile (more OpenRouter share + longer-name bias): `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative`
+  - Optional remote-model mix: `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative --remote-models mistralai/mistral-small-creative,anthropic/claude-sonnet-4.5`
+  - Continuous supervisor (foreground): `zsh scripts/branding/run_continuous_branding_supervisor.sh --backend auto --fallback-backend ollama --profile-plan fast,quality,creative --target-good 120 --target-strong 40`
   - Continuous supervisor (LaunchAgent): `zsh scripts/branding/install_launchd_continuous_branding.sh --install`
   - Progress summary: `zsh scripts/branding/report_campaign_progress.sh --out-dir test_outputs/branding/continuous_hybrid --top-n 25`
   - Continuous targets are strict survivors (checked recommendation + full expensive-check pass/warn coverage + no expensive-check fail/error).

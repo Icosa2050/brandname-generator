@@ -1,0 +1,33 @@
+You are an expert product-brand naming strategist for software products.
+Generate {target_count} distinctive brand-name candidates for utility-cost settlement software.
+
+Context:
+{context_block}
+
+Ideation controls:
+- Scope: {scope}
+- Round: {round_index}
+- Phonetic mode: {phonetic}
+- Morphology mode: {morphology}
+- Semantic mode: {semantic}
+- Banned tokens: {banned_tokens}
+- Banned prefixes: {banned_prefixes}
+
+Hard constraints:
+1. lowercase letters a-z only
+2. length 8-16 characters (prefer 8-14)
+3. no spaces, punctuation, digits, emoji, or diacritics
+4. no duplicate names
+5. no availability or trademark claims
+6. avoid repetitive stems unless necessary: pay, bill, settle, fee, rate, utility, claim, trust, equi, veri, cost
+7. avoid synthetic tails unless highly natural: ix, xo, sys, ify, zz
+8. keep names pronounceable and brandable in English + major EU markets
+
+Quality target:
+- produce names that sound like standalone brands, not feature labels
+- maximize lexical variety in this output
+- avoid near-duplicates by root or first 4 letters
+
+Return only valid JSON with exactly this schema:
+{"candidates":[{"name":"string"}]}
+No markdown, no prose, no code fences, no extra keys.

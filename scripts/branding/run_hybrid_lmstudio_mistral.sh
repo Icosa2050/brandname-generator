@@ -13,6 +13,9 @@ MAX_RUNS="${HYBRID_MAX_RUNS:-1}"
 SLEEP_S="${HYBRID_SLEEP_S:-0}"
 LLM_ROUNDS="${HYBRID_LLM_ROUNDS:-2}"
 LLM_CANDIDATES_PER_ROUND="${HYBRID_LLM_CANDIDATES_PER_ROUND:-12}"
+GENERATOR_MIN_LEN="${HYBRID_GENERATOR_MIN_LEN:-6}"
+GENERATOR_MAX_LEN="${HYBRID_GENERATOR_MAX_LEN:-11}"
+PROMPT_TEMPLATE_FILE="${HYBRID_LLM_PROMPT_TEMPLATE_FILE:-}"
 PROFILE="${HYBRID_PROFILE:-}"
 LIVE_PROGRESS=1
 NO_EXTERNAL_CHECKS=1
@@ -21,6 +24,9 @@ EXTRA_ARGS=()
 USER_LOCAL_SHARE=""
 USER_LLM_ROUNDS=""
 USER_LLM_CANDIDATES_PER_ROUND=""
+USER_GENERATOR_MIN_LEN=""
+USER_GENERATOR_MAX_LEN=""
+USER_PROMPT_TEMPLATE_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -30,12 +36,15 @@ Usage:
   scripts/branding/run_hybrid_lmstudio_mistral.sh [options] [-- <extra runner args>]
 
 Options:
-  --profile <fast|quality>           Apply preset args (default: custom/manual)
+  --profile <fast|quality|creative>  Apply preset args (default: custom/manual)
   --fast                             Alias for --profile fast
   --quality                          Alias for --profile quality
+  --creative                         Alias for --profile creative
   --out-dir <path>                   Campaign output root (default: /tmp/branding_hybrid_lmstudio)
-  --local-model <id>                 LM Studio model id (default: llama-3.3-8b-instruct-omniwriter)
-  --remote-model <id>                OpenRouter model id (default: mistralai/mistral-small-creative)
+  --local-model <id|csv>             LM Studio model id(s), comma-separated allowed
+  --local-models <csv>               Alias for --local-model
+  --remote-model <id|csv>            OpenRouter model id(s), comma-separated allowed
+  --remote-models <csv>              Alias for --remote-model
   --local-share <0..1>               Share of local rounds (default: 0.75)
   --base-url <url>                   LM Studio OpenAI-compatible URL (default: http://127.0.0.1:1234/v1)
   --ttl-s <seconds>                  LM Studio residency TTL hint (default: 3600)
@@ -43,6 +52,9 @@ Options:
   --sleep-s <seconds>                Sleep between runs (default: 0)
   --llm-rounds <n>                   LLM rounds per run (default: 2)
   --llm-candidates-per-round <n>     Candidates requested each round (default: 12)
+  --generator-min-len <n>            Generator min length filter (default: 6)
+  --generator-max-len <n>            Generator max length filter (default: 11)
+  --llm-prompt-template-file <path>  Optional prompt template passed to campaign runner
   --with-external-checks             Keep generator external checks enabled
   --no-live-progress                 Disable live progress stream
   -h, --help                         Show this help
@@ -60,6 +72,17 @@ Profiles:
     --llm-candidates-per-round 12
     --validator-expensive-finalist-limit 20
     --validator-timeout-s 12
+    --validator-max-concurrency 16
+
+  creative:
+    --local-share 0.20
+    --llm-rounds 6
+    --llm-candidates-per-round 14
+    --generator-min-len 8
+    --generator-max-len 14
+    --llm-prompt-template-file resources/branding/llm/llm_prompt.creative_longer_names_v1.txt
+    --validator-expensive-finalist-limit 24
+    --validator-timeout-s 14
     --validator-max-concurrency 16
 
 Notes:
@@ -91,8 +114,21 @@ apply_profile() {
         --validator-max-concurrency 16
       )
       ;;
+    "creative")
+      LOCAL_SHARE="0.20"
+      LLM_ROUNDS="6"
+      LLM_CANDIDATES_PER_ROUND="14"
+      GENERATOR_MIN_LEN="8"
+      GENERATOR_MAX_LEN="14"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.creative_longer_names_v1.txt"
+      PROFILE_ARGS=(
+        --validator-expensive-finalist-limit 24
+        --validator-timeout-s 14
+        --validator-max-concurrency 16
+      )
+      ;;
     *)
-      echo "Unknown profile: $PROFILE (expected fast|quality)." >&2
+      echo "Unknown profile: $PROFILE (expected fast|quality|creative)." >&2
       exit 1
       ;;
   esac
@@ -112,6 +148,10 @@ while [[ $# -gt 0 ]]; do
       PROFILE="quality"
       shift
       ;;
+    --creative)
+      PROFILE="creative"
+      shift
+      ;;
     --out-dir)
       OUT_DIR="$2"
       shift 2
@@ -120,7 +160,15 @@ while [[ $# -gt 0 ]]; do
       LOCAL_MODEL="$2"
       shift 2
       ;;
+    --local-models)
+      LOCAL_MODEL="$2"
+      shift 2
+      ;;
     --remote-model)
+      REMOTE_MODEL="$2"
+      shift 2
+      ;;
+    --remote-models)
       REMOTE_MODEL="$2"
       shift 2
       ;;
@@ -153,6 +201,21 @@ while [[ $# -gt 0 ]]; do
     --llm-candidates-per-round)
       LLM_CANDIDATES_PER_ROUND="$2"
       USER_LLM_CANDIDATES_PER_ROUND="$2"
+      shift 2
+      ;;
+    --generator-min-len)
+      GENERATOR_MIN_LEN="$2"
+      USER_GENERATOR_MIN_LEN="$2"
+      shift 2
+      ;;
+    --generator-max-len)
+      GENERATOR_MAX_LEN="$2"
+      USER_GENERATOR_MAX_LEN="$2"
+      shift 2
+      ;;
+    --llm-prompt-template-file)
+      PROMPT_TEMPLATE_FILE="$2"
+      USER_PROMPT_TEMPLATE_FILE="$2"
       shift 2
       ;;
     --with-external-checks)
@@ -190,6 +253,24 @@ fi
 if [[ -n "$USER_LLM_CANDIDATES_PER_ROUND" ]]; then
   LLM_CANDIDATES_PER_ROUND="$USER_LLM_CANDIDATES_PER_ROUND"
 fi
+if [[ -n "$USER_GENERATOR_MIN_LEN" ]]; then
+  GENERATOR_MIN_LEN="$USER_GENERATOR_MIN_LEN"
+fi
+if [[ -n "$USER_GENERATOR_MAX_LEN" ]]; then
+  GENERATOR_MAX_LEN="$USER_GENERATOR_MAX_LEN"
+fi
+if [[ -n "$USER_PROMPT_TEMPLATE_FILE" ]]; then
+  PROMPT_TEMPLATE_FILE="$USER_PROMPT_TEMPLATE_FILE"
+fi
+
+if [[ "$GENERATOR_MIN_LEN" != <-> || "$GENERATOR_MAX_LEN" != <-> ]]; then
+  echo "Generator length bounds must be non-negative integers." >&2
+  exit 2
+fi
+if (( GENERATOR_MIN_LEN < 4 || GENERATOR_MAX_LEN > 20 || GENERATOR_MIN_LEN > GENERATOR_MAX_LEN )); then
+  echo "Invalid generator length bounds: min=$GENERATOR_MIN_LEN max=$GENERATOR_MAX_LEN (expected 4..20 and min<=max)." >&2
+  exit 2
+fi
 
 CMD=(
   python3 "$ROOT_DIR/scripts/branding/naming_campaign_runner.py"
@@ -206,11 +287,16 @@ CMD=(
   --llm-openai-ttl-s "$TTL_S"
   --llm-rounds "$LLM_ROUNDS"
   --llm-candidates-per-round "$LLM_CANDIDATES_PER_ROUND"
+  --generator-min-len "$GENERATOR_MIN_LEN"
+  --generator-max-len "$GENERATOR_MAX_LEN"
   --out-dir "$OUT_DIR"
 )
 
 if (( NO_EXTERNAL_CHECKS )); then
   CMD+=(--generator-no-external-checks)
+fi
+if [[ -n "${PROMPT_TEMPLATE_FILE:-}" ]]; then
+  CMD+=(--llm-prompt-template-file "$PROMPT_TEMPLATE_FILE")
 fi
 if (( LIVE_PROGRESS )); then
   CMD+=(--live-progress)
@@ -224,7 +310,7 @@ if (( ${#EXTRA_ARGS[@]} > 0 )); then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-echo "running hybrid=lmstudio+openrouter out_dir=$OUT_DIR profile=${PROFILE:-custom} local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE llm_rounds=$LLM_ROUNDS"
+echo "running hybrid=lmstudio+openrouter out_dir=$OUT_DIR profile=${PROFILE:-custom} local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE llm_rounds=$LLM_ROUNDS generator_len=${GENERATOR_MIN_LEN}-${GENERATOR_MAX_LEN}"
 printf '$ '
 printf '%q ' "${CMD[@]}"
 echo

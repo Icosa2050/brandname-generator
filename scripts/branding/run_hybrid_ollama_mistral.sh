@@ -13,6 +13,9 @@ MAX_RUNS="${HYBRID_MAX_RUNS:-1}"
 SLEEP_S="${HYBRID_SLEEP_S:-0}"
 LLM_ROUNDS="${HYBRID_LLM_ROUNDS:-2}"
 LLM_CANDIDATES_PER_ROUND="${HYBRID_LLM_CANDIDATES_PER_ROUND:-12}"
+GENERATOR_MIN_LEN="${HYBRID_GENERATOR_MIN_LEN:-6}"
+GENERATOR_MAX_LEN="${HYBRID_GENERATOR_MAX_LEN:-11}"
+PROMPT_TEMPLATE_FILE="${HYBRID_LLM_PROMPT_TEMPLATE_FILE:-}"
 LIVE_PROGRESS=1
 NO_EXTERNAL_CHECKS=1
 EXTRA_ARGS=()
@@ -26,8 +29,10 @@ Usage:
 
 Options:
   --out-dir <path>                   Campaign output root (default: /tmp/branding_hybrid_ollama)
-  --local-model <id>                 Ollama model id (default: gemma3:12b)
-  --remote-model <id>                OpenRouter model id (default: mistralai/mistral-small-creative)
+  --local-model <id|csv>             Ollama model id(s), comma-separated allowed
+  --local-models <csv>               Alias for --local-model
+  --remote-model <id|csv>            OpenRouter model id(s), comma-separated allowed
+  --remote-models <csv>              Alias for --remote-model
   --local-share <0..1>               Share of local rounds (default: 0.75)
   --openai-base-url <url>            Ollama OpenAI-compatible URL (default: http://127.0.0.1:11434/v1)
   --keep-alive <value>               keep_alive hint (default: 30m)
@@ -35,6 +40,9 @@ Options:
   --sleep-s <seconds>                Sleep between runs (default: 0)
   --llm-rounds <n>                   LLM rounds per run (default: 2)
   --llm-candidates-per-round <n>     Candidates requested each round (default: 12)
+  --generator-min-len <n>            Generator min length filter (default: 6)
+  --generator-max-len <n>            Generator max length filter (default: 11)
+  --llm-prompt-template-file <path>  Optional prompt template passed to campaign runner
   --with-external-checks             Keep generator external checks enabled
   --no-live-progress                 Disable live progress stream
   -h, --help                         Show this help
@@ -51,7 +59,15 @@ while [[ $# -gt 0 ]]; do
       LOCAL_MODEL="$2"
       shift 2
       ;;
+    --local-models)
+      LOCAL_MODEL="$2"
+      shift 2
+      ;;
     --remote-model)
+      REMOTE_MODEL="$2"
+      shift 2
+      ;;
+    --remote-models)
       REMOTE_MODEL="$2"
       shift 2
       ;;
@@ -83,6 +99,18 @@ while [[ $# -gt 0 ]]; do
       LLM_CANDIDATES_PER_ROUND="$2"
       shift 2
       ;;
+    --generator-min-len)
+      GENERATOR_MIN_LEN="$2"
+      shift 2
+      ;;
+    --generator-max-len)
+      GENERATOR_MAX_LEN="$2"
+      shift 2
+      ;;
+    --llm-prompt-template-file)
+      PROMPT_TEMPLATE_FILE="$2"
+      shift 2
+      ;;
     --with-external-checks)
       NO_EXTERNAL_CHECKS=0
       shift
@@ -108,6 +136,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$GENERATOR_MIN_LEN" != <-> || "$GENERATOR_MAX_LEN" != <-> ]]; then
+  echo "Generator length bounds must be non-negative integers." >&2
+  exit 2
+fi
+if (( GENERATOR_MIN_LEN < 4 || GENERATOR_MAX_LEN > 20 || GENERATOR_MIN_LEN > GENERATOR_MAX_LEN )); then
+  echo "Invalid generator length bounds: min=$GENERATOR_MIN_LEN max=$GENERATOR_MAX_LEN (expected 4..20 and min<=max)." >&2
+  exit 2
+fi
+
 CMD=(
   python3 "$ROOT_DIR/scripts/branding/naming_campaign_runner.py"
   --max-runs "$MAX_RUNS"
@@ -123,11 +160,16 @@ CMD=(
   --llm-openai-keep-alive "$KEEP_ALIVE"
   --llm-rounds "$LLM_ROUNDS"
   --llm-candidates-per-round "$LLM_CANDIDATES_PER_ROUND"
+  --generator-min-len "$GENERATOR_MIN_LEN"
+  --generator-max-len "$GENERATOR_MAX_LEN"
   --out-dir "$OUT_DIR"
 )
 
 if (( NO_EXTERNAL_CHECKS )); then
   CMD+=(--generator-no-external-checks)
+fi
+if [[ -n "${PROMPT_TEMPLATE_FILE:-}" ]]; then
+  CMD+=(--llm-prompt-template-file "$PROMPT_TEMPLATE_FILE")
 fi
 if (( LIVE_PROGRESS )); then
   CMD+=(--live-progress)
@@ -138,7 +180,7 @@ if (( ${#EXTRA_ARGS[@]} > 0 )); then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-echo "running hybrid=ollama+openrouter out_dir=$OUT_DIR local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE"
+echo "running hybrid=ollama+openrouter out_dir=$OUT_DIR local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE generator_len=${GENERATOR_MIN_LEN}-${GENERATOR_MAX_LEN}"
 printf '$ '
 printf '%q ' "${CMD[@]}"
 echo

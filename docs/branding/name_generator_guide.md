@@ -334,6 +334,8 @@ Notes:
   - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
   - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
   - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative --remote-models mistralai/mistral-small-creative,anthropic/claude-sonnet-4.5`
 
 ### 13d) Continuous robust loop (profile rotation + retry + targets)
 ```zsh
@@ -341,13 +343,13 @@ zsh scripts/branding/run_continuous_branding_supervisor.sh \
   --out-dir test_outputs/branding/continuous_hybrid \
   --backend auto \
   --fallback-backend ollama \
-  --profile-plan fast,fast,quality \
+  --profile-plan fast,quality,creative \
   --target-good 120 \
   --target-strong 40
 ```
 
 What it adds:
-- profile rotation (`fast` + `quality`) for throughput vs quality balance,
+- profile rotation (`fast` + `quality` + `creative`) for throughput vs quality vs distinctiveness balance,
 - health-based backend selection with fallback (`lmstudio`/`ollama`),
 - failure backoff + fail-streak cap,
 - automatic stop once strict target counts are reached

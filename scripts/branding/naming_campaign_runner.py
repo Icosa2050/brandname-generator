@@ -1794,6 +1794,18 @@ def parse_args() -> argparse.Namespace:
         help='Comma-separated seeds passed to generator --seeds.',
     )
     parser.add_argument(
+        '--generator-min-len',
+        type=int,
+        default=6,
+        help='Minimum candidate length passed to generator --min-len.',
+    )
+    parser.add_argument(
+        '--generator-max-len',
+        type=int,
+        default=11,
+        help='Maximum candidate length passed to generator --max-len.',
+    )
+    parser.add_argument(
         '--generator-only-llm-candidates',
         dest='generator_only_llm_candidates',
         action='store_true',
@@ -2246,6 +2258,15 @@ def main() -> int:
     if args.generator_only_llm_candidates and not args.llm_ideation_enabled:
         print('Invalid config: --generator-only-llm-candidates requires --llm-ideation-enabled.')
         return 1
+    if int(args.generator_min_len) < 4 or int(args.generator_min_len) > 20:
+        print('Invalid generator length config: --generator-min-len must be between 4 and 20.')
+        return 1
+    if int(args.generator_max_len) < 4 or int(args.generator_max_len) > 20:
+        print('Invalid generator length config: --generator-max-len must be between 4 and 20.')
+        return 1
+    if int(args.generator_min_len) > int(args.generator_max_len):
+        print('Invalid generator length config: --generator-min-len must be <= --generator-max-len.')
+        return 1
 
     sweep_combos: list[SweepCombo] = []
     for quota_profile in quota_profiles:
@@ -2307,6 +2328,7 @@ def main() -> int:
         f'validator_timeout_s={float(args.validator_timeout_s):.2f} '
         f'validator_memory_enabled={bool(str(args.validator_memory_db).strip())} '
         f'validator_memory_ttl_days={int(args.validator_memory_ttl_days)} '
+        f'generator_min_len={int(args.generator_min_len)} generator_max_len={int(args.generator_max_len)} '
         f'reset_db={args.reset_db} '
         f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} '
         f'llm_model={args.llm_model} llm_models={args.llm_models} '
@@ -2629,6 +2651,8 @@ def main() -> int:
             f'--source-influence-share={share:.2f}',
             f'--pool-size={pool_size}',
             f'--check-limit={check_limit}',
+            f'--min-len={int(args.generator_min_len)}',
+            f'--max-len={int(args.generator_max_len)}',
             f'--shortlist-size={shortlist_size}',
             '--shortlist-max-bucket=2',
             '--shortlist-max-prefix3=2',

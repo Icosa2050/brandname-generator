@@ -17,6 +17,7 @@ This folder now contains only active documentation.
   - `resources/branding/llm/llm_context.example.json`
   - `resources/branding/llm/llm_models.example.toml`
   - `resources/branding/llm/llm_prompt.utility_split_v1.txt`
+  - `resources/branding/llm/llm_prompt.creative_longer_names_v1.txt`
   - `resources/branding/templates/naming_user_test_results.csv`
 - `test_outputs/branding/`: mutable run outputs and working DBs.
 - `artifacts/branding/legacy/2026-02/`: historical output artifacts moved out of docs.

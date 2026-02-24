@@ -37,7 +37,7 @@ Options:
   --fallback-backend <none|lmstudio|ollama>
                                    Backend fallback on failed cycle (default: ollama)
   --profile-plan <csv>             Profile rotation per cycle (default: fast,fast,quality)
-                                   Allowed profiles: fast, quality, balanced
+                                   Allowed profiles: fast, quality, balanced, creative
   --target-good <n>                Stop when strict checked strong+consider >= n (default: 120)
                                    strict = all expensive checks pass/warn and zero fail/error
                                    expensive checks: domain,web,app_store,package,social
@@ -70,6 +70,17 @@ Profile definitions:
     --local-share 0.75
     --llm-rounds 2
     --llm-candidates-per-round 12
+
+  creative:
+    --local-share 0.20
+    --llm-rounds 6
+    --llm-candidates-per-round 14
+    --generator-min-len 8
+    --generator-max-len 14
+    --llm-prompt-template-file resources/branding/llm/llm_prompt.creative_longer_names_v1.txt
+    --validator-expensive-finalist-limit 24
+    --validator-timeout-s 14
+    --validator-max-concurrency 16
 
 Notes:
   - Uses existing wrappers:
@@ -203,11 +214,11 @@ for raw_profile in ${(s:,:)PROFILE_PLAN_RAW}; do
   local_profile="${local_profile//[[:space:]]/}"
   [[ -z "$local_profile" ]] && continue
   case "$local_profile" in
-    fast|quality|balanced)
+    fast|quality|balanced|creative)
       PROFILE_PLAN+=("$local_profile")
       ;;
     *)
-      echo "Invalid profile in --profile-plan: $local_profile (allowed: fast,quality,balanced)." >&2
+      echo "Invalid profile in --profile-plan: $local_profile (allowed: fast,quality,balanced,creative)." >&2
       exit 2
       ;;
   esac
@@ -296,6 +307,17 @@ build_profile_args() {
       ;;
     balanced)
       PROFILE_LOCAL_ARGS=(--local-share 0.75 --llm-rounds 2 --llm-candidates-per-round 12)
+      ;;
+    creative)
+      PROFILE_LOCAL_ARGS=(--local-share 0.20 --llm-rounds 6 --llm-candidates-per-round 14)
+      PROFILE_VALIDATOR_ARGS=(
+        --generator-min-len 8
+        --generator-max-len 14
+        --llm-prompt-template-file "$ROOT_DIR/resources/branding/llm/llm_prompt.creative_longer_names_v1.txt"
+        --validator-expensive-finalist-limit 24
+        --validator-timeout-s 14
+        --validator-max-concurrency 16
+      )
       ;;
     *)
       echo "Unknown profile: $profile" >&2
