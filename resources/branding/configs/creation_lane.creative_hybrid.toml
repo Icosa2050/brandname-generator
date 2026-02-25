@@ -1,0 +1,44 @@
+[metadata]
+config_version = "1.0"
+lane = "creation"
+profile = "creative_hybrid"
+
+[creation]
+# Primary run directory for campaign DB and outputs.
+out_dir = "test_outputs/branding/lane_creative_hybrid"
+
+# Optional explicit DB path; when empty defaults to {out_dir}/naming_campaign.db
+db = ""
+
+# Where to create decision_pack_<timestamp> folder.
+pack_output_dir = "{out_dir}"
+pack_prefix = "decision_pack_creative"
+
+# Broader manual-review surfaces for creative runs.
+review_tiers = "160,80"
+
+# Run one creative generation cycle before decision-pack build.
+run_generation = true
+generation_timeout_s = 0
+generation_command = [
+  "zsh",
+  "{repo_root}/scripts/branding/run_hybrid_lmstudio_mistral.sh",
+  "--profile", "creative",
+  "--remote-models", "mistralai/mistral-small-creative,anthropic/claude-sonnet-4.5",
+  "--max-runs", "1",
+  "--out-dir", "{out_dir}",
+  "--llm-rounds", "6",
+  "--llm-candidates-per-round", "14",
+  "--local-share", "0.35",
+  "--",
+  "--generator-min-len", "7",
+  "--generator-max-len", "13",
+  "--llm-prompt-template-file", "{repo_root}/resources/branding/llm/llm_prompt.creative_longer_names_v1.txt",
+  "--validator-expensive-finalist-limit", "24",
+  "--validator-timeout-s", "14",
+  "--validator-max-concurrency", "16"
+]
+
+include_unchecked = false
+python_bin = "python3"
+dry_run = false

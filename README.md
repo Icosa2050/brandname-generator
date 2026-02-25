@@ -121,6 +121,16 @@ zsh scripts/branding/report_campaign_progress.sh \
 ```
 
 ## More
+- Acceptance-tail automation (decision pack -> final survivors + legal precheck):
+  - `direnv exec . python3 scripts/branding/run_acceptance_tail.py --pack-dir <decision_pack_dir>`
+- Two-lane workflow (compact create lane -> manual review -> validation lane):
+  - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.default.toml`
+  - Review generated `review_unique_top120.csv` in the new decision pack (`keep/maybe/drop`).
+  - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.default.toml --pack-dir <decision_pack_dir>`
+  - Tuned profiles:
+    - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.creative_hybrid.toml`
+    - Review generated `review_unique_top160.csv` in the tuned decision pack (`keep/maybe/drop`).
+    - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.legal_heavy.toml --pack-dir <decision_pack_dir>`
 - Full runner flags:
   - `python3 scripts/branding/naming_campaign_runner.py --help`
 - Branding docs index:

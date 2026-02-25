@@ -271,6 +271,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--descriptive-fail-threshold', type=int, default=72)
     parser.add_argument('--descriptive-warn-threshold', type=int, default=52)
     parser.add_argument('--web-top', type=int, default=8)
+    parser.add_argument(
+        '--web-exact-domain-fail-threshold',
+        type=int,
+        default=2,
+        help='Hard-fail only when exact web collisions appear on this many distinct non-social domains.',
+    )
     parser.add_argument('--web-near-fail-threshold', type=int, default=2)
     parser.add_argument('--store-countries', default='de,ch,us')
     parser.add_argument('--social-unavailable-fail-threshold', type=int, default=3)
@@ -863,12 +869,27 @@ def check_web(name: str, args: argparse.Namespace) -> dict:
                 'source': source,
             },
         }
-    if exact_hits > 0:
+    exact_fail_threshold = max(1, int(getattr(args, 'web_exact_domain_fail_threshold', 2)))
+    if exact_hits >= exact_fail_threshold:
         return {
             'status': 'fail',
             'hard_fail': True,
             'score_delta': -20.0,
             'reason': 'web_exact_collision',
+            'evidence': {
+                'exact_hits': exact_hits,
+                'near_hits': near_hits,
+                'result_count': result_count,
+                'sample_domains': sample_domains,
+                'source': source,
+            },
+        }
+    if exact_hits > 0:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -6.0,
+            'reason': 'web_exact_warning',
             'evidence': {
                 'exact_hits': exact_hits,
                 'near_hits': near_hits,

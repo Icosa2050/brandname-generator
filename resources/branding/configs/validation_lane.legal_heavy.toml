@@ -1,0 +1,47 @@
+[metadata]
+config_version = "1.0"
+lane = "validation"
+profile = "legal_heavy"
+
+[validation]
+# Decision pack directory from creation lane.
+# Recommended: pass explicitly via --pack-dir when running.
+pack_dir = ""
+
+# Relative to pack_dir unless absolute path.
+decision_csv = "review_unique_top160.csv"
+
+# Guardrail: require real human triage before running.
+require_human_decisions = true
+min_human_decisions = 8
+
+mode = "keep_maybe"
+keep_top_n = 24
+maybe_top_n = 24
+final_top_n = 12
+recommended_top_n = 8
+
+scope = "global"
+gate = "strict"
+countries = "de,ch,it"
+
+# Re-run strict live screening on reviewed candidates.
+skip_live_screening = false
+skip_legal_research = false
+
+registry_top_n = 12
+web_top_n = 12
+print_top = 20
+
+euipo_probe = true
+euipo_timeout_ms = 30000
+euipo_settle_ms = 3500
+euipo_headful = false
+
+swissreg_ui_probe = true
+swissreg_timeout_ms = 30000
+swissreg_settle_ms = 3500
+swissreg_headful = false
+
+python_bin = "python3"
+dry_run = false

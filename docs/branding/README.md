@@ -14,6 +14,10 @@ This folder now contains only active documentation.
 - `resources/branding/`: static inputs, templates, prompt/context examples.
   - `resources/branding/inputs/source_inputs_v2.csv`
   - `resources/branding/lexicon/naming_false_friend_lexicon_v1.md`
+  - `resources/branding/configs/creation_lane.default.toml`
+  - `resources/branding/configs/creation_lane.creative_hybrid.toml`
+  - `resources/branding/configs/validation_lane.default.toml`
+  - `resources/branding/configs/validation_lane.legal_heavy.toml`
   - `resources/branding/llm/llm_context.example.json`
   - `resources/branding/llm/llm_models.example.toml`
   - `resources/branding/llm/llm_prompt.utility_split_v1.txt`

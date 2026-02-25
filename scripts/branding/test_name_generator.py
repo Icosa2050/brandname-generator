@@ -188,6 +188,44 @@ class NameGeneratorTest(unittest.TestCase):
         self.assertTrue(all(item.generator_family == 'seed' for item in generated))
         self.assertIn('clarity', {item.name for item in generated})
 
+    def test_web_collision_signal_ignores_social_handle_exact_hits(self) -> None:
+        quoted = [
+            ('https://www.tiktok.com/@billevis', 'BiL LeviS (@billevis) | TikTok'),
+        ]
+        plain = [
+            ('https://www.instagram.com/billevis/', 'Tina Christian (@billevis) • Instagram photos and videos'),
+            ('https://www.facebook.com/some.user', 'Billevi Halaluva - Facebook'),
+        ]
+        with mock.patch(
+            'name_generator.fetch_search_matches',
+            side_effect=[(quoted, True, 'ddg'), (plain, True, 'ddg')],
+        ):
+            exact, near, total, sample_domains, ok, source = ng.web_collision_signal('billevis', top_n=8)
+        self.assertTrue(ok)
+        self.assertEqual(source, 'ddg+ddg')
+        self.assertEqual(exact, 0)
+        self.assertEqual(near, 0)
+        self.assertEqual(total, 3)
+        self.assertIn('instagram.com', sample_domains)
+
+    def test_web_collision_signal_counts_exact_domain_label_match(self) -> None:
+        quoted: list[tuple[str, str]] = []
+        plain = [
+            ('https://ratefixe.ro/servicii', 'Rate Fixe - Credite rapide'),
+            ('https://example.com', 'Unrelated title'),
+        ]
+        with mock.patch(
+            'name_generator.fetch_search_matches',
+            side_effect=[(quoted, True, 'ddg'), (plain, True, 'ddg')],
+        ):
+            exact, near, total, sample_domains, ok, source = ng.web_collision_signal('ratefixe', top_n=8)
+        self.assertTrue(ok)
+        self.assertEqual(source, 'ddg+ddg')
+        self.assertEqual(exact, 1)
+        self.assertEqual(near, 0)
+        self.assertEqual(total, 2)
+        self.assertIn('ratefixe.ro', sample_domains)
+
     def test_rebalance_family_quotas_for_source_influence(self) -> None:
         out = ng.rebalance_family_quotas_for_source_influence(
             active_families=['coined', 'source_pool', 'blend'],
