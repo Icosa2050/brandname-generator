@@ -98,6 +98,7 @@ zsh scripts/branding/run_continuous_branding_supervisor.sh \
   --backend auto \
   --fallback-backend ollama \
   --profile-plan fast,quality,creative \
+  --max-usd-per-run 0.75 \
   --target-good 120 \
   --target-strong 40
 ```
@@ -120,7 +121,15 @@ zsh scripts/branding/report_campaign_progress.sh \
   --top-n 25
 ```
 
+Spend-cap note:
+- Hybrid wrappers and continuous supervisor now default to `0.75 USD` run caps.
+- Override anytime with `--max-usd-per-run <value>`.
+
 ## More
+- Local/remote workflow: `docs/branding/local_remote_ai_workflow.md`
+- Configuration reference: `docs/branding/campaign_configuration_reference.md`
+- Background daemon setup: `docs/branding/background_daemon_setup.md`
+- Run document archiver script: `scripts/branding/archive_run_documents.sh`
 - Full runner flags:
   - `python3 scripts/branding/naming_campaign_runner.py --help`
 - Branding docs index:
