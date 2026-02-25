@@ -1,0 +1,44 @@
+[metadata]
+config_version = "1.0"
+lane = "validation"
+
+[validation]
+# Decision pack directory from creation lane.
+pack_dir = ""
+
+# Relative to pack_dir unless absolute path.
+decision_csv = "review_unique_top120.csv"
+
+# Guardrail: require manual keep/maybe/drop marks before validation run.
+require_human_decisions = true
+min_human_decisions = 1
+
+mode = "keep_maybe"
+keep_top_n = 12
+maybe_top_n = 12
+final_top_n = 8
+recommended_top_n = 6
+
+scope = "global"
+gate = "strict"
+countries = "de,ch,it"
+
+skip_live_screening = false
+skip_legal_research = false
+
+registry_top_n = 8
+web_top_n = 8
+print_top = 12
+
+euipo_probe = true
+euipo_timeout_ms = 20000
+euipo_settle_ms = 2500
+euipo_headful = false
+
+swissreg_ui_probe = true
+swissreg_timeout_ms = 20000
+swissreg_settle_ms = 2500
+swissreg_headful = false
+
+python_bin = "python3"
+dry_run = false

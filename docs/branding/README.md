@@ -18,10 +18,18 @@ This folder now contains only active documentation.
 - `resources/branding/`: static inputs, templates, prompt/context examples.
   - `resources/branding/inputs/source_inputs_v2.csv`
   - `resources/branding/lexicon/naming_false_friend_lexicon_v1.md`
+  - `resources/branding/configs/creation_lane.default.toml`
+  - `resources/branding/configs/creation_lane.creative_hybrid.toml`
+  - `resources/branding/configs/validation_lane.default.toml`
+  - `resources/branding/configs/validation_lane.legal_heavy.toml`
   - `resources/branding/llm/llm_context.example.json`
   - `resources/branding/llm/llm_models.example.toml`
   - `resources/branding/llm/llm_prompt.utility_split_v1.txt`
   - `resources/branding/llm/llm_prompt.creative_longer_names_v1.txt`
+  - `resources/branding/llm/llm_prompt.brand_market_template_v1.txt`
+  - recommended custom prompt location:
+    - `resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+    - `resources/branding/llm/prompts/README.md`
   - `resources/branding/templates/naming_user_test_results.csv`
 - `test_outputs/branding/`: mutable run outputs and working DBs.
 - `artifacts/branding/legacy/2026-02/`: historical output artifacts moved out of docs.

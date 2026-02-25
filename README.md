@@ -79,6 +79,24 @@ direnv exec . python3 scripts/branding/naming_campaign_runner.py \
 
 Quality mode (slower, stronger): switch local model to `qwen3-vl-30b-a3b-instruct-mlx`.
 
+## Prompt Strategy (recommended)
+Canonical prompt location:
+- Base prompts: `resources/branding/llm/llm_prompt.*.txt`
+- New prompt template: `resources/branding/llm/llm_prompt.brand_market_template_v1.txt`
+- Recommended custom layout (per brand/market):
+  - `resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+
+How to wire a prompt into generation:
+- Direct runner: pass `--llm-prompt-template-file <absolute_or_repo_path>`
+- Two-lane creation config: set the same flag inside `generation_command` in:
+  - `resources/branding/configs/creation_lane.default.toml`
+  - `resources/branding/configs/creation_lane.creative_hybrid.toml`
+
+Recommendation:
+- Keep one prompt file per brand+market variant.
+- Do not edit shared base prompts for experiments; fork them to a brand/market file.
+- Keep run outputs isolated per variant (`--out-dir`) so comparisons stay clean.
+
 Shortcut wrappers:
 - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh`
 - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
@@ -121,15 +139,38 @@ zsh scripts/branding/report_campaign_progress.sh \
   --top-n 25
 ```
 
-Spend-cap note:
-- Hybrid wrappers and continuous supervisor now default to `0.75 USD` run caps.
-- Override anytime with `--max-usd-per-run <value>`.
+## Other Markets / Brands
+For a new market or brand line, duplicate the config pair and adjust:
+1. `scope` / store countries:
+   - `scope`: `global`, `eu`, `dach`
+   - screening countries: `de,ch,it` (or your target list)
+2. prompt file:
+   - `--llm-prompt-template-file resources/branding/llm/prompts/<brand>/<market>.txt`
+3. naming constraints:
+   - `--generator-min-len`, `--generator-max-len`
+   - `--llm-rounds`, `--llm-candidates-per-round`
+4. market lexicon/seeds:
+   - update seeds and source inputs (`resources/branding/inputs/source_inputs_v2.csv` or market-specific copy)
+5. legal gate settings:
+   - keep `validation_lane.legal_heavy.toml` defaults for final shortlist,
+   - adjust only if target registry coverage differs.
+
+Suggested pattern:
+- `resources/branding/configs/creation_lane.<brand>_<market>.toml`
+- `resources/branding/configs/validation_lane.<brand>_<market>.toml`
+- `test_outputs/branding/<brand>_<market>/...`
 
 ## More
-- Local/remote workflow: `docs/branding/local_remote_ai_workflow.md`
-- Configuration reference: `docs/branding/campaign_configuration_reference.md`
-- Background daemon setup: `docs/branding/background_daemon_setup.md`
-- Run document archiver script: `scripts/branding/archive_run_documents.sh`
+- Acceptance-tail automation (decision pack -> final survivors + legal precheck):
+  - `direnv exec . python3 scripts/branding/run_acceptance_tail.py --pack-dir <decision_pack_dir>`
+- Two-lane workflow (compact create lane -> manual review -> validation lane):
+  - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.default.toml`
+  - Review generated `review_unique_top120.csv` in the new decision pack (`keep/maybe/drop`).
+  - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.default.toml --pack-dir <decision_pack_dir>`
+  - Tuned profiles:
+    - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.creative_hybrid.toml`
+    - Review generated `review_unique_top160.csv` in the tuned decision pack (`keep/maybe/drop`).
+    - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.legal_heavy.toml --pack-dir <decision_pack_dir>`
 - Full runner flags:
   - `python3 scripts/branding/naming_campaign_runner.py --help`
 - Branding docs index:

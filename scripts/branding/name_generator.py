@@ -372,6 +372,21 @@ ARTIFACT_NGRAMS = (
 
 USER_AGENT = 'kostula-name-generator/1.0'
 
+# Social/profile hosts can contain arbitrary user handles and should not hard-fail
+# brand candidates as "exact web collisions" on their own.
+SOCIAL_PROFILE_DOMAINS = {
+    'facebook.com',
+    'instagram.com',
+    'tiktok.com',
+    'x.com',
+    'twitter.com',
+    'youtube.com',
+    'linkedin.com',
+    'threads.net',
+    'pinterest.com',
+    'snapchat.com',
+}
+
 
 @dataclass
 class GeneratedCandidate:
@@ -1977,6 +1992,23 @@ def extract_result_domain(raw_href: str) -> str:
     return domain
 
 
+def is_social_profile_domain(domain: str) -> bool:
+    token = str(domain or '').strip().lower()
+    if not token:
+        return False
+    for root in SOCIAL_PROFILE_DOMAINS:
+        if token == root or token.endswith(f'.{root}'):
+            return True
+    return False
+
+
+def domain_label(domain: str) -> str:
+    token = str(domain or '').strip().lower()
+    if not token:
+        return ''
+    return normalize_alpha(token.split('.', 1)[0])
+
+
 def parse_ddg_results(page: str) -> list[tuple[str, str]]:
     return re.findall(
         r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
@@ -2021,7 +2053,7 @@ def web_collision_signal(name: str, top_n: int) -> tuple[int, int, int, str, boo
     else:
         source = plain_source
 
-    exact_hits = 0
+    exact_domains: set[str] = set()
     near_hits = 0
     sample_domains: list[str] = []
     seen_domains: set[str] = set()
@@ -2030,30 +2062,50 @@ def web_collision_signal(name: str, top_n: int) -> tuple[int, int, int, str, boo
     plain_slice = plain_matches[:top_n]
 
     for href, raw_title in quoted_slice + plain_slice:
+        domain = extract_result_domain(href)
+        social_domain = is_social_profile_domain(domain)
         title = html.unescape(re.sub(r'<[^>]+>', ' ', raw_title))
         title_lc = title.lower()
         title_norm = normalize_alpha(title)
-        if title_norm == name or re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title_lc):
-            exact_hits += 1
+        domain_norm = domain_label(domain)
+        title_exact = title_norm == name or re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title_lc)
+        domain_exact = domain_norm == name
+        if title_exact or domain_exact:
+            if social_domain:
+                continue
+            if domain:
+                exact_domains.add(domain)
 
     for href, raw_title in plain_slice:
+        domain = extract_result_domain(href)
+        social_domain = is_social_profile_domain(domain)
         title = html.unescape(re.sub(r'<[^>]+>', ' ', raw_title))
         title_lc = title.lower()
+        domain_norm = domain_label(domain)
+        near_found = False
         tokens = set(re.findall(r'[a-z]{4,}', title_lc))
         for token in tokens:
             if token == name:
                 continue
             ratio = SequenceMatcher(None, token, name).ratio()
             if ratio >= 0.86 and abs(len(token) - len(name)) <= 2:
-                near_hits += 1
+                near_found = True
                 break
 
-        domain = extract_result_domain(href)
+        if not near_found and domain_norm and domain_norm != name:
+            ratio = SequenceMatcher(None, domain_norm, name).ratio()
+            if ratio >= 0.90 and abs(len(domain_norm) - len(name)) <= 2:
+                near_found = True
+
+        if near_found and not social_domain:
+            near_hits += 1
+
         if domain and domain not in seen_domains and len(sample_domains) < 4:
             sample_domains.append(domain)
             seen_domains.add(domain)
 
     total_results = len(quoted_matches) + len(plain_matches)
+    exact_hits = len(exact_domains)
     return exact_hits, near_hits, total_results, ';'.join(sample_domains), True, source
 
 
@@ -2313,7 +2365,7 @@ def run_external_checks(
         if store_check and exact_countries:
             mark_fail(c, f'exact_app_store_collision_{"-".join(exact_countries)}')
 
-        if web_check and c.web_exact_hits > 0:
+        if web_check and c.web_exact_hits >= 2:
             mark_fail(c, 'web_exact_collision')
 
         if gate == 'strict' and web_check and c.web_near_hits >= 2:

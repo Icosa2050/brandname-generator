@@ -1,0 +1,31 @@
+[metadata]
+config_version = "1.0"
+lane = "creation"
+
+[creation]
+# Campaign output directory containing naming_campaign.db.
+out_dir = "test_outputs/branding/continuous_creative_mistral_claude"
+
+# Optional explicit DB path; when empty defaults to {out_dir}/naming_campaign.db
+db = ""
+
+# Where to create decision_pack_<timestamp> folder.
+pack_output_dir = "{out_dir}"
+pack_prefix = "decision_pack"
+
+# Comma-separated review tiers to emit.
+review_tiers = "120,50"
+
+# Optional generation step before pack build.
+run_generation = false
+generation_timeout_s = 0
+
+# Either TOML array of args or a shell-like string with placeholders:
+# {repo_root}, {out_dir}, {db}
+generation_command = []
+# Example:
+# generation_command = ["zsh", "{repo_root}/scripts/branding/run_hybrid_lmstudio_mistral.sh", "--creative", "--max-runs", "1", "--out-dir", "{out_dir}"]
+
+include_unchecked = false
+python_bin = "python3"
+dry_run = false

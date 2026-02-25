@@ -91,6 +91,184 @@ python3 scripts/branding/name_generator.py \
   --json-output=test_outputs/branding/shortlist_screening.json
 ```
 
+### 4b) Build acceptance preflight from decision pack (no new generation)
+```zsh
+PACK_DIR=test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final
+python3 scripts/branding/build_acceptance_preflight.py \
+  --decision-csv "$PACK_DIR/review_unique_top120.csv" \
+  --db test_outputs/branding/continuous_creative_mistral_claude/naming_campaign.db \
+  --out-dir "$PACK_DIR/acceptance_keep_only" \
+  --mode keep \
+  --top-n 12
+```
+- `--mode keep_maybe` includes both manually kept and maybe rows.
+- Outputs:
+  - `acceptance_ranked.csv`
+  - `acceptance_strict_pass.csv`
+  - `acceptance_preflight_summary.md`
+
+### 4c) Automated legal + brand research precheck
+```zsh
+PACK_DIR=test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final
+python3 scripts/branding/legal_brand_research.py \
+  --names-file "$PACK_DIR/acceptance_keep_only/finalist_top12.txt" \
+  --countries de,ch,it \
+  --registry-top-n 8 \
+  --web-top-n 8 \
+  --output-csv "$PACK_DIR/acceptance_keep_only/legal_brand_research.csv" \
+  --output-json "$PACK_DIR/acceptance_keep_only/legal_brand_research.json" \
+  --print-top 12
+```
+- Wrapper (recommended):
+```zsh
+zsh scripts/branding/run_legal_brand_research.sh \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final
+```
+- EUIPO mode uses Playwright browser automation. One-time setup:
+```zsh
+python3 -m pip install playwright
+python3 -m playwright install chromium
+```
+- Swissreg mode uses the Swissreg UI search (`database-client/home`) and reads the `Marken` counter via Playwright.
+- Disable EUIPO probe if browser runtime is unavailable:
+```zsh
+zsh scripts/branding/run_legal_brand_research.sh \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --no-euipo-probe
+```
+- Disable Swissreg UI probe if needed:
+```zsh
+zsh scripts/branding/run_legal_brand_research.sh \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --no-swissreg-ui-probe
+```
+- This is an automated **precheck**, not legal advice.
+- Registry signals include search-index probes (DPMA/Swissreg/TMview) plus EUIPO eSearch browser probe, and should be used to prioritize counsel review, not replace it.
+- Web collision hard-fail triggers only when exact matches appear on at least two distinct non-social/commercial domains; social/profile handle-only exact matches (for example `@name` on TikTok/Instagram) are treated as soft signal.
+
+### 4d) One-command acceptance tail automation (recommended)
+Runs the manual last-mile flow in one step:
+- preflight from `review_unique_top120.csv`
+- keep/maybe lane shortlist extraction
+- strict live screening (optional)
+- merged final survivors
+- legal+brand precheck (optional)
+- recommended counsel list
+
+```zsh
+direnv exec . python3 scripts/branding/run_acceptance_tail.py \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final
+```
+
+Useful variants:
+```zsh
+# Reuse existing live-screening CSVs, only rebuild finals + legal
+direnv exec . python3 scripts/branding/run_acceptance_tail.py \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --skip-live-screening
+
+# Fast mode without browser probes (less robust legal signal)
+direnv exec . python3 scripts/branding/run_acceptance_tail.py \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --no-euipo-probe \
+  --no-swissreg-ui-probe
+
+# Build survivors only (no legal stage)
+direnv exec . python3 scripts/branding/run_acceptance_tail.py \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --skip-legal-research
+```
+
+Primary outputs in `<pack-dir>/acceptance_keep_only`:
+- `final_survivors_<N>.csv`
+- `final_survivors_<N>.txt`
+- `legal_brand_research_final<N>.csv` (unless skipped)
+- `recommended_top<N>_for_legal.csv`
+- `acceptance_tail_summary.md`
+
+### 4e) Two-Lane Workflow (config-driven)
+Use this when you want a compact, repeatable split:
+1. Creation lane generates a fresh decision pack for human review.
+2. Manual review edits `keep/maybe/drop`.
+3. Validation lane executes final filtering + legal precheck.
+
+Creation lane:
+```zsh
+direnv exec . python3 scripts/branding/run_creation_lane.py \
+  --config resources/branding/configs/creation_lane.default.toml
+```
+
+Validation lane (after review is filled):
+```zsh
+direnv exec . python3 scripts/branding/run_validation_lane.py \
+  --config resources/branding/configs/validation_lane.default.toml \
+  --pack-dir <decision_pack_dir>
+```
+
+Notes:
+- Creation lane creates `decision_pack_<timestamp>` with:
+  - `strict_strong.csv`
+  - `strict_good.csv`
+  - `brand_forward_needs_expensive_checks.csv`
+  - `review_unique_top120.csv` and `review_unique_top50.csv`
+  - `manifest.json`
+- Validation lane refuses to run if review CSV has no manual `keep/maybe/drop` marks.
+
+Tuned profile pair:
+```zsh
+# Creation: creative lane with remote mix (Mistral + Claude)
+direnv exec . python3 scripts/branding/run_creation_lane.py \
+  --config resources/branding/configs/creation_lane.creative_hybrid.toml
+
+# Validation: legal-heavy probes + stricter post-review narrowing
+# Review file for this tuned pair: review_unique_top160.csv
+direnv exec . python3 scripts/branding/run_validation_lane.py \
+  --config resources/branding/configs/validation_lane.legal_heavy.toml \
+  --pack-dir <decision_pack_dir>
+```
+
+### 4f) Prompt location and market/brand variants
+Recommended prompt placement:
+- baseline prompts: `resources/branding/llm/llm_prompt.*.txt`
+- reusable template: `resources/branding/llm/llm_prompt.brand_market_template_v1.txt`
+- brand+market prompts: `resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+
+How to use a custom prompt in lane configs:
+- add or update this flag inside creation `generation_command`:
+  - `--llm-prompt-template-file resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+
+How to adapt for another market:
+1. Create config copies:
+   - `resources/branding/configs/creation_lane.<brand>_<market>.toml`
+   - `resources/branding/configs/validation_lane.<brand>_<market>.toml`
+2. Update creation settings:
+   - `out_dir`
+   - prompt file path
+   - `--generator-min-len` / `--generator-max-len`
+   - `--llm-rounds` / `--llm-candidates-per-round`
+3. Update validation settings:
+   - `countries`
+   - shortlist sizes (`keep_top_n`, `maybe_top_n`, `final_top_n`)
+4. Keep legal probes enabled (`euipo_probe`, `swissreg_ui_probe`) for final shortlist.
+
+Example (DE/CH/IT real-estate settlement brand):
+```zsh
+direnv exec . python3 scripts/branding/run_creation_lane.py \
+  --config resources/branding/configs/creation_lane.creative_hybrid.toml \
+  --out-dir test_outputs/branding/settlement_dach_it
+
+# review keep/maybe/drop in review_unique_top160.csv
+
+direnv exec . python3 scripts/branding/run_validation_lane.py \
+  --config resources/branding/configs/validation_lane.legal_heavy.toml \
+  --pack-dir test_outputs/branding/settlement_dach_it/decision_pack_creative_<timestamp>
+```
+
+Operational recommendation:
+- Treat prompt + config as a pair versioned together.
+- Store each experimental variant under a dedicated `out_dir`.
+- Compare variants only at the same validation mode (`strict`, same countries, same legal settings).
+
 ### 5) Long-run exploration (50 candidates, network-degraded tolerant)
 ```zsh
 python3 scripts/branding/name_generator.py \

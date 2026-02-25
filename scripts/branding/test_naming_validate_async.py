@@ -31,6 +31,7 @@ def _base_args() -> argparse.Namespace:
         descriptive_fail_threshold=72,
         descriptive_warn_threshold=52,
         web_top=8,
+        web_exact_domain_fail_threshold=2,
         web_near_fail_threshold=2,
         social_unavailable_fail_threshold=3,
         strict_required_domains=False,
@@ -355,6 +356,28 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             self.assertIn('adaptive_concurrency', summary)
             self.assertEqual(summary['adaptive_concurrency'].get('min'), 1)
             self.assertEqual(summary['adaptive_concurrency'].get('max'), 4)
+
+    def test_check_web_single_exact_domain_is_warning(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.ng.web_collision_signal',
+            return_value=(1, 0, 12, 'example.com', True, 'ddg'),
+        ):
+            got = nva.check_web('verasettle', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertFalse(got['hard_fail'])
+        self.assertEqual(got['reason'], 'web_exact_warning')
+
+    def test_check_web_two_exact_domains_is_hard_fail(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.ng.web_collision_signal',
+            return_value=(2, 0, 12, 'example.com;example.net', True, 'ddg'),
+        ):
+            got = nva.check_web('verasettle', args)
+        self.assertEqual(got['status'], 'fail')
+        self.assertTrue(got['hard_fail'])
+        self.assertEqual(got['reason'], 'web_exact_collision')
 
 
 if __name__ == '__main__':
