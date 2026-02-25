@@ -227,6 +227,48 @@ direnv exec . python3 scripts/branding/run_validation_lane.py \
   --pack-dir <decision_pack_dir>
 ```
 
+### 4f) Prompt location and market/brand variants
+Recommended prompt placement:
+- baseline prompts: `resources/branding/llm/llm_prompt.*.txt`
+- reusable template: `resources/branding/llm/llm_prompt.brand_market_template_v1.txt`
+- brand+market prompts: `resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+
+How to use a custom prompt in lane configs:
+- add or update this flag inside creation `generation_command`:
+  - `--llm-prompt-template-file resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+
+How to adapt for another market:
+1. Create config copies:
+   - `resources/branding/configs/creation_lane.<brand>_<market>.toml`
+   - `resources/branding/configs/validation_lane.<brand>_<market>.toml`
+2. Update creation settings:
+   - `out_dir`
+   - prompt file path
+   - `--generator-min-len` / `--generator-max-len`
+   - `--llm-rounds` / `--llm-candidates-per-round`
+3. Update validation settings:
+   - `countries`
+   - shortlist sizes (`keep_top_n`, `maybe_top_n`, `final_top_n`)
+4. Keep legal probes enabled (`euipo_probe`, `swissreg_ui_probe`) for final shortlist.
+
+Example (DE/CH/IT real-estate settlement brand):
+```zsh
+direnv exec . python3 scripts/branding/run_creation_lane.py \
+  --config resources/branding/configs/creation_lane.creative_hybrid.toml \
+  --out-dir test_outputs/branding/settlement_dach_it
+
+# review keep/maybe/drop in review_unique_top160.csv
+
+direnv exec . python3 scripts/branding/run_validation_lane.py \
+  --config resources/branding/configs/validation_lane.legal_heavy.toml \
+  --pack-dir test_outputs/branding/settlement_dach_it/decision_pack_creative_<timestamp>
+```
+
+Operational recommendation:
+- Treat prompt + config as a pair versioned together.
+- Store each experimental variant under a dedicated `out_dir`.
+- Compare variants only at the same validation mode (`strict`, same countries, same legal settings).
+
 ### 5) Long-run exploration (50 candidates, network-degraded tolerant)
 ```zsh
 python3 scripts/branding/name_generator.py \
