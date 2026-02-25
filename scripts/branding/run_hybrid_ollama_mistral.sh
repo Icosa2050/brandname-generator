@@ -13,6 +13,7 @@ MAX_RUNS="${HYBRID_MAX_RUNS:-1}"
 SLEEP_S="${HYBRID_SLEEP_S:-0}"
 LLM_ROUNDS="${HYBRID_LLM_ROUNDS:-2}"
 LLM_CANDIDATES_PER_ROUND="${HYBRID_LLM_CANDIDATES_PER_ROUND:-12}"
+MAX_USD_PER_RUN="${HYBRID_MAX_USD_PER_RUN:-0.75}"
 GENERATOR_MIN_LEN="${HYBRID_GENERATOR_MIN_LEN:-6}"
 GENERATOR_MAX_LEN="${HYBRID_GENERATOR_MAX_LEN:-11}"
 PROMPT_TEMPLATE_FILE="${HYBRID_LLM_PROMPT_TEMPLATE_FILE:-}"
@@ -40,6 +41,7 @@ Options:
   --sleep-s <seconds>                Sleep between runs (default: 0)
   --llm-rounds <n>                   LLM rounds per run (default: 2)
   --llm-candidates-per-round <n>     Candidates requested each round (default: 12)
+  --max-usd-per-run <value>          Run-level LLM spend cap (default: 0.75)
   --generator-min-len <n>            Generator min length filter (default: 6)
   --generator-max-len <n>            Generator max length filter (default: 11)
   --llm-prompt-template-file <path>  Optional prompt template passed to campaign runner
@@ -97,6 +99,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --llm-candidates-per-round)
       LLM_CANDIDATES_PER_ROUND="$2"
+      shift 2
+      ;;
+    --max-usd-per-run)
+      MAX_USD_PER_RUN="$2"
       shift 2
       ;;
     --generator-min-len)
@@ -160,6 +166,7 @@ CMD=(
   --llm-openai-keep-alive "$KEEP_ALIVE"
   --llm-rounds "$LLM_ROUNDS"
   --llm-candidates-per-round "$LLM_CANDIDATES_PER_ROUND"
+  --llm-max-usd-per-run "$MAX_USD_PER_RUN"
   --generator-min-len "$GENERATOR_MIN_LEN"
   --generator-max-len "$GENERATOR_MAX_LEN"
   --out-dir "$OUT_DIR"
@@ -180,7 +187,7 @@ if (( ${#EXTRA_ARGS[@]} > 0 )); then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-echo "running hybrid=ollama+openrouter out_dir=$OUT_DIR local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE generator_len=${GENERATOR_MIN_LEN}-${GENERATOR_MAX_LEN}"
+echo "running hybrid=ollama+openrouter out_dir=$OUT_DIR local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE max_usd_per_run=$MAX_USD_PER_RUN generator_len=${GENERATOR_MIN_LEN}-${GENERATOR_MAX_LEN}"
 printf '$ '
 printf '%q ' "${CMD[@]}"
 echo

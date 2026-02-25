@@ -116,6 +116,7 @@ zsh scripts/branding/run_continuous_branding_supervisor.sh \
   --backend auto \
   --fallback-backend ollama \
   --profile-plan fast,quality,creative \
+  --max-usd-per-run 0.75 \
   --target-good 120 \
   --target-strong 40
 ```
