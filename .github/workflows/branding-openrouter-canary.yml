@@ -53,7 +53,7 @@ jobs:
             --llm-model "$OPENROUTER_MODEL" \
             --llm-openrouter-http-referer "https://github.com/Icosa2050/brandname-generator" \
             --llm-openrouter-x-title "brand-name-generator" \
-            --llm-context-file docs/branding/llm_context.example.json \
+            --llm-context-file resources/branding/llm/llm_context.example.json \
             --llm-rounds 1 \
             --llm-candidates-per-round 10 \
             --llm-max-call-latency-ms 30000 \

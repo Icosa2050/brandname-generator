@@ -78,7 +78,7 @@ jobs:
             --llm-ideation-enabled \
             --llm-provider fixture \
             --llm-fixture-input /tmp/branding_fixture_candidates.json \
-            --llm-context-file docs/branding/llm_context.example.json \
+            --llm-context-file resources/branding/llm/llm_context.example.json \
             --llm-rounds 1 \
             --llm-candidates-per-round 6 \
             --out-dir /tmp/branding_ci_smoke
