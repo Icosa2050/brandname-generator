@@ -16,6 +16,7 @@ SLEEP_OK_S="${CONTINUOUS_SLEEP_OK_S:-20}"
 SLEEP_FAIL_BASE_S="${CONTINUOUS_SLEEP_FAIL_BASE_S:-30}"
 SLEEP_FAIL_MAX_S="${CONTINUOUS_SLEEP_FAIL_MAX_S:-300}"
 MAX_FAIL_STREAK="${CONTINUOUS_MAX_FAIL_STREAK:-12}"
+MAX_USD_PER_RUN="${CONTINUOUS_MAX_USD_PER_RUN:-0.75}"
 
 LMSTUDIO_HEALTH_URL="${LMSTUDIO_HEALTH_URL:-http://127.0.0.1:1234/v1/models}"
 OLLAMA_HEALTH_URL="${OLLAMA_HEALTH_URL:-http://127.0.0.1:11434/api/tags}"
@@ -47,6 +48,7 @@ Options:
   --sleep-fail-base-s <seconds>    Failure backoff base (default: 30)
   --sleep-fail-max-s <seconds>     Failure backoff cap (default: 300)
   --max-fail-streak <n>            Abort after this many consecutive failures (default: 12)
+  --max-usd-per-run <value>        Run-level LLM spend cap forwarded to runner (default: 0.75)
   --no-healthcheck                 Skip local backend health probes
   --dry-run                        Print intended cycle commands without running them
   -h, --help                       Show this help
@@ -92,6 +94,10 @@ EOF
 
 is_nonneg_int() {
   [[ "${1:-}" == <-> ]]
+}
+
+is_nonneg_decimal() {
+  [[ "${1:-}" =~ '^[0-9]+([.][0-9]+)?$' ]]
 }
 
 normalize_backend() {
@@ -166,6 +172,10 @@ while [[ $# -gt 0 ]]; do
       MAX_FAIL_STREAK="$2"
       shift 2
       ;;
+    --max-usd-per-run)
+      MAX_USD_PER_RUN="$2"
+      shift 2
+      ;;
     --no-healthcheck)
       HEALTHCHECK=0
       shift
@@ -205,6 +215,10 @@ for raw in "$TARGET_GOOD" "$TARGET_STRONG" "$MAX_CYCLES" "$SLEEP_OK_S" "$SLEEP_F
     exit 2
   fi
 done
+if ! is_nonneg_decimal "$MAX_USD_PER_RUN"; then
+  echo "Expected non-negative decimal for --max-usd-per-run, got: $MAX_USD_PER_RUN" >&2
+  exit 2
+fi
 
 typeset -a PROFILE_PLAN=()
 typeset -a PROFILE_LOCAL_ARGS=()
@@ -416,7 +430,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 echo "$$" > "$LOCK_DIR/pid"
 
-log_event event=start out_dir="$OUT_DIR" backend="$PRIMARY_BACKEND" fallback="$FALLBACK_BACKEND" profile_plan="$PROFILE_PLAN_RAW" target_good="$TARGET_GOOD" target_strong="$TARGET_STRONG" max_cycles="$MAX_CYCLES" dry_run="$DRY_RUN"
+log_event event=start out_dir="$OUT_DIR" backend="$PRIMARY_BACKEND" fallback="$FALLBACK_BACKEND" profile_plan="$PROFILE_PLAN_RAW" target_good="$TARGET_GOOD" target_strong="$TARGET_STRONG" max_cycles="$MAX_CYCLES" max_usd_per_run="$MAX_USD_PER_RUN" dry_run="$DRY_RUN"
 
 collect_metrics
 prev_good_count="$GOOD_COUNT"
@@ -450,6 +464,7 @@ while true; do
     --max-runs 1
     --sleep-s 0
     --no-live-progress
+    --max-usd-per-run "$MAX_USD_PER_RUN"
     "${PROFILE_LOCAL_ARGS[@]}"
   )
   if (( ${#PROFILE_VALIDATOR_ARGS[@]} > 0 || ${#EXTRA_RUNNER_ARGS[@]} > 0 )); then
@@ -485,6 +500,7 @@ while true; do
         --max-runs 1
         --sleep-s 0
         --no-live-progress
+        --max-usd-per-run "$MAX_USD_PER_RUN"
         "${PROFILE_LOCAL_ARGS[@]}"
       )
       if (( ${#PROFILE_VALIDATOR_ARGS[@]} > 0 || ${#EXTRA_RUNNER_ARGS[@]} > 0 )); then

@@ -3,6 +3,9 @@
 This folder now contains only active documentation.
 
 ## Active documentation
+- `docs/branding/local_remote_ai_workflow.md`: practical workflow for local-only, remote-only, and hybrid ideation modes.
+- `docs/branding/campaign_configuration_reference.md`: grouped configuration reference and high-impact runner options.
+- `docs/branding/background_daemon_setup.md`: cross-platform background daemon setup and operating guidance.
 - `docs/branding/name_generator_guide.md`: operational guide and command reference.
 - `docs/branding/naming_brief.md`: product/problem framing for naming.
 - `docs/branding/naming_rubric.md`: scoring rubric.
@@ -15,6 +18,7 @@ This folder now contains only active documentation.
 - Repository dependency manifests:
   - `requirements.txt`
   - `requirements-dev.txt`
+- `scripts/branding/archive_run_documents.sh`: manual archive/zip helper for non-review run documents.
 - `resources/branding/`: static inputs, templates, prompt/context examples.
   - `resources/branding/inputs/source_inputs_v2.csv`
   - `resources/branding/inputs/source_inputs_core_v3.csv`
