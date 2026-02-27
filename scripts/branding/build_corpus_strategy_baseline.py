@@ -11,6 +11,8 @@ from pathlib import Path
 
 
 EXPENSIVE_CHECKS = ('domain', 'web', 'app_store', 'package', 'social')
+EXPENSIVE_CHECK_COUNT = len(EXPENSIVE_CHECKS)
+EXPENSIVE_CHECK_SQL_LIST = ','.join(f"'{check}'" for check in EXPENSIVE_CHECKS)
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,14 +83,14 @@ def main() -> int:
 
         strict_good = scalar(
             conn,
-            """
+            f"""
             WITH exp AS (
               SELECT candidate_id,
                      COUNT(DISTINCT CASE
-                       WHEN check_type IN ('domain','web','app_store','package','social')
+                       WHEN check_type IN ({EXPENSIVE_CHECK_SQL_LIST})
                         AND status IN ('pass','warn') THEN check_type END) AS ok_types,
                      SUM(CASE
-                       WHEN check_type IN ('domain','web','app_store','package','social')
+                       WHEN check_type IN ({EXPENSIVE_CHECK_SQL_LIST})
                         AND status IN ('fail','error') THEN 1 ELSE 0 END) AS bad_cnt
               FROM validation_results
               GROUP BY candidate_id
@@ -99,19 +101,19 @@ def main() -> int:
             WHERE c.state='checked'
               AND c.current_recommendation IN ('strong','consider')
               AND IFNULL(e.bad_cnt,0)=0
-              AND IFNULL(e.ok_types,0)=5
+              AND IFNULL(e.ok_types,0)={EXPENSIVE_CHECK_COUNT}
             """,
         )
         strict_strong = scalar(
             conn,
-            """
+            f"""
             WITH exp AS (
               SELECT candidate_id,
                      COUNT(DISTINCT CASE
-                       WHEN check_type IN ('domain','web','app_store','package','social')
+                       WHEN check_type IN ({EXPENSIVE_CHECK_SQL_LIST})
                         AND status IN ('pass','warn') THEN check_type END) AS ok_types,
                      SUM(CASE
-                       WHEN check_type IN ('domain','web','app_store','package','social')
+                       WHEN check_type IN ({EXPENSIVE_CHECK_SQL_LIST})
                         AND status IN ('fail','error') THEN 1 ELSE 0 END) AS bad_cnt
               FROM validation_results
               GROUP BY candidate_id
@@ -122,7 +124,7 @@ def main() -> int:
             WHERE c.state='checked'
               AND c.current_recommendation='strong'
               AND IFNULL(e.bad_cnt,0)=0
-              AND IFNULL(e.ok_types,0)=5
+              AND IFNULL(e.ok_types,0)={EXPENSIVE_CHECK_COUNT}
             """,
         )
 
@@ -132,10 +134,10 @@ def main() -> int:
         )
         expensive_mix = query_rows(
             conn,
-            """
+            f"""
             SELECT check_type, status, COUNT(*) AS n
             FROM validation_results
-            WHERE check_type IN ('domain','web','app_store','package','social')
+            WHERE check_type IN ({EXPENSIVE_CHECK_SQL_LIST})
             GROUP BY check_type, status
             ORDER BY check_type ASC, status ASC
             """,

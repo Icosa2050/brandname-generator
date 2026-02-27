@@ -728,7 +728,7 @@ def main() -> int:
         return 1
     zipf_enabled = args.zipf_min > 0 or args.zipf_max > 0
     if zipf_enabled and _zipf_frequency is None and args.zipf_require_package:
-        print('zipf filtering requested but wordfreq package is unavailable (set --zipf-require-package to enforce).')
+        print('zipf filtering requested but wordfreq package is unavailable. Install wordfreq or remove --zipf-require-package flag.')
         return 1
     if zipf_enabled and _zipf_frequency is None:
         print('zipf_filter_warning wordfreq package unavailable; zipf thresholds ignored.')
