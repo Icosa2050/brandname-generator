@@ -190,6 +190,116 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             self.assertIn('verodoma', got)
             self.assertEqual(got['verodoma'], ['required_domain_com_not_available'])
 
+    def test_demote_checked_candidates_with_validation_failures(self) -> None:
+        with closing(sqlite3.connect(':memory:')) as conn:
+            ndb.ensure_schema(conn)
+            run_id = ndb.create_run(
+                conn,
+                source_path=':memory:',
+                scope='global',
+                gate_mode='balanced',
+                variation_profile='test',
+                status='completed',
+                config={},
+                summary={},
+            )
+            hard_fail_id = ndb.upsert_candidate(
+                conn,
+                name_display='HardFailName',
+                total_score=82.0,
+                risk_score=20.0,
+                recommendation='strong',
+                quality_score=85.0,
+                engine_id='explicit',
+                parent_ids='',
+                status='checked',
+                rejection_reason='',
+            )
+            expensive_fail_id = ndb.upsert_candidate(
+                conn,
+                name_display='ExpensiveFailName',
+                total_score=78.0,
+                risk_score=21.0,
+                recommendation='consider',
+                quality_score=81.0,
+                engine_id='explicit',
+                parent_ids='',
+                status='checked',
+                rejection_reason='',
+            )
+            keep_id = ndb.upsert_candidate(
+                conn,
+                name_display='KeepName',
+                total_score=79.0,
+                risk_score=18.0,
+                recommendation='strong',
+                quality_score=82.0,
+                engine_id='explicit',
+                parent_ids='',
+                status='checked',
+                rejection_reason='',
+            )
+            conn.execute("UPDATE candidates SET state='checked' WHERE id IN (?, ?, ?)", (hard_fail_id, expensive_fail_id, keep_id))
+            ndb.add_validation_result(
+                conn,
+                candidate_id=hard_fail_id,
+                run_id=run_id,
+                check_type='descriptive',
+                status='fail',
+                score_delta=-20.0,
+                hard_fail=True,
+                reason='descriptive_hard_fail',
+                evidence={},
+            )
+            ndb.add_validation_result(
+                conn,
+                candidate_id=expensive_fail_id,
+                run_id=run_id,
+                check_type='domain',
+                status='fail',
+                score_delta=-10.0,
+                hard_fail=False,
+                reason='required_domain_com_not_available',
+                evidence={},
+            )
+            ndb.add_validation_result(
+                conn,
+                candidate_id=keep_id,
+                run_id=run_id,
+                check_type='domain',
+                status='warn',
+                score_delta=0.0,
+                hard_fail=False,
+                reason='',
+                evidence={},
+            )
+            demoted = nva.demote_checked_candidates_with_validation_failures(
+                conn,
+                actor='test',
+            )
+            self.assertEqual(demoted, 2)
+            rows = conn.execute(
+                """
+                SELECT id, state, status, rejection_reason
+                FROM candidates
+                WHERE id IN (?, ?, ?)
+                ORDER BY id
+                """,
+                (hard_fail_id, expensive_fail_id, keep_id),
+            ).fetchall()
+            got = {int(row[0]): (str(row[1]), str(row[2]), str(row[3])) for row in rows}
+            self.assertEqual(got[hard_fail_id], ('rejected_validation', 'rejected', 'validation_failed'))
+            self.assertEqual(got[expensive_fail_id], ('rejected_validation', 'rejected', 'validation_failed'))
+            self.assertEqual(got[keep_id], ('checked', 'checked', ''))
+            transition_count = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM state_transitions
+                WHERE to_state='rejected_validation'
+                """
+            ).fetchone()[0]
+            self.assertEqual(int(transition_count), 2)
+
     def test_run_single_job_uses_two_lock_acquisitions_on_success(self) -> None:
         with closing(sqlite3.connect(':memory:')) as conn:
             ndb.ensure_schema(conn)

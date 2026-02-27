@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 import time
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
@@ -169,7 +168,6 @@ class EuipoProbe:
             self._page.mouse.wheel(0, 1200)
             self._page.wait_for_timeout(max(1200, min(3000, self.settle_ms)))
 
-            html = self._page.content()
             body_text = self._page.inner_text('body')
         except Exception as exc:  # pragma: no cover - env-dependent
             return EuipoProbeResult(

@@ -1,0 +1,6 @@
+# Runtime dependencies for optional branding pipeline capabilities.
+#
+# Core generation/validation flows are standard-library based.
+# Install this file to enable browser-based legal probes and zipf filtering.
+playwright>=1.52,<2.0
+wordfreq>=3.1,<4.0

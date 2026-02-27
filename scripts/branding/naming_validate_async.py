@@ -1414,6 +1414,64 @@ def mark_candidates_checked(conn: sqlite3.Connection, rows: list[CandidateRow], 
         )
 
 
+def demote_checked_candidates_with_validation_failures(
+    conn: sqlite3.Connection,
+    *,
+    actor: str,
+) -> int:
+    ts = ndb.now_iso()
+    rows = conn.execute(
+        """
+        SELECT c.id, c.state
+        FROM candidates c
+        WHERE c.state = 'checked'
+          AND (
+            EXISTS (
+                SELECT 1
+                FROM validation_results vr
+                WHERE vr.candidate_id = c.id
+                  AND COALESCE(vr.hard_fail, 0) = 1
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM validation_results vr
+                WHERE vr.candidate_id = c.id
+                  AND vr.check_type IN ('domain', 'web', 'app_store', 'package', 'social')
+                  AND vr.status IN ('fail', 'error')
+            )
+          )
+        """
+    ).fetchall()
+    demoted = 0
+    for row in rows:
+        candidate_id = int(row[0])
+        from_state = str(row[1] or '')
+        conn.execute(
+            """
+            UPDATE candidates
+            SET state = ?, status = ?, rejection_reason = ?, state_updated_at = ?
+            WHERE id = ?
+            """,
+            ('rejected_validation', 'rejected', 'validation_failed', ts, candidate_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO state_transitions(candidate_id, from_state, to_state, actor, note, created_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                from_state,
+                'rejected_validation',
+                actor,
+                'demoted due to validation hard-fail or expensive check fail/error',
+                ts,
+            ),
+        )
+        demoted += 1
+    return demoted
+
+
 async def orchestrate(args: argparse.Namespace) -> int:
     started_monotonic = time.monotonic()
     db_path = Path(args.db)
@@ -1713,6 +1771,10 @@ async def orchestrate(args: argparse.Namespace) -> int:
         await asyncio.gather(*tasks)
 
         mark_candidates_checked(conn, candidates, actor='naming_validate_async')
+        demoted_validation_count = demote_checked_candidates_with_validation_failures(
+            conn,
+            actor='naming_validate_async',
+        )
         summary = summarize_run(conn, run_id)
         tier_summary = summarize_results_by_tier(
             conn,
@@ -1786,6 +1848,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
             concurrency_initial=adaptive_summary['initial'],
             concurrency_final=adaptive_summary['final'],
             concurrency_adjustment_count=adaptive_summary['adjustment_count'],
+            demoted_validation_count=demoted_validation_count,
             **lock_metrics,
         )
         conn.execute(
@@ -1807,6 +1870,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                         'memory_hard_fail_count': memory_hard_fail_count,
                         'memory_exclusions_upserted': memory_exclusions_upserted,
                         'adaptive_concurrency': adaptive_summary,
+                        'demoted_validation_count': demoted_validation_count,
                         **lock_metrics,
                     },
                     ensure_ascii=False,
@@ -1835,6 +1899,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'memory_hard_fail_count': memory_hard_fail_count,
                 'memory_exclusions_upserted': memory_exclusions_upserted,
                 'adaptive_concurrency': adaptive_summary,
+                'demoted_validation_count': demoted_validation_count,
                 **lock_metrics,
             },
             ensure_ascii=False,

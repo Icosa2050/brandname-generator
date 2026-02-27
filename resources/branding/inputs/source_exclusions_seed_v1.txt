@@ -1,0 +1,44 @@
+# High-risk modern fantasy / IP-tethered lexemes to avoid in generation atoms
+palantir
+gandalf
+sauron
+mordor
+middleearth
+numenor
+silmaril
+mithril
+aragorn
+legolas
+galadriel
+
+# Ultra-common or collision-heavy brand/entity terms (seed exclusion)
+google
+amazon
+microsoft
+apple
+meta
+oracle
+adobe
+salesforce
+sap
+stripe
+paypal
+visa
+mastercard
+airbnb
+uber
+tesla
+openai
+anthropic
+notion
+figma
+
+# Overused mythic primaries (public-domain but collision-prone)
+zeus
+thor
+odin
+apollo
+athena
+hera
+ares
+poseidon

@@ -23,9 +23,15 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import naming_db as ndb
 import path_config as bpaths
+
+try:
+    from wordfreq import zipf_frequency as _zipf_frequency
+except Exception:  # pragma: no cover - optional dependency
+    _zipf_frequency = None
 
 
 @dataclass
@@ -93,6 +99,15 @@ TXT_BLOCKED_NAME_TOKENS = {
     'words',
     'would',
 }
+EXCLUSION_FIELD_KEYS = (
+    'name',
+    'atom',
+    'label',
+    'title',
+    'name_display',
+    'company',
+    'entity',
+)
 
 
 def parse_csv_set(raw: str) -> list[str]:
@@ -395,6 +410,137 @@ def parse_file(path: Path, default_label: str, default_conf: float) -> list[Sour
     return parse_txt(path, default_label, default_conf)
 
 
+def _normalize_exclusion_name(value: object) -> str:
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if '|' in text:
+        text = text.split('|', 1)[0].strip()
+    if ',' in text:
+        text = text.split(',', 1)[0].strip()
+    return ndb.normalize_name(text)
+
+
+def _collect_exclusions_from_json(value: Any, out: set[str]) -> None:
+    if isinstance(value, str):
+        normalized = _normalize_exclusion_name(value)
+        if normalized:
+            out.add(normalized)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_exclusions_from_json(item, out)
+        return
+    if isinstance(value, dict):
+        for key in EXCLUSION_FIELD_KEYS:
+            if key in value:
+                normalized = _normalize_exclusion_name(value.get(key))
+                if normalized:
+                    out.add(normalized)
+        for item in value.values():
+            if isinstance(item, (list, dict)):
+                _collect_exclusions_from_json(item, out)
+
+
+def load_exclusion_names(paths: list[Path]) -> set[str]:
+    out: set[str] = set()
+    for path in paths:
+        suffix = path.suffix.lower()
+        if suffix == '.csv':
+            with path.open('r', encoding='utf-8', newline='') as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    for key in EXCLUSION_FIELD_KEYS:
+                        if key not in row:
+                            continue
+                        normalized = _normalize_exclusion_name(row.get(key))
+                        if normalized:
+                            out.add(normalized)
+            continue
+        if suffix == '.json':
+            payload = json.loads(path.read_text(encoding='utf-8'))
+            _collect_exclusions_from_json(payload, out)
+            continue
+        for raw in path.read_text(encoding='utf-8').splitlines():
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            normalized = _normalize_exclusion_name(line)
+            if normalized:
+                out.add(normalized)
+    return out
+
+
+def maybe_zipf_frequency(name: str, *, lang: str) -> float | None:
+    if _zipf_frequency is None:
+        return None
+    normalized = ndb.normalize_name(name)
+    if not normalized:
+        return None
+    try:
+        return float(_zipf_frequency(normalized, lang))
+    except Exception:  # pragma: no cover - defensive for optional dependency runtime
+        return None
+
+
+def filter_source_records(
+    records: list[SourceRecord],
+    *,
+    exclusion_names: set[str],
+    zipf_min: float,
+    zipf_max: float,
+    zipf_lang: str,
+) -> tuple[list[SourceRecord], dict[str, object]]:
+    kept: list[SourceRecord] = []
+    excluded_count = 0
+    zipf_low_count = 0
+    zipf_high_count = 0
+    excluded_samples: list[str] = []
+    zipf_low_samples: list[str] = []
+    zipf_high_samples: list[str] = []
+
+    for record in records:
+        normalized = ndb.normalize_name(record.name)
+        if not normalized:
+            continue
+        if normalized in exclusion_names:
+            excluded_count += 1
+            if len(excluded_samples) < 20:
+                excluded_samples.append(normalized)
+            continue
+
+        zipf_score = maybe_zipf_frequency(record.name, lang=zipf_lang)
+        if zipf_score is not None:
+            record.metadata['zipf_frequency'] = round(zipf_score, 4)
+            record.metadata['zipf_language'] = zipf_lang
+
+        if zipf_min > 0 and zipf_score is not None and zipf_score < zipf_min:
+            zipf_low_count += 1
+            if len(zipf_low_samples) < 20:
+                zipf_low_samples.append(normalized)
+            continue
+
+        if zipf_max > 0 and zipf_score is not None and zipf_score > zipf_max:
+            zipf_high_count += 1
+            if len(zipf_high_samples) < 20:
+                zipf_high_samples.append(normalized)
+            continue
+
+        kept.append(record)
+
+    summary = {
+        'raw_count': len(records),
+        'kept_count': len(kept),
+        'excluded_count': excluded_count,
+        'zipf_low_count': zipf_low_count,
+        'zipf_high_count': zipf_high_count,
+        'excluded_samples': sorted(set(excluded_samples)),
+        'zipf_low_samples': sorted(set(zipf_low_samples)),
+        'zipf_high_samples': sorted(set(zipf_high_samples)),
+    }
+    return kept, summary
+
+
 def infer_morph_role(record: SourceRecord) -> str:
     category = (record.semantic_category or '').strip().lower()
     if 'prefix' in category:
@@ -500,10 +646,38 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Ingest curated source atoms into naming DB.')
     parser.add_argument('--db', default=str(bpaths.NAMING_PIPELINE_DB), help='SQLite DB path.')
     parser.add_argument('--inputs', nargs='+', required=True, help='Input files (.csv/.json/.txt).')
+    parser.add_argument(
+        '--exclude-inputs',
+        nargs='*',
+        default=[],
+        help='Optional exclusion lists (.csv/.json/.txt) of normalized names to skip.',
+    )
     parser.add_argument('--source-label', default='curated_v2', help='Default source label.')
     parser.add_argument('--default-language', default='', help='Fallback language hint when missing.')
     parser.add_argument('--default-category', default='', help='Fallback semantic category when missing.')
     parser.add_argument('--default-confidence', type=float, default=0.75, help='Fallback confidence weight (0..1).')
+    parser.add_argument(
+        '--zipf-min',
+        type=float,
+        default=0.0,
+        help='Optional minimum wordfreq zipf value (0 disables low-end filtering).',
+    )
+    parser.add_argument(
+        '--zipf-max',
+        type=float,
+        default=0.0,
+        help='Optional maximum wordfreq zipf value (0 disables high-end filtering).',
+    )
+    parser.add_argument(
+        '--zipf-language',
+        default='en',
+        help='wordfreq language code used for zipf filtering (default: en).',
+    )
+    parser.add_argument(
+        '--zipf-require-package',
+        action='store_true',
+        help='Fail fast if zipf filtering is requested but wordfreq is unavailable.',
+    )
     parser.add_argument(
         '--derive-morphology',
         action='store_true',
@@ -541,24 +715,44 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     input_paths = [Path(value) for value in args.inputs]
-    missing = [path for path in input_paths if not path.exists()]
+    exclusion_paths = [Path(value) for value in args.exclude_inputs]
+    missing = [path for path in [*input_paths, *exclusion_paths] if not path.exists()]
     if missing:
         print('Missing input files:')
         for path in missing:
             print(f'- {path}')
         return 1
 
+    if args.zipf_min > 0 and args.zipf_max > 0 and args.zipf_min >= args.zipf_max:
+        print(f'Invalid zipf thresholds: zipf-min={args.zipf_min} must be < zipf-max={args.zipf_max}')
+        return 1
+    zipf_enabled = args.zipf_min > 0 or args.zipf_max > 0
+    if zipf_enabled and _zipf_frequency is None and args.zipf_require_package:
+        print('zipf filtering requested but wordfreq package is unavailable. Install wordfreq or remove --zipf-require-package flag.')
+        return 1
+    if zipf_enabled and _zipf_frequency is None:
+        print('zipf_filter_warning wordfreq package unavailable; zipf thresholds ignored.')
+
     loaded: list[SourceRecord] = []
     for path in input_paths:
         loaded.extend(parse_file(path, args.source_label, args.default_confidence))
 
+    exclusion_names = load_exclusion_names(exclusion_paths) if exclusion_paths else set()
+    filtered_records, filter_summary = filter_source_records(
+        loaded,
+        exclusion_names=exclusion_names,
+        zipf_min=max(0.0, float(args.zipf_min)),
+        zipf_max=max(0.0, float(args.zipf_max)),
+        zipf_lang=str(args.zipf_language or 'en').strip() or 'en',
+    )
+
     derived_count = 0
     if args.derive_morphology:
-        derived = derive_morphology_records(loaded, confidence_scale=max(0.05, args.morph_confidence_scale))
-        loaded.extend(derived)
+        derived = derive_morphology_records(filtered_records, confidence_scale=max(0.05, args.morph_confidence_scale))
+        filtered_records.extend(derived)
         derived_count = len(derived)
 
-    normalized = dedupe_records(loaded)
+    normalized = dedupe_records(filtered_records)
     if not normalized:
         print('No valid source records found.')
         return 1
@@ -579,12 +773,19 @@ def main() -> int:
             config={
                 'source': 'name_input_ingest',
                 'input_files': [str(path) for path in input_paths],
+                'exclude_input_files': [str(path) for path in exclusion_paths],
                 'source_label': args.source_label,
                 'also_candidates': bool(args.also_candidates),
                 'activate': bool(args.activate),
                 'derive_morphology': bool(args.derive_morphology),
                 'morph_confidence_scale': float(args.morph_confidence_scale),
+                'zipf_min': float(args.zipf_min),
+                'zipf_max': float(args.zipf_max),
+                'zipf_language': str(args.zipf_language or 'en'),
+                'zipf_enabled': bool(zipf_enabled),
+                'zipf_package_available': bool(_zipf_frequency is not None),
                 'derived_morphology_records': derived_count,
+                'filter_summary': filter_summary,
                 'global_provenance_tags': global_provenance_tags,
                 'ingested_at': now_iso(),
             },
@@ -679,6 +880,11 @@ def main() -> int:
                         'ingested_atom_count': inserted_atoms,
                         'linked_candidate_count': linked_candidates,
                         'input_count': len(normalized),
+                        'raw_input_count': int(filter_summary.get('raw_count') or 0),
+                        'filtered_input_count': int(filter_summary.get('kept_count') or 0),
+                        'excluded_count': int(filter_summary.get('excluded_count') or 0),
+                        'zipf_low_count': int(filter_summary.get('zipf_low_count') or 0),
+                        'zipf_high_count': int(filter_summary.get('zipf_high_count') or 0),
                         'derived_morphology_records': derived_count,
                         'availability_claim_fields_removed': removed_claims_total,
                     },
@@ -691,7 +897,10 @@ def main() -> int:
 
     print(
         f'source_ingest_complete run_id={run_id} atoms={inserted_atoms} '
-        f'linked_candidates={linked_candidates} derived_morphology={derived_count} db={db_path}'
+        f'linked_candidates={linked_candidates} derived_morphology={derived_count} '
+        f'excluded={filter_summary.get("excluded_count", 0)} '
+        f'zipf_low={filter_summary.get("zipf_low_count", 0)} '
+        f'zipf_high={filter_summary.get("zipf_high_count", 0)} db={db_path}'
     )
     return 0
 
