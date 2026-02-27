@@ -293,6 +293,31 @@ def load_combo_duration_history(progress_csv: Path) -> dict[str, float]:
     return out
 
 
+def infer_combo_start_offset(*, progress_csv: Path, shard_id: int, shard_count: int) -> int:
+    """Infer next combo offset from existing campaign progress rows.
+
+    This keeps sweep rotation moving across repeated one-shot invocations
+    (for example supervisor cycles with --max-runs 1).
+    """
+    if not progress_csv.exists():
+        return 0
+    rows_seen = 0
+    try:
+        with progress_csv.open('r', encoding='utf-8', newline='') as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                row_shard = str(row.get('shard_id') or '').strip()
+                row_shard_count = str(row.get('shard_count') or '').strip()
+                if row_shard and row_shard.isdigit() and int(row_shard) != int(shard_id):
+                    continue
+                if row_shard_count and row_shard_count.isdigit() and int(row_shard_count) != int(shard_count):
+                    continue
+                rows_seen += 1
+    except OSError:
+        return 0
+    return max(0, int(rows_seen))
+
+
 def assign_sweep_combos_to_shards(
     *,
     sweep_combos: list[SweepCombo],
@@ -2330,6 +2355,13 @@ def main() -> int:
             f'to shard_id={args.shard_id} with shard_count={args.shard_count}.'
         )
         return 1
+    combo_start_offset = infer_combo_start_offset(
+        progress_csv=progress_csv,
+        shard_id=int(args.shard_id),
+        shard_count=int(args.shard_count),
+    )
+    if shard_combos:
+        combo_start_offset = combo_start_offset % len(shard_combos)
 
     print(f'campaign_start out_dir={out_dir}')
     emit_campaign_event(
@@ -2346,6 +2378,7 @@ def main() -> int:
         f'campaign_config hours={args.hours} max_runs={args.max_runs} sleep_s={args.sleep_s} '
         f'shares={shares} scopes={scopes} gates={gates} quota_profiles={len(quota_profiles)} '
         f'shard={args.shard_id + 1}/{args.shard_count} shard_combo_count={len(shard_combos)} '
+        f'combo_start_offset={combo_start_offset} '
         f'shard_scheduling={shard_schedule_meta.get("mode")} '
         f'shard_history_path={shard_history_csv or ""} '
         f'shard_history_matches={shard_schedule_meta.get("history_matches", 0)} '
@@ -2566,7 +2599,8 @@ def main() -> int:
             shard_count=int(args.shard_count),
         )
 
-        share, scope, gate, quota_profile = shard_combos[(run_count - 1) % len(shard_combos)]
+        combo_index = (combo_start_offset + run_count - 1) % len(shard_combos)
+        share, scope, gate, quota_profile = shard_combos[combo_index]
         combo_key = combo_history_key(
             share=share,
             scope=scope,
