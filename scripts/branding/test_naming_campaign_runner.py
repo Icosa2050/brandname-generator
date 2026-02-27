@@ -268,6 +268,31 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             args = ncr.parse_args()
         self.assertEqual(args.llm_prompt_template_file, 'resources/branding/llm/llm_prompt.utility_split_v1.txt')
 
+    def test_parse_args_accepts_source_filter_flags(self) -> None:
+        argv = [
+            'naming_campaign_runner.py',
+            '--source-input-files',
+            'resources/branding/inputs/source_inputs_core_v3.csv,resources/branding/inputs/source_inputs_expansion_v3.csv',
+            '--source-exclusion-files',
+            'resources/branding/inputs/source_exclusions_seed_v1.txt',
+            '--source-zipf-min',
+            '1.0',
+            '--source-zipf-max',
+            '5.8',
+            '--source-zipf-language',
+            'en',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        self.assertEqual(
+            args.source_input_files,
+            'resources/branding/inputs/source_inputs_core_v3.csv,resources/branding/inputs/source_inputs_expansion_v3.csv',
+        )
+        self.assertEqual(args.source_exclusion_files, 'resources/branding/inputs/source_exclusions_seed_v1.txt')
+        self.assertAlmostEqual(args.source_zipf_min, 1.0, places=6)
+        self.assertAlmostEqual(args.source_zipf_max, 5.8, places=6)
+        self.assertEqual(args.source_zipf_language, 'en')
+
     def test_load_llm_model_config_parses_json_provider_map(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'models.json'

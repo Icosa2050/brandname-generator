@@ -17,6 +17,9 @@ ARTIFACTS_BRANDING_DIR = REPO_ROOT / 'artifacts' / 'branding'
 
 # Static inputs and examples.
 SOURCE_INPUTS_V2 = RESOURCES_BRANDING_DIR / 'inputs' / 'source_inputs_v2.csv'
+SOURCE_INPUTS_CORE_V3 = RESOURCES_BRANDING_DIR / 'inputs' / 'source_inputs_core_v3.csv'
+SOURCE_INPUTS_EXPANSION_V3 = RESOURCES_BRANDING_DIR / 'inputs' / 'source_inputs_expansion_v3.csv'
+SOURCE_EXCLUSIONS_SEED_V1 = RESOURCES_BRANDING_DIR / 'inputs' / 'source_exclusions_seed_v1.txt'
 FALSE_FRIEND_LEXICON_V1 = RESOURCES_BRANDING_DIR / 'lexicon' / 'naming_false_friend_lexicon_v1.md'
 LLM_CONTEXT_EXAMPLE = RESOURCES_BRANDING_DIR / 'llm' / 'llm_context.example.json'
 LLM_MODELS_EXAMPLE = RESOURCES_BRANDING_DIR / 'llm' / 'llm_models.example.toml'

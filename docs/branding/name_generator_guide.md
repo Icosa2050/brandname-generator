@@ -33,6 +33,23 @@ It is a **screening** tool, not legal advice. Final legal clearance still requir
 - Mutable outputs and SQLite working DBs: `test_outputs/branding/...`
 - Historical snapshots moved out of docs: `artifacts/branding/legacy/2026-02/...`
 
+## Environment Bootstrap
+Use Python 3.11+ with a local virtual environment.
+
+```zsh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+```
+
+Notes:
+- `requirements.txt` currently includes optional pipeline dependencies:
+  - `playwright` for EUIPO/Swissreg browser probes.
+  - `wordfreq` for zipf-based source filtering in `name_input_ingest.py`.
+- Core generation/validation flows are standard-library based.
+- For remote model runs, keep using `direnv exec . <command>` so `OPENROUTER_*` variables are present.
+
 ## Quick Start
 
 ### Worktree Path Rule
@@ -126,7 +143,6 @@ zsh scripts/branding/run_legal_brand_research.sh \
 ```
 - EUIPO mode uses Playwright browser automation. One-time setup:
 ```zsh
-python3 -m pip install playwright
 python3 -m playwright install chromium
 ```
 - Swissreg mode uses the Swissreg UI search (`database-client/home`) and reads the `Marken` counter via Playwright.
@@ -443,11 +459,33 @@ Notes:
 - `--heartbeat-interval-s` controls periodic `stage_heartbeat` events for long-running child stages.
 - `--heartbeat-jsonl` can override the default heartbeat file path.
 - `campaign_progress.csv` now includes `history_skip_count` so skipped failed-history names are visible per run.
+- `--source-input-files` allows curated corpus composition (comma-separated files) for source ingest.
+- `--source-exclusion-files` applies pre-ingest exclusion lists (for example entity/brand blacklists).
+- `--source-zipf-min` / `--source-zipf-max` / `--source-zipf-language` apply word-frequency gating during source ingest.
 - OpenRouter calls use a compatibility fallback chain (`json_schema+require_parameters` -> `json_object` -> plain chat) so models that reject strict routing still return candidates.
 - Campaign `llm_stage_status` now distinguishes empty/error cases (`empty_with_errors`, `empty`) instead of reporting `ok` with zero candidates.
 - Validator `run_summary` now includes SQLite lock contention metrics:
   `lock_acquisitions`, `lock_total_wait_ms`, `lock_max_wait_ms`, `lock_contended_count`.
 - A/B mode writes `ab_report.json` and `ab_report.md` in campaign output root.
+
+### 13a) Corpus Strategy Baseline + Corpus-Filtered Run
+```zsh
+# 1) Build baseline diagnostics from existing campaign DB
+python3 scripts/branding/build_corpus_strategy_baseline.py \
+  --db test_outputs/branding/continuous_creative_mistral_claude/naming_campaign.db \
+  --out-dir test_outputs/branding/corpus_baseline \
+  --label pre_corpus_v3
+
+# 2) Run campaign with layered corpus inputs + exclusion seed + frequency gates
+direnv exec . python3 scripts/branding/naming_campaign_runner.py \
+  --out-dir test_outputs/branding/corpus_v3_trial \
+  --source-input-files resources/branding/inputs/source_inputs_v2.csv,resources/branding/inputs/source_inputs_core_v3.csv,resources/branding/inputs/source_inputs_expansion_v3.csv \
+  --source-exclusion-files resources/branding/inputs/source_exclusions_seed_v1.txt \
+  --source-zipf-min 1.0 \
+  --source-zipf-max 6.0 \
+  --source-zipf-language en \
+  --validator-state-filter new
+```
 
 ### 13b) Local runtime warm-cache probe (LM Studio / Ollama)
 ```zsh

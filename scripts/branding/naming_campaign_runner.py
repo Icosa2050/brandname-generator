@@ -1794,6 +1794,33 @@ def parse_args() -> argparse.Namespace:
         help='Comma-separated seeds passed to generator --seeds.',
     )
     parser.add_argument(
+        '--source-input-files',
+        default=str(bpaths.SOURCE_INPUTS_V2),
+        help='Comma-separated source-atom input files passed to name_input_ingest.',
+    )
+    parser.add_argument(
+        '--source-exclusion-files',
+        default='',
+        help='Comma-separated exclusion list files (.csv/.json/.txt) passed to name_input_ingest.',
+    )
+    parser.add_argument(
+        '--source-zipf-min',
+        type=float,
+        default=0.0,
+        help='Optional lower wordfreq zipf bound for source ingestion (0 disables).',
+    )
+    parser.add_argument(
+        '--source-zipf-max',
+        type=float,
+        default=0.0,
+        help='Optional upper wordfreq zipf bound for source ingestion (0 disables).',
+    )
+    parser.add_argument(
+        '--source-zipf-language',
+        default='en',
+        help='wordfreq language code for source zipf filtering.',
+    )
+    parser.add_argument(
         '--generator-min-len',
         type=int,
         default=6,
@@ -2221,8 +2248,13 @@ def main() -> int:
     live_patterns = parse_csv_list(args.live_progress_patterns) if args.live_progress else []
     quota_profiles = [part.strip() for part in args.quota_profiles.split('|') if part.strip()]
     active_families = parse_csv_list(args.generator_families) or list(DEFAULT_GENERATOR_FAMILIES)
+    source_input_files = [part.strip() for part in parse_csv_list(args.source_input_files) if part.strip()]
+    source_exclusion_files = [part.strip() for part in parse_csv_list(args.source_exclusion_files) if part.strip()]
     if not shares or not scopes or not gates or not quota_profiles:
         print('Invalid sweep configuration: shares/scopes/gates/quota-profiles must be non-empty.')
+        return 1
+    if not source_input_files:
+        print('Invalid source configuration: --source-input-files must contain at least one file.')
         return 1
     if args.shard_count < 1:
         print('Invalid shard configuration: --shard-count must be >= 1.')
@@ -2329,6 +2361,9 @@ def main() -> int:
         f'validator_memory_enabled={bool(str(args.validator_memory_db).strip())} '
         f'validator_memory_ttl_days={int(args.validator_memory_ttl_days)} '
         f'generator_min_len={int(args.generator_min_len)} generator_max_len={int(args.generator_max_len)} '
+        f'source_input_files={source_input_files} source_exclusion_files={source_exclusion_files} '
+        f'source_zipf_min={float(args.source_zipf_min):.3f} source_zipf_max={float(args.source_zipf_max):.3f} '
+        f'source_zipf_language={args.source_zipf_language} '
         f'reset_db={args.reset_db} '
         f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} '
         f'llm_model={args.llm_model} llm_models={args.llm_models} '
@@ -2434,13 +2469,27 @@ def main() -> int:
             print(f'db_reuse path={db_path_worker}')
 
     ingest_curated_log = logs_dir / 'ingest_curated.log'
+    resolved_source_inputs: list[str] = []
+    for raw_path in source_input_files:
+        candidate = Path(raw_path).expanduser()
+        resolved_source_inputs.append(str((candidate if candidate.is_absolute() else (root / candidate)).resolve()))
+    resolved_source_exclusions: list[str] = []
+    for raw_path in source_exclusion_files:
+        candidate = Path(raw_path).expanduser()
+        resolved_source_exclusions.append(str((candidate if candidate.is_absolute() else (root / candidate)).resolve()))
+    missing_source_files = [path for path in [*resolved_source_inputs, *resolved_source_exclusions] if not Path(path).exists()]
+    if missing_source_files:
+        print('Source ingest files missing:')
+        for path in missing_source_files:
+            print(f'- {path}')
+        return 1
     ingest_curated_cmd = [
         'python3',
         str(root / 'scripts' / 'branding' / 'name_input_ingest.py'),
         '--db',
         str(db_path_worker),
         '--inputs',
-        str(bpaths.SOURCE_INPUTS_V2),
+        *resolved_source_inputs,
         '--source-label',
         'curated_lexicon_v2',
         '--scope',
@@ -2451,6 +2500,13 @@ def main() -> int:
         '--morph-confidence-scale',
         '0.72',
     ]
+    if resolved_source_exclusions:
+        ingest_curated_cmd.extend(['--exclude-inputs', *resolved_source_exclusions])
+    if float(args.source_zipf_min) > 0:
+        ingest_curated_cmd.extend(['--zipf-min', f'{float(args.source_zipf_min):.4f}'])
+    if float(args.source_zipf_max) > 0:
+        ingest_curated_cmd.extend(['--zipf-max', f'{float(args.source_zipf_max):.4f}'])
+    ingest_curated_cmd.extend(['--zipf-language', str(args.source_zipf_language or 'en')])
     if not args.generator_only_llm_candidates:
         ingest_curated_cmd.append('--also-candidates')
     if run_cmd(ingest_curated_cmd, cwd=root, log_path=ingest_curated_log) != 0:
@@ -2991,6 +3047,11 @@ def main() -> int:
         'shard_db_isolation': bool(shard_db_isolation_enabled),
         'merge_shards_enabled': bool(merge_shards_enabled),
         'merge_summary': merge_summary,
+        'source_input_files': resolved_source_inputs,
+        'source_exclusion_files': resolved_source_exclusions,
+        'source_zipf_min': float(args.source_zipf_min),
+        'source_zipf_max': float(args.source_zipf_max),
+        'source_zipf_language': str(args.source_zipf_language or 'en'),
         'hours_budget': float(args.hours),
         'max_runs': int(args.max_runs),
         'shard_id': int(args.shard_id),

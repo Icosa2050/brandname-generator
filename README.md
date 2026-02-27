@@ -20,6 +20,23 @@ direnv exec . env | rg OPENROUTER
 
 Important: run commands that need remote access via `direnv exec . <command>`.
 
+## Python Setup (recommended)
+Use Python 3.11+ and a local virtual environment:
+
+```zsh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+python -m playwright install chromium
+```
+
+Notes:
+- `requirements.txt` is intentionally small and only covers optional capabilities currently used by the branding pipeline:
+  - `playwright` for EUIPO/Swissreg browser probes
+  - `wordfreq` for source zipf filtering in `name_input_ingest.py`
+- Core candidate generation/validation scripts are standard-library based.
+
 ## Quickstart (OpenRouter remote)
 ```zsh
 direnv exec . scripts/branding/run_openrouter_lane.sh --lane 0 --out-dir /tmp/branding_openrouter_tuned
