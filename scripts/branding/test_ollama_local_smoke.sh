@@ -108,7 +108,7 @@ CAMPAIGN_LOG="$OUT_DIR/campaign.stdout.log"
 
 echo "ollama_smoke_config model=$MODEL base_url=$BASE_URL openai_base_url=$OPENAI_BASE_URL keep_alive=$KEEP_ALIVE out_dir=$OUT_DIR"
 
-echo "[0/2] Running preflight checks..."
+echo "[1/3] Running preflight checks..."
 if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" \
   --check-ollama \
   --ollama-base-url="$BASE_URL" \
@@ -118,7 +118,7 @@ if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" \
 fi
 
 if [[ "$RUN_PROBE" == "1" ]]; then
-  echo "[1/2] Running Ollama warm/cold probe..."
+  echo "[2/3] Running Ollama warm/cold probe..."
   if ! python3 "$ROOT_DIR/scripts/branding/test_local_llm_warm_cache.py" \
     --provider=ollama_native \
     --base-url="$BASE_URL" \
@@ -135,10 +135,10 @@ if [[ "$RUN_PROBE" == "1" ]]; then
     exit 3
   fi
 else
-  echo "[1/2] Probe skipped."
+  echo "[2/3] Probe skipped."
 fi
 
-echo "[2/2] Running one-run campaign smoke..."
+echo "[3/3] Running one-run campaign smoke..."
 if ! python3 "$ROOT_DIR/scripts/branding/naming_campaign_runner.py" \
   --hours=0.04 \
   --max-runs=1 \

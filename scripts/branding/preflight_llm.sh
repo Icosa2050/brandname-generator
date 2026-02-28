@@ -158,6 +158,16 @@ Exit codes:
 EOF
 }
 
+require_arg_value() {
+  local option="$1"
+  local value="${2-}"
+  if [[ -z "$value" || "$value" == --* ]]; then
+    echo "Missing value for $option" >&2
+    usage
+    exit 2
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --check-lmstudio)
@@ -169,6 +179,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --lmstudio-base-url)
+      require_arg_value "$1" "${2-}"
       LMSTUDIO_BASE_URL="$2"
       shift 2
       ;;
@@ -177,6 +188,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --ollama-base-url)
+      require_arg_value "$1" "${2-}"
       OLLAMA_BASE_URL="$2"
       shift 2
       ;;
@@ -185,6 +197,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --lmstudio-model|--lmstudio-models)
+      require_arg_value "$1" "${2-}"
       LMSTUDIO_MODELS_CSV="$2"
       shift 2
       ;;
@@ -193,6 +206,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --ollama-model|--ollama-models)
+      require_arg_value "$1" "${2-}"
       OLLAMA_MODELS_CSV="$2"
       shift 2
       ;;
@@ -205,6 +219,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --http-timeout-s)
+      require_arg_value "$1" "${2-}"
       HTTP_TIMEOUT_S="$2"
       shift 2
       ;;
