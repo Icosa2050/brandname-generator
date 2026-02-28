@@ -8,6 +8,7 @@ LOCAL_MODEL="${HYBRID_LOCAL_MODEL:-gemma3:12b}"
 REMOTE_MODEL="${HYBRID_REMOTE_MODEL:-mistralai/mistral-small-creative}"
 LOCAL_SHARE="${HYBRID_LOCAL_SHARE:-0.75}"
 OPENAI_BASE_URL="${HYBRID_OLLAMA_OPENAI_BASE_URL:-http://127.0.0.1:11434/v1}"
+OLLAMA_BASE_URL="${HYBRID_OLLAMA_BASE_URL:-}"
 KEEP_ALIVE="${HYBRID_OLLAMA_KEEP_ALIVE:-30m}"
 MAX_RUNS="${HYBRID_MAX_RUNS:-1}"
 SLEEP_S="${HYBRID_SLEEP_S:-0}"
@@ -36,6 +37,7 @@ Options:
   --remote-models <csv>              Alias for --remote-model
   --local-share <0..1>               Share of local rounds (default: 0.75)
   --openai-base-url <url>            Ollama OpenAI-compatible URL (default: http://127.0.0.1:11434/v1)
+  --ollama-base-url <url>            Ollama native URL for preflight (default: derived from --openai-base-url)
   --keep-alive <value>               keep_alive hint (default: 30m)
   --max-runs <n>                     Max campaign runs (default: 1)
   --sleep-s <seconds>                Sleep between runs (default: 0)
@@ -79,6 +81,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --openai-base-url)
       OPENAI_BASE_URL="$2"
+      shift 2
+      ;;
+    --ollama-base-url)
+      OLLAMA_BASE_URL="$2"
       shift 2
       ;;
     --keep-alive)
@@ -142,6 +148,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$OLLAMA_BASE_URL" ]]; then
+  OLLAMA_BASE_URL="${OPENAI_BASE_URL%/}"
+  if [[ "$OLLAMA_BASE_URL" == */v1 ]]; then
+    OLLAMA_BASE_URL="${OLLAMA_BASE_URL%/v1}"
+  fi
+fi
+
 if [[ "$GENERATOR_MIN_LEN" != <-> || "$GENERATOR_MAX_LEN" != <-> ]]; then
   echo "Generator length bounds must be non-negative integers." >&2
   exit 2
@@ -187,6 +200,15 @@ if (( ${#EXTRA_ARGS[@]} > 0 )); then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
+echo "running preflight for hybrid=ollama+openrouter..."
+if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" \
+  --check-ollama \
+  --ollama-base-url "$OLLAMA_BASE_URL" \
+  --ollama-model "$LOCAL_MODEL" \
+  --require-openrouter; then
+  exit 2
+fi
+
 echo "running hybrid=ollama+openrouter out_dir=$OUT_DIR local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE max_usd_per_run=$MAX_USD_PER_RUN generator_len=${GENERATOR_MIN_LEN}-${GENERATOR_MAX_LEN}"
 printf '$ '
 printf '%q ' "${CMD[@]}"
@@ -194,16 +216,6 @@ echo
 
 cd "$ROOT_DIR"
 if command -v direnv >/dev/null 2>&1; then
-  if ! direnv exec . python3 -c 'import os, sys; sys.exit(0 if os.getenv("OPENROUTER_API_KEY") else 1)' >/dev/null 2>&1; then
-    echo "OPENROUTER_API_KEY is not set (after direnv)." >&2
-    echo "Tip: add it to .env/.envrc, then run: direnv allow" >&2
-    exit 2
-  fi
   exec direnv exec . "${CMD[@]}"
-fi
-if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-  echo "OPENROUTER_API_KEY is not set." >&2
-  echo "Tip: run via direnv (direnv exec . ...)." >&2
-  exit 2
 fi
 exec "${CMD[@]}"

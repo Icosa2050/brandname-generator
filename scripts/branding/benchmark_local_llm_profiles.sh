@@ -111,6 +111,18 @@ SUMMARY_JSON="$OUT_DIR/benchmark_summary.json"
 SUMMARY_CSV="$OUT_DIR/benchmark_summary.csv"
 echo -e "profile\tprovider\tmodel\tjson_path\tlog_path\texit_code" > "$RESULTS_TSV"
 
+echo "[1/4] Running endpoint/model preflight checks..."
+if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" \
+  --check-lmstudio \
+  --lmstudio-base-url="$LMSTUDIO_BASE_URL" \
+  --lmstudio-model="$LMSTUDIO_FAST_MODEL,$LMSTUDIO_QUALITY_MODEL" \
+  --check-ollama \
+  --ollama-base-url="$OLLAMA_BASE_URL" \
+  --ollama-model="$OLLAMA_MODEL"; then
+  echo "LOCAL_LLM_BENCH FAIL stage=preflight lmstudio_base_url=$LMSTUDIO_BASE_URL ollama_base_url=$OLLAMA_BASE_URL"
+  exit 2
+fi
+
 run_probe() {
   local profile="$1"
   local provider="$2"
@@ -153,8 +165,11 @@ run_probe() {
 
 echo "local_llm_benchmark_config out_dir=$OUT_DIR runs=$RUNS gap_s=$GAP_S eviction_gap_s=$EVICTION_GAP_S timeout_s=$TIMEOUT_S lmstudio_ttl_s=$LMSTUDIO_TTL_S ollama_keep_alive=$OLLAMA_KEEP_ALIVE"
 
+echo "[2/4] Running lmstudio_fast probe..."
 run_probe "lmstudio_fast" "openai_compat" "$LMSTUDIO_FAST_MODEL" "$LMSTUDIO_BASE_URL"
+echo "[3/4] Running ollama_balanced probe..."
 run_probe "ollama_balanced" "ollama_native" "$OLLAMA_MODEL" "$OLLAMA_BASE_URL"
+echo "[4/4] Running lmstudio_quality probe..."
 run_probe "lmstudio_quality" "openai_compat" "$LMSTUDIO_QUALITY_MODEL" "$LMSTUDIO_BASE_URL"
 
 python3 - "$RESULTS_TSV" "$SUMMARY_JSON" "$SUMMARY_CSV" <<'PY'
