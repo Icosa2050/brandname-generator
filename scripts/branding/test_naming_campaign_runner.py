@@ -118,6 +118,62 @@ class NamingCampaignRunnerShardSchedulingTest(unittest.TestCase):
         self.assertEqual(assignments[0], combos[0::2])
         self.assertEqual(assignments[1], combos[1::2])
 
+    def test_infer_combo_start_offset_returns_zero_when_progress_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            progress_csv = Path(td) / 'missing_campaign_progress.csv'
+            got = ncr.infer_combo_start_offset(
+                progress_csv=progress_csv,
+                shard_id=0,
+                shard_count=1,
+            )
+            self.assertEqual(got, 0)
+
+    def test_infer_combo_start_offset_sharded_requires_matching_numeric_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            progress_csv = Path(td) / 'campaign_progress.csv'
+            headers = ['run_id', 'shard_id', 'shard_count', 'status']
+            rows = [
+                {'run_id': '1', 'shard_id': '', 'shard_count': '', 'status': 'ok'},
+                {'run_id': '2', 'shard_id': 'x', 'shard_count': 'y', 'status': 'ok'},
+                {'run_id': '3', 'shard_id': '1', 'shard_count': '2', 'status': 'ok'},
+                {'run_id': '4', 'shard_id': '0', 'shard_count': '2', 'status': 'ok'},
+                {'run_id': '5', 'shard_id': '1', 'shard_count': '3', 'status': 'ok'},
+            ]
+            with progress_csv.open('w', encoding='utf-8', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(rows)
+
+            got = ncr.infer_combo_start_offset(
+                progress_csv=progress_csv,
+                shard_id=1,
+                shard_count=2,
+            )
+            self.assertEqual(got, 1)
+
+    def test_infer_combo_start_offset_unsharded_accepts_rows_without_shard_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            progress_csv = Path(td) / 'campaign_progress.csv'
+            headers = ['run_id', 'shard_id', 'shard_count', 'status']
+            rows = [
+                {'run_id': '1', 'shard_id': '', 'shard_count': '', 'status': 'ok'},
+                {'run_id': '2', 'shard_id': '0', 'shard_count': '1', 'status': 'ok'},
+                {'run_id': '3', 'shard_id': '1', 'shard_count': '1', 'status': 'ok'},
+                {'run_id': '4', 'shard_id': '0', 'shard_count': '2', 'status': 'ok'},
+            ]
+            with progress_csv.open('w', encoding='utf-8', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(rows)
+
+            got = ncr.infer_combo_start_offset(
+                progress_csv=progress_csv,
+                shard_id=0,
+                shard_count=1,
+            )
+            # Rows 1 and 2 count; rows 3 and 4 declare mismatching shard metadata.
+            self.assertEqual(got, 2)
+
     def test_build_hybrid_provider_round_schedule_respects_targets(self) -> None:
         schedule = ncr.build_hybrid_provider_round_schedule(
             total_rounds=4,

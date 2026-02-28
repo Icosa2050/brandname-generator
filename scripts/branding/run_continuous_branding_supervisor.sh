@@ -7,6 +7,9 @@ OUT_DIR="${CONTINUOUS_OUT_DIR:-$ROOT_DIR/test_outputs/branding/continuous_hybrid
 PRIMARY_BACKEND="${CONTINUOUS_BACKEND:-auto}"          # auto|lmstudio|ollama
 FALLBACK_BACKEND="${CONTINUOUS_FALLBACK_BACKEND:-ollama}"  # none|lmstudio|ollama
 PROFILE_PLAN_RAW="${CONTINUOUS_PROFILE_PLAN:-fast,fast,quality}"
+REMOTE_MODELS="${CONTINUOUS_REMOTE_MODELS:-}"
+LOCAL_MODELS="${CONTINUOUS_LOCAL_MODELS:-}"
+LLM_MODEL_SELECTION="${CONTINUOUS_LLM_MODEL_SELECTION:-round_robin}"
 
 TARGET_GOOD="${CONTINUOUS_TARGET_GOOD:-120}"
 TARGET_STRONG="${CONTINUOUS_TARGET_STRONG:-40}"
@@ -39,6 +42,9 @@ Options:
                                    Backend fallback on failed cycle (default: ollama)
   --profile-plan <csv>             Profile rotation per cycle (default: fast,fast,quality)
                                    Allowed profiles: fast, quality, balanced, creative
+  --remote-models <csv>            OpenRouter model ids for ideation (supports multi-model CSV)
+  --local-models <csv>             Local model ids for ideation (supports multi-model CSV)
+  --llm-model-selection <mode>     LLM model picker for multi-model lists: round_robin|random
   --target-good <n>                Stop when strict checked strong+consider >= n (default: 120)
                                    strict = all expensive checks pass/warn and zero fail/error
                                    expensive checks: domain,web,app_store,package,social
@@ -144,6 +150,18 @@ while [[ $# -gt 0 ]]; do
       PROFILE_PLAN_RAW="$2"
       shift 2
       ;;
+    --remote-models)
+      REMOTE_MODELS="$2"
+      shift 2
+      ;;
+    --local-models)
+      LOCAL_MODELS="$2"
+      shift 2
+      ;;
+    --llm-model-selection)
+      LLM_MODEL_SELECTION="$2"
+      shift 2
+      ;;
     --target-good)
       TARGET_GOOD="$2"
       shift 2
@@ -200,6 +218,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+LLM_MODEL_SELECTION="${LLM_MODEL_SELECTION:l}"
+case "$LLM_MODEL_SELECTION" in
+  round_robin|random)
+    ;;
+  *)
+    echo "Invalid --llm-model-selection: $LLM_MODEL_SELECTION (expected round_robin|random)." >&2
+    exit 2
+    ;;
+esac
 
 if ! PRIMARY_BACKEND="$(normalize_backend "$PRIMARY_BACKEND")"; then
   echo "Invalid --backend: $PRIMARY_BACKEND (expected auto|lmstudio|ollama)." >&2
@@ -430,7 +458,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 echo "$$" > "$LOCK_DIR/pid"
 
-log_event event=start out_dir="$OUT_DIR" backend="$PRIMARY_BACKEND" fallback="$FALLBACK_BACKEND" profile_plan="$PROFILE_PLAN_RAW" target_good="$TARGET_GOOD" target_strong="$TARGET_STRONG" max_cycles="$MAX_CYCLES" max_usd_per_run="$MAX_USD_PER_RUN" dry_run="$DRY_RUN"
+log_event event=start out_dir="$OUT_DIR" backend="$PRIMARY_BACKEND" fallback="$FALLBACK_BACKEND" profile_plan="$PROFILE_PLAN_RAW" remote_models="$REMOTE_MODELS" local_models="$LOCAL_MODELS" llm_model_selection="$LLM_MODEL_SELECTION" target_good="$TARGET_GOOD" target_strong="$TARGET_STRONG" max_cycles="$MAX_CYCLES" max_usd_per_run="$MAX_USD_PER_RUN" dry_run="$DRY_RUN"
 
 collect_metrics
 prev_good_count="$GOOD_COUNT"
@@ -467,14 +495,24 @@ while true; do
     --max-usd-per-run "$MAX_USD_PER_RUN"
     "${PROFILE_LOCAL_ARGS[@]}"
   )
+  if [[ -n "$LOCAL_MODELS" ]]; then
+    cmd+=(--local-models "$LOCAL_MODELS")
+  fi
+  if [[ -n "$REMOTE_MODELS" ]]; then
+    cmd+=(--remote-models "$REMOTE_MODELS")
+  fi
+  SUPERVISOR_RUNNER_ARGS=(--llm-model-selection "$LLM_MODEL_SELECTION")
   if (( ${#PROFILE_VALIDATOR_ARGS[@]} > 0 || ${#EXTRA_RUNNER_ARGS[@]} > 0 )); then
     cmd+=(--)
     if (( ${#PROFILE_VALIDATOR_ARGS[@]} > 0 )); then
       cmd+=("${PROFILE_VALIDATOR_ARGS[@]}")
     fi
+    cmd+=("${SUPERVISOR_RUNNER_ARGS[@]}")
     if (( ${#EXTRA_RUNNER_ARGS[@]} > 0 )); then
       cmd+=("${EXTRA_RUNNER_ARGS[@]}")
     fi
+  else
+    cmd+=(-- "${SUPERVISOR_RUNNER_ARGS[@]}")
   fi
 
   cycle_stamp="$(date +%Y%m%d_%H%M%S)"
@@ -503,14 +541,23 @@ while true; do
         --max-usd-per-run "$MAX_USD_PER_RUN"
         "${PROFILE_LOCAL_ARGS[@]}"
       )
+      if [[ -n "$LOCAL_MODELS" ]]; then
+        fallback_cmd+=(--local-models "$LOCAL_MODELS")
+      fi
+      if [[ -n "$REMOTE_MODELS" ]]; then
+        fallback_cmd+=(--remote-models "$REMOTE_MODELS")
+      fi
       if (( ${#PROFILE_VALIDATOR_ARGS[@]} > 0 || ${#EXTRA_RUNNER_ARGS[@]} > 0 )); then
         fallback_cmd+=(--)
         if (( ${#PROFILE_VALIDATOR_ARGS[@]} > 0 )); then
           fallback_cmd+=("${PROFILE_VALIDATOR_ARGS[@]}")
         fi
+        fallback_cmd+=("${SUPERVISOR_RUNNER_ARGS[@]}")
         if (( ${#EXTRA_RUNNER_ARGS[@]} > 0 )); then
           fallback_cmd+=("${EXTRA_RUNNER_ARGS[@]}")
         fi
+      else
+        fallback_cmd+=(-- "${SUPERVISOR_RUNNER_ARGS[@]}")
       fi
       fallback_log="$LOG_DIR/cycle_${cycle}_${FALLBACK_BACKEND}_${profile}_${cycle_stamp}_fallback.log"
       log_event event=fallback_start cycle="$cycle" from_backend="$backend" to_backend="$FALLBACK_BACKEND" profile="$profile" cmd="$(render_cmd "${fallback_cmd[@]}")"

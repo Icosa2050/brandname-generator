@@ -17,7 +17,6 @@ concurrency:
 jobs:
   openrouter_canary:
     name: OpenRouter Live Canary
-    if: ${{ secrets.OPENROUTER_API_KEY != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -25,15 +24,33 @@ jobs:
       OPENROUTER_MODEL: ${{ github.event.inputs.model || 'mistralai/mistral-small-creative' }}
 
     steps:
+      - name: Check OpenRouter Secret
+        id: preflight
+        shell: bash
+        run: |
+          if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+            echo "has_openrouter_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_openrouter_key=false" >> "$GITHUB_OUTPUT"
+            echo "OPENROUTER_API_KEY is not configured; skipping live canary."
+            if [[ "${GITHUB_EVENT_NAME:-}" == "schedule" && "${GITHUB_REPOSITORY:-}" == "Icosa2050/brandname-generator" ]]; then
+              echo "Scheduled run on canonical repository without OPENROUTER_API_KEY; failing job."
+              exit 1
+            fi
+          fi
+
       - name: Checkout Repository
+        if: ${{ steps.preflight.outputs.has_openrouter_key == 'true' }}
         uses: actions/checkout@v4
 
       - name: Setup Python
+        if: ${{ steps.preflight.outputs.has_openrouter_key == 'true' }}
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Run OpenRouter Canary
+        if: ${{ steps.preflight.outputs.has_openrouter_key == 'true' }}
         run: |
           python3 scripts/branding/naming_campaign_runner.py \
             --max-runs 1 \
@@ -63,6 +80,7 @@ jobs:
             --out-dir /tmp/branding_openrouter_canary
 
       - name: Assert Canary Produced LLM Candidates
+        if: ${{ steps.preflight.outputs.has_openrouter_key == 'true' }}
         run: |
           python3 - <<'PY'
           import csv
@@ -79,6 +97,7 @@ jobs:
           PY
 
       - name: Assert Canary Artifact Contract
+        if: ${{ steps.preflight.outputs.has_openrouter_key == 'true' }}
         run: |
           python3 - <<'PY'
           import csv
@@ -130,19 +149,10 @@ jobs:
           PY
 
       - name: Upload Canary Artifacts
-        if: always()
+        if: ${{ always() && steps.preflight.outputs.has_openrouter_key == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: branding-openrouter-canary-${{ github.run_id }}
           path: /tmp/branding_openrouter_canary
           if-no-files-found: ignore
           retention-days: 14
-
-  missing_secret_notice:
-    name: Missing OPENROUTER_API_KEY
-    if: ${{ secrets.OPENROUTER_API_KEY == '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Explain Skip
-        run: |
-          echo "OPENROUTER_API_KEY is not configured; skipping live canary."
