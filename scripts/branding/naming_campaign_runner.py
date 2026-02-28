@@ -301,17 +301,35 @@ def infer_combo_start_offset(*, progress_csv: Path, shard_id: int, shard_count: 
     """
     if not progress_csv.exists():
         return 0
+    current_shard_id = int(shard_id)
+    current_shard_count = int(shard_count)
     rows_seen = 0
     try:
         with progress_csv.open('r', encoding='utf-8', newline='') as handle:
             reader = csv.DictReader(handle)
             for row in reader:
-                row_shard = str(row.get('shard_id') or '').strip()
-                row_shard_count = str(row.get('shard_count') or '').strip()
-                if row_shard and row_shard.isdigit() and int(row_shard) != int(shard_id):
-                    continue
-                if row_shard_count and row_shard_count.isdigit() and int(row_shard_count) != int(shard_count):
-                    continue
+                row_shard_raw = str(row.get('shard_id') or '').strip()
+                row_shard_count_raw = str(row.get('shard_count') or '').strip()
+
+                if current_shard_count > 1:
+                    # For sharded runs, only trust rows with explicit, valid shard metadata.
+                    if not (row_shard_raw.isdigit() and row_shard_count_raw.isdigit()):
+                        continue
+                    row_shard = int(row_shard_raw)
+                    row_shard_count = int(row_shard_count_raw)
+                    if row_shard != current_shard_id or row_shard_count != current_shard_count:
+                        continue
+                else:
+                    # For unsharded runs, keep backward compatibility with older rows that
+                    # do not carry shard columns while still ignoring explicit shard mismatches.
+                    if row_shard_raw and row_shard_raw.isdigit() and int(row_shard_raw) != current_shard_id:
+                        continue
+                    if (
+                        row_shard_count_raw
+                        and row_shard_count_raw.isdigit()
+                        and int(row_shard_count_raw) != current_shard_count
+                    ):
+                        continue
                 rows_seen += 1
     except OSError:
         return 0

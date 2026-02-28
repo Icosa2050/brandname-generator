@@ -33,6 +33,10 @@ jobs:
           else
             echo "has_openrouter_key=false" >> "$GITHUB_OUTPUT"
             echo "OPENROUTER_API_KEY is not configured; skipping live canary."
+            if [[ "${GITHUB_EVENT_NAME:-}" == "schedule" && "${GITHUB_REPOSITORY:-}" == "Icosa2050/brandname-generator" ]]; then
+              echo "Scheduled run on canonical repository without OPENROUTER_API_KEY; failing job."
+              exit 1
+            fi
           fi
 
       - name: Checkout Repository
