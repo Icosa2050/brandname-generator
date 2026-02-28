@@ -187,6 +187,15 @@ if (( ${#EXTRA_ARGS[@]} > 0 )); then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
+echo "running preflight for hybrid=ollama+openrouter..."
+if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" \
+  --check-ollama \
+  --ollama-base-url "$OPENAI_BASE_URL" \
+  --ollama-model "$LOCAL_MODEL" \
+  --require-openrouter; then
+  exit 2
+fi
+
 echo "running hybrid=ollama+openrouter out_dir=$OUT_DIR local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE max_usd_per_run=$MAX_USD_PER_RUN generator_len=${GENERATOR_MIN_LEN}-${GENERATOR_MAX_LEN}"
 printf '$ '
 printf '%q ' "${CMD[@]}"
@@ -194,16 +203,6 @@ echo
 
 cd "$ROOT_DIR"
 if command -v direnv >/dev/null 2>&1; then
-  if ! direnv exec . python3 -c 'import os, sys; sys.exit(0 if os.getenv("OPENROUTER_API_KEY") else 1)' >/dev/null 2>&1; then
-    echo "OPENROUTER_API_KEY is not set (after direnv)." >&2
-    echo "Tip: add it to .env/.envrc, then run: direnv allow" >&2
-    exit 2
-  fi
   exec direnv exec . "${CMD[@]}"
-fi
-if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-  echo "OPENROUTER_API_KEY is not set." >&2
-  echo "Tip: run via direnv (direnv exec . ...)." >&2
-  exit 2
 fi
 exec "${CMD[@]}"

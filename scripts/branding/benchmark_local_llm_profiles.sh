@@ -111,6 +111,18 @@ SUMMARY_JSON="$OUT_DIR/benchmark_summary.json"
 SUMMARY_CSV="$OUT_DIR/benchmark_summary.csv"
 echo -e "profile\tprovider\tmodel\tjson_path\tlog_path\texit_code" > "$RESULTS_TSV"
 
+echo "[0/3] Running endpoint/model preflight checks..."
+if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" \
+  --check-lmstudio \
+  --lmstudio-base-url="$LMSTUDIO_BASE_URL" \
+  --lmstudio-model="$LMSTUDIO_FAST_MODEL,$LMSTUDIO_QUALITY_MODEL" \
+  --check-ollama \
+  --ollama-base-url="$OLLAMA_BASE_URL" \
+  --ollama-model="$OLLAMA_MODEL"; then
+  echo "LOCAL_LLM_BENCH FAIL stage=preflight lmstudio_base_url=$LMSTUDIO_BASE_URL ollama_base_url=$OLLAMA_BASE_URL"
+  exit 2
+fi
+
 run_probe() {
   local profile="$1"
   local provider="$2"

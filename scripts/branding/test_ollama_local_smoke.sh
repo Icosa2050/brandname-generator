@@ -108,6 +108,15 @@ CAMPAIGN_LOG="$OUT_DIR/campaign.stdout.log"
 
 echo "ollama_smoke_config model=$MODEL base_url=$BASE_URL openai_base_url=$OPENAI_BASE_URL keep_alive=$KEEP_ALIVE out_dir=$OUT_DIR"
 
+echo "[0/2] Running preflight checks..."
+if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" \
+  --check-ollama \
+  --ollama-base-url="$BASE_URL" \
+  --ollama-model="$MODEL"; then
+  echo "OLLAMA_LOCAL_SMOKE FAIL stage=preflight base_url=$BASE_URL model=$MODEL"
+  exit 2
+fi
+
 if [[ "$RUN_PROBE" == "1" ]]; then
   echo "[1/2] Running Ollama warm/cold probe..."
   if ! python3 "$ROOT_DIR/scripts/branding/test_local_llm_warm_cache.py" \
@@ -123,7 +132,7 @@ if [[ "$RUN_PROBE" == "1" ]]; then
     > "$PROBE_LOG" 2>&1; then
     echo "OLLAMA_LOCAL_SMOKE FAIL stage=probe log=$PROBE_LOG"
     cat "$PROBE_LOG"
-    exit 2
+    exit 3
   fi
 else
   echo "[1/2] Probe skipped."
@@ -154,13 +163,13 @@ if ! python3 "$ROOT_DIR/scripts/branding/naming_campaign_runner.py" \
   > "$CAMPAIGN_LOG" 2>&1; then
   echo "OLLAMA_LOCAL_SMOKE FAIL stage=campaign log=$CAMPAIGN_LOG out_dir=$OUT_DIR"
   tail -n 120 "$CAMPAIGN_LOG"
-  exit 3
+  exit 4
 fi
 
 SUMMARY_JSON="$OUT_DIR/campaign_summary.json"
 if [[ ! -f "$SUMMARY_JSON" ]]; then
   echo "OLLAMA_LOCAL_SMOKE FAIL stage=campaign_summary_missing out_dir=$OUT_DIR log=$CAMPAIGN_LOG"
-  exit 4
+  exit 5
 fi
 
 if [[ "$RUN_PROBE" == "1" ]]; then
@@ -201,7 +210,7 @@ PY
 
 if [[ "$CAMPAIGN_STATUS" != "ok" ]]; then
   echo "OLLAMA_LOCAL_SMOKE FAIL stage=campaign_status status=$CAMPAIGN_STATUS errors=$CAMPAIGN_ERRORS summary=$SUMMARY_JSON log=$CAMPAIGN_LOG"
-  exit 5
+  exit 6
 fi
 
 echo "OLLAMA_LOCAL_SMOKE PASS probe_cold_ms=$PROBE_COLD_MS probe_warm_median_ms=$PROBE_WARM_MEDIAN_MS probe_post_idle_ms=$PROBE_POST_IDLE_MS campaign_status=$CAMPAIGN_STATUS runs=$RUNS_EXECUTED shortlist_unique=$UNIQUE_SHORTLIST out_dir=$OUT_DIR probe_json=$PROBE_JSON campaign_log=$CAMPAIGN_LOG"
