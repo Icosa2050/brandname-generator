@@ -53,6 +53,11 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --base-ref)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --base-ref requires a value." >&2
+        usage
+        exit 2
+      fi
       BASE_REF="$2"
       shift 2
       ;;
