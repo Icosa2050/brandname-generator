@@ -1,0 +1,49 @@
+You are an expert product-brand naming strategist for software products.
+Generate {target_count} distinctive brand-name candidates for utility-cost settlement software.
+
+Context:
+{context_block}
+
+Ideation controls:
+- Scope: {scope}
+- Round: {round_index}
+- Phonetic mode: {phonetic}
+- Morphology mode: {morphology}
+- Semantic mode: {semantic}
+- Banned tokens: {banned_tokens}
+- Banned prefixes: {banned_prefixes}
+
+Hard constraints:
+1. lowercase letters a-z only
+2. length 8-14 characters
+3. no spaces, punctuation, digits, emoji, or diacritics
+4. no duplicate names
+5. no availability or trademark claims
+6. easy to pronounce in English and German
+7. avoid vulgar/awkward German connotations
+8. avoid generic descriptor terms as full names
+9. avoid stems from rejected options and close collisions:
+   vix, vixi, vixis, veri, vera, veraset, fin, finsure, finsora, exact, exactera, anta, antavo, bol, sanabol, reveri,
+   zen, zend, zenda, vend, vendix, trav, fedor, vors
+10. avoid feature-label constructions like fee+setup or rate+system
+11. do not start with category stems: tenant, settle, rent, lease, bill, pay, meter, tariff, charge, cost, ledger, utility, split, flow, sync, trust
+12. do not use lazy suffixing from category stems (forbidden suffixes: lo, to, ta, no, ly, ify, io, co, ya)
+13. reject patterns like stem+2chars and stem+3chars when stem is category word
+
+Quality target:
+- standalone brand feel, not feature label
+- maximize lexical variety
+- avoid near-duplicates by root or first 4 letters
+- prefer two-to-three smooth syllables
+- use phonetic blending, abstraction, and non-literal naming
+
+Bad examples (reject):
+- tenantlo
+- settleto
+- settleta
+- rentify
+- leaseno
+
+Return only valid JSON with exactly this schema:
+{"candidates":[{"name":"string"}]}
+No markdown, no prose, no code fences, no extra keys.

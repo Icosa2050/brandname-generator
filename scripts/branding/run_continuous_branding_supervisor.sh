@@ -7,7 +7,7 @@ OUT_DIR="${CONTINUOUS_OUT_DIR:-$ROOT_DIR/test_outputs/branding/continuous_hybrid
 PRIMARY_BACKEND="${CONTINUOUS_BACKEND:-auto}"          # auto|lmstudio|ollama
 FALLBACK_BACKEND="${CONTINUOUS_FALLBACK_BACKEND:-ollama}"  # none|lmstudio|ollama
 PROFILE_PLAN_RAW="${CONTINUOUS_PROFILE_PLAN:-fast,fast,quality}"
-REMOTE_MODELS="${CONTINUOUS_REMOTE_MODELS:-}"
+REMOTE_MODELS="${CONTINUOUS_REMOTE_MODELS:-mistralai/mistral-small-creative,qwen/qwen3-next-80b-a3b-instruct,anthropic/claude-sonnet-4.6}"
 LOCAL_MODELS="${CONTINUOUS_LOCAL_MODELS:-}"
 LLM_MODEL_SELECTION="${CONTINUOUS_LLM_MODEL_SELECTION:-round_robin}"
 
@@ -41,7 +41,7 @@ Options:
   --fallback-backend <none|lmstudio|ollama>
                                    Backend fallback on failed cycle (default: ollama)
   --profile-plan <csv>             Profile rotation per cycle (default: fast,fast,quality)
-                                   Allowed profiles: fast, quality, balanced, creative
+                                   Allowed profiles: fast, quality, balanced, creative, remote_quality
   --remote-models <csv>            OpenRouter model ids for ideation (supports multi-model CSV)
   --local-models <csv>             Local model ids for ideation (supports multi-model CSV)
   --llm-model-selection <mode>     LLM model picker for multi-model lists: round_robin|random
@@ -62,14 +62,15 @@ Options:
 Profile definitions:
   fast:
     --local-share 1.0
-    --llm-rounds 1
+    --llm-rounds 2
     --llm-candidates-per-round 24
     --validator-tier cheap
 
   quality:
-    --local-share 0.75
-    --llm-rounds 4
+    --local-share 0.35
+    --llm-rounds 5
     --llm-candidates-per-round 12
+    --llm-prompt-template-file resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt
     --validator-expensive-finalist-limit 20
     --validator-timeout-s 12
     --validator-max-concurrency 16
@@ -89,6 +90,17 @@ Profile definitions:
     --validator-expensive-finalist-limit 24
     --validator-timeout-s 14
     --validator-max-concurrency 16
+
+  remote_quality:
+    --local-share 0.10
+    --llm-rounds 8
+    --llm-candidates-per-round 14
+    --generator-min-len 8
+    --generator-max-len 14
+    --llm-prompt-template-file resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt
+    --validator-expensive-finalist-limit 28
+    --validator-timeout-s 16
+    --validator-max-concurrency 18
 
 Notes:
   - Uses existing wrappers:
@@ -256,11 +268,11 @@ for raw_profile in ${(s:,:)PROFILE_PLAN_RAW}; do
   local_profile="${local_profile//[[:space:]]/}"
   [[ -z "$local_profile" ]] && continue
   case "$local_profile" in
-    fast|quality|balanced|creative)
+    fast|quality|balanced|creative|remote_quality)
       PROFILE_PLAN+=("$local_profile")
       ;;
     *)
-      echo "Invalid profile in --profile-plan: $local_profile (allowed: fast,quality,balanced,creative)." >&2
+      echo "Invalid profile in --profile-plan: $local_profile (allowed: fast,quality,balanced,creative,remote_quality)." >&2
       exit 2
       ;;
   esac
@@ -336,11 +348,16 @@ build_profile_args() {
   PROFILE_VALIDATOR_ARGS=()
   case "$profile" in
     fast)
-      PROFILE_LOCAL_ARGS=(--local-share 1.0 --llm-rounds 1 --llm-candidates-per-round 24)
+      PROFILE_LOCAL_ARGS=(--local-share 1.0 --llm-rounds 2 --llm-candidates-per-round 24)
       PROFILE_VALIDATOR_ARGS=(--validator-tier cheap)
       ;;
     quality)
-      PROFILE_LOCAL_ARGS=(--local-share 0.75 --llm-rounds 4 --llm-candidates-per-round 12)
+      PROFILE_LOCAL_ARGS=(
+        --local-share 0.35
+        --llm-rounds 5
+        --llm-candidates-per-round 12
+        --llm-prompt-template-file "$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
+      )
       PROFILE_VALIDATOR_ARGS=(
         --validator-expensive-finalist-limit 20
         --validator-timeout-s 12
@@ -359,6 +376,21 @@ build_profile_args() {
         --validator-expensive-finalist-limit 24
         --validator-timeout-s 14
         --validator-max-concurrency 16
+      )
+      ;;
+    remote_quality)
+      PROFILE_LOCAL_ARGS=(
+        --local-share 0.10
+        --llm-rounds 8
+        --llm-candidates-per-round 14
+      )
+      PROFILE_VALIDATOR_ARGS=(
+        --generator-min-len 8
+        --generator-max-len 14
+        --llm-prompt-template-file "$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
+        --validator-expensive-finalist-limit 28
+        --validator-timeout-s 16
+        --validator-max-concurrency 18
       )
       ;;
     *)

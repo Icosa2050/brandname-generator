@@ -94,6 +94,25 @@ GERMAN_HEAVY_TOKENS = {
     'kosten',
     'betrieb',
 }
+LAZY_CATEGORY_STEMS = {
+    'tenant',
+    'settle',
+    'rent',
+    'lease',
+    'bill',
+    'pay',
+    'meter',
+    'tariff',
+    'charge',
+    'cost',
+    'ledger',
+    'utility',
+    'split',
+    'flow',
+    'sync',
+    'trust',
+}
+LAZY_CATEGORY_SUFFIXES = {'lo', 'to', 'ta', 'no', 'ly', 'ify', 'io', 'co', 'ya'}
 
 COINED_PREFIXES = [
     'util',
@@ -1753,6 +1772,27 @@ def template_likeness_signal(name: str) -> tuple[int, str]:
         penalty += 8
         flags.append('triple_repeat')
 
+    for stem in LAZY_CATEGORY_STEMS:
+        if not name.startswith(stem):
+            continue
+        remainder = name[len(stem) :]
+        if not remainder:
+            penalty += 28
+            flags.append('lazy_category_stem_exact')
+            continue
+        if remainder in LAZY_CATEGORY_SUFFIXES:
+            penalty += 30
+            flags.append('lazy_category_suffix')
+            continue
+        if len(remainder) <= 2:
+            penalty += 24
+            flags.append('lazy_category_short_tail')
+            continue
+        if len(remainder) == 3 and remainder[-1] in {'a', 'e', 'i', 'o', 'u'}:
+            penalty += 16
+            flags.append('lazy_category_three_tail')
+            continue
+
     return min(100, penalty), ';'.join(sorted(set(flags)))
 
 
@@ -2189,6 +2229,10 @@ def evaluate_candidates(
             c.hard_fail = True
             if not c.fail_reason:
                 c.fail_reason = 'false_friend_risk'
+        if 'lazy_category_' in template_flags:
+            c.hard_fail = True
+            if not c.fail_reason:
+                c.fail_reason = 'lazy_category_suffix'
         if quality_first:
             if trust_proxy < max(0, min(100, quality_min_trust_proxy)):
                 c.hard_fail = True

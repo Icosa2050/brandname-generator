@@ -6,7 +6,12 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 LANE=0
 SHARD_COUNT=2
 OUT_DIR="/tmp/branding_openrouter_tuned"
-MODEL="${OPENROUTER_MODEL:-mistralai/mistral-small-creative}"
+BUNDLE_A="mistralai/mistral-small-creative,qwen/qwen3-next-80b-a3b-instruct,anthropic/claude-sonnet-4.6"
+BUNDLE_B="qwen/qwen3-next-80b-a3b-instruct,anthropic/claude-sonnet-4.6"
+BUNDLE_C="mistralai/mistral-small-creative,qwen/qwen3-next-80b-a3b-instruct,openai/gpt-5.2"
+MODEL="${OPENROUTER_MODEL:-$BUNDLE_A}"
+MODEL_SELECTION="${OPENROUTER_MODEL_SELECTION:-random}"
+PROFILE="${OPENROUTER_PROFILE:-quality}"
 MAX_RUNS=1
 SLEEP_S=0
 POOL_SIZE=400
@@ -19,11 +24,29 @@ VALIDATOR_MAX_CONCURRENCY=12
 VALIDATOR_TIMEOUT_S=6
 LLM_ROUNDS=1
 LLM_CANDIDATES_PER_ROUND=10
+LLM_TEMPERATURE="${OPENROUTER_LLM_TEMPERATURE:-0.8}"
+PROMPT_TEMPLATE_FILE="${OPENROUTER_PROMPT_TEMPLATE_FILE:-}"
 LIVE_PROGRESS=1
 NO_EXTERNAL_CHECKS=1
+POST_RANK=1
+POST_RANK_TOP_N="${OPENROUTER_POST_RANK_TOP_N:-40}"
+POST_RANK_INCLUDE_NON_SHORTLIST=0
+HEALTH_CHECK=1
 HTTP_REFERER="${OPENROUTER_HTTP_REFERER:-https://github.com/Icosa2050/brandname-generator}"
 X_TITLE="${OPENROUTER_X_TITLE:-brand-name-generator}"
 EXTRA_ARGS=()
+USER_MODEL=""
+USER_MODEL_SELECTION=""
+USER_LLM_ROUNDS=""
+USER_LLM_CANDIDATES_PER_ROUND=""
+USER_LLM_TEMPERATURE=""
+USER_VALIDATOR_CANDIDATE_LIMIT=""
+USER_VALIDATOR_EXPENSIVE_FINALIST_LIMIT=""
+USER_VALIDATOR_CONCURRENCY=""
+USER_VALIDATOR_MIN_CONCURRENCY=""
+USER_VALIDATOR_MAX_CONCURRENCY=""
+USER_VALIDATOR_TIMEOUT_S=""
+USER_PROMPT_TEMPLATE_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -33,10 +56,16 @@ Usage:
   scripts/branding/run_openrouter_lane.sh [options] [-- <extra runner args>]
 
 Options:
+  --profile <fast|quality|remote_quality> Apply tuning preset (default: quality)
   --lane <n>                         Shard id (default: 0)
   --shard-count <n>                  Total shard workers (default: 2)
   --out-dir <path>                   Campaign output root (default: /tmp/branding_openrouter_tuned)
-  --model <id>                       OpenRouter model id
+  --model <id|csv>                   OpenRouter model id(s)
+  --models <csv>                     Alias for --model
+  --bundle-a                         Use model Bundle A (default)
+  --bundle-b                         Use model Bundle B
+  --bundle-c                         Use model Bundle C
+  --model-selection <mode>           round_robin|random (default: random)
   --max-runs <n>                     Max runs per invocation (default: 1)
   --pool-size <n>                    Generator pool size (default: 400)
   --check-limit <n>                  Generator check limit (default: 80)
@@ -48,6 +77,14 @@ Options:
   --validator-timeout-s <seconds>    Validator per-check timeout (default: 6)
   --llm-rounds <n>                   LLM rounds per run (default: 1)
   --llm-candidates-per-round <n>     LLM candidates requested per round (default: 10)
+  --llm-temperature <float>          LLM sampling temperature (default: profile-specific)
+  --llm-prompt-template-file <path>  Optional prompt template file
+  --post-rank                        Run deterministic DE/EN post-ranker (default: on)
+  --no-post-rank                     Skip deterministic post-ranker
+  --post-rank-top-n <n>              Names kept by post-ranker (default: 40)
+  --post-rank-all                    Score all names, not only shortlist-selected ones
+  --health-check                     Run post-run health checks (default: on)
+  --no-health-check                  Skip post-run health checks
   --http-referer <url>               OpenRouter HTTP-Referer header
   --x-title <text>                   OpenRouter X-Title header
   --with-external-checks             Keep generator external checks enabled
@@ -60,8 +97,59 @@ Examples:
 EOF
 }
 
+apply_profile() {
+  case "$PROFILE" in
+    ""|"custom")
+      ;;
+    "fast")
+      LLM_ROUNDS="2"
+      LLM_CANDIDATES_PER_ROUND="10"
+      LLM_TEMPERATURE="0.8"
+      VALIDATOR_CANDIDATE_LIMIT="28"
+      VALIDATOR_EXPENSIVE_FINALIST_LIMIT="10"
+      VALIDATOR_TIMEOUT_S="6"
+      VALIDATOR_CONCURRENCY="8"
+      VALIDATOR_MIN_CONCURRENCY="4"
+      VALIDATOR_MAX_CONCURRENCY="12"
+      PROMPT_TEMPLATE_FILE=""
+      ;;
+    "quality")
+      LLM_ROUNDS="3"
+      LLM_CANDIDATES_PER_ROUND="14"
+      LLM_TEMPERATURE="0.7"
+      VALIDATOR_CANDIDATE_LIMIT="36"
+      VALIDATOR_EXPENSIVE_FINALIST_LIMIT="16"
+      VALIDATOR_TIMEOUT_S="10"
+      VALIDATOR_CONCURRENCY="12"
+      VALIDATOR_MIN_CONCURRENCY="6"
+      VALIDATOR_MAX_CONCURRENCY="18"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
+      ;;
+    "remote_quality")
+      LLM_ROUNDS="6"
+      LLM_CANDIDATES_PER_ROUND="14"
+      LLM_TEMPERATURE="1.05"
+      VALIDATOR_CANDIDATE_LIMIT="48"
+      VALIDATOR_EXPENSIVE_FINALIST_LIMIT="24"
+      VALIDATOR_TIMEOUT_S="14"
+      VALIDATOR_CONCURRENCY="14"
+      VALIDATOR_MIN_CONCURRENCY="8"
+      VALIDATOR_MAX_CONCURRENCY="20"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
+      ;;
+    *)
+      echo "Unknown profile: $PROFILE (expected fast|quality|remote_quality)." >&2
+      exit 2
+      ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --profile)
+      PROFILE="$2"
+      shift 2
+      ;;
     --lane|--shard-id)
       LANE="$2"
       shift 2
@@ -76,6 +164,32 @@ while [[ $# -gt 0 ]]; do
       ;;
     --model)
       MODEL="$2"
+      USER_MODEL="$2"
+      shift 2
+      ;;
+    --models)
+      MODEL="$2"
+      USER_MODEL="$2"
+      shift 2
+      ;;
+    --bundle-a)
+      MODEL="$BUNDLE_A"
+      USER_MODEL="$BUNDLE_A"
+      shift
+      ;;
+    --bundle-b)
+      MODEL="$BUNDLE_B"
+      USER_MODEL="$BUNDLE_B"
+      shift
+      ;;
+    --bundle-c)
+      MODEL="$BUNDLE_C"
+      USER_MODEL="$BUNDLE_C"
+      shift
+      ;;
+    --model-selection)
+      MODEL_SELECTION="$2"
+      USER_MODEL_SELECTION="$2"
       shift 2
       ;;
     --max-runs)
@@ -92,35 +206,77 @@ while [[ $# -gt 0 ]]; do
       ;;
     --validator-candidate-limit)
       VALIDATOR_CANDIDATE_LIMIT="$2"
+      USER_VALIDATOR_CANDIDATE_LIMIT="$2"
       shift 2
       ;;
     --validator-expensive-limit)
       VALIDATOR_EXPENSIVE_FINALIST_LIMIT="$2"
+      USER_VALIDATOR_EXPENSIVE_FINALIST_LIMIT="$2"
       shift 2
       ;;
     --validator-concurrency)
       VALIDATOR_CONCURRENCY="$2"
+      USER_VALIDATOR_CONCURRENCY="$2"
       shift 2
       ;;
     --validator-min-concurrency)
       VALIDATOR_MIN_CONCURRENCY="$2"
+      USER_VALIDATOR_MIN_CONCURRENCY="$2"
       shift 2
       ;;
     --validator-max-concurrency)
       VALIDATOR_MAX_CONCURRENCY="$2"
+      USER_VALIDATOR_MAX_CONCURRENCY="$2"
       shift 2
       ;;
     --validator-timeout-s)
       VALIDATOR_TIMEOUT_S="$2"
+      USER_VALIDATOR_TIMEOUT_S="$2"
       shift 2
       ;;
     --llm-rounds)
       LLM_ROUNDS="$2"
+      USER_LLM_ROUNDS="$2"
       shift 2
       ;;
     --llm-candidates-per-round)
       LLM_CANDIDATES_PER_ROUND="$2"
+      USER_LLM_CANDIDATES_PER_ROUND="$2"
       shift 2
+      ;;
+    --llm-temperature)
+      LLM_TEMPERATURE="$2"
+      USER_LLM_TEMPERATURE="$2"
+      shift 2
+      ;;
+    --llm-prompt-template-file)
+      PROMPT_TEMPLATE_FILE="$2"
+      USER_PROMPT_TEMPLATE_FILE="$2"
+      shift 2
+      ;;
+    --post-rank)
+      POST_RANK=1
+      shift
+      ;;
+    --no-post-rank)
+      POST_RANK=0
+      shift
+      ;;
+    --post-rank-top-n)
+      POST_RANK_TOP_N="$2"
+      shift 2
+      ;;
+    --post-rank-all)
+      POST_RANK_INCLUDE_NON_SHORTLIST=1
+      shift
+      ;;
+    --health-check)
+      HEALTH_CHECK=1
+      shift
+      ;;
+    --no-health-check)
+      HEALTH_CHECK=0
+      shift
       ;;
     --http-referer)
       HTTP_REFERER="$2"
@@ -155,6 +311,54 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+apply_profile
+if [[ -n "$USER_MODEL" ]]; then
+  MODEL="$USER_MODEL"
+fi
+if [[ -n "$USER_MODEL_SELECTION" ]]; then
+  MODEL_SELECTION="$USER_MODEL_SELECTION"
+fi
+if [[ -n "$USER_LLM_ROUNDS" ]]; then
+  LLM_ROUNDS="$USER_LLM_ROUNDS"
+fi
+if [[ -n "$USER_LLM_CANDIDATES_PER_ROUND" ]]; then
+  LLM_CANDIDATES_PER_ROUND="$USER_LLM_CANDIDATES_PER_ROUND"
+fi
+if [[ -n "$USER_LLM_TEMPERATURE" ]]; then
+  LLM_TEMPERATURE="$USER_LLM_TEMPERATURE"
+fi
+if [[ -n "$USER_VALIDATOR_CANDIDATE_LIMIT" ]]; then
+  VALIDATOR_CANDIDATE_LIMIT="$USER_VALIDATOR_CANDIDATE_LIMIT"
+fi
+if [[ -n "$USER_VALIDATOR_EXPENSIVE_FINALIST_LIMIT" ]]; then
+  VALIDATOR_EXPENSIVE_FINALIST_LIMIT="$USER_VALIDATOR_EXPENSIVE_FINALIST_LIMIT"
+fi
+if [[ -n "$USER_VALIDATOR_CONCURRENCY" ]]; then
+  VALIDATOR_CONCURRENCY="$USER_VALIDATOR_CONCURRENCY"
+fi
+if [[ -n "$USER_VALIDATOR_MIN_CONCURRENCY" ]]; then
+  VALIDATOR_MIN_CONCURRENCY="$USER_VALIDATOR_MIN_CONCURRENCY"
+fi
+if [[ -n "$USER_VALIDATOR_MAX_CONCURRENCY" ]]; then
+  VALIDATOR_MAX_CONCURRENCY="$USER_VALIDATOR_MAX_CONCURRENCY"
+fi
+if [[ -n "$USER_VALIDATOR_TIMEOUT_S" ]]; then
+  VALIDATOR_TIMEOUT_S="$USER_VALIDATOR_TIMEOUT_S"
+fi
+if [[ -n "$USER_PROMPT_TEMPLATE_FILE" ]]; then
+  PROMPT_TEMPLATE_FILE="$USER_PROMPT_TEMPLATE_FILE"
+fi
+
+MODEL_SELECTION="${MODEL_SELECTION:l}"
+case "$MODEL_SELECTION" in
+  round_robin|random)
+    ;;
+  *)
+    echo "--model-selection must be round_robin or random." >&2
+    exit 2
+    ;;
+esac
+
 if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "OPENROUTER_API_KEY is not set." >&2
   exit 2
@@ -166,6 +370,10 @@ if ! [[ "$LANE" =~ '^[0-9]+$' ]]; then
 fi
 if ! [[ "$SHARD_COUNT" =~ '^[1-9][0-9]*$' ]]; then
   echo "--shard-count must be >= 1." >&2
+  exit 2
+fi
+if ! [[ "$POST_RANK_TOP_N" =~ '^[1-9][0-9]*$' ]]; then
+  echo "--post-rank-top-n must be >= 1." >&2
   exit 2
 fi
 if (( LANE >= SHARD_COUNT )); then
@@ -188,12 +396,14 @@ CMD=(
   --validator-timeout-s "$VALIDATOR_TIMEOUT_S"
   --llm-ideation-enabled
   --llm-provider openrouter_http
-  --llm-model "$MODEL"
+  --llm-models "$MODEL"
+  --llm-model-selection "$MODEL_SELECTION"
   --llm-openrouter-http-referer "$HTTP_REFERER"
   --llm-openrouter-x-title "$X_TITLE"
   --llm-context-file "$ROOT_DIR/resources/branding/llm/llm_context.example.json"
   --llm-rounds "$LLM_ROUNDS"
   --llm-candidates-per-round "$LLM_CANDIDATES_PER_ROUND"
+  --llm-temperature "$LLM_TEMPERATURE"
   --shard-id "$LANE"
   --shard-count "$SHARD_COUNT"
   --out-dir "$OUT_DIR"
@@ -201,6 +411,9 @@ CMD=(
 
 if (( NO_EXTERNAL_CHECKS )); then
   CMD+=(--generator-no-external-checks)
+fi
+if [[ -n "${PROMPT_TEMPLATE_FILE:-}" ]]; then
+  CMD+=(--llm-prompt-template-file "$PROMPT_TEMPLATE_FILE")
 fi
 if (( LIVE_PROGRESS )); then
   CMD+=(--live-progress)
@@ -218,6 +431,63 @@ echo
 
 cd "$ROOT_DIR"
 if command -v direnv >/dev/null 2>&1; then
-  exec direnv exec . "${CMD[@]}"
+  set +e
+  direnv exec . "${CMD[@]}"
+  RUN_RC=$?
+  set -e
+else
+  set +e
+  "${CMD[@]}"
+  RUN_RC=$?
+  set -e
 fi
-exec "${CMD[@]}"
+
+if (( RUN_RC == 0 && POST_RANK )); then
+  POST_CMD=(
+    python3 "$ROOT_DIR/scripts/branding/rerank_shortlist_deterministic.py"
+    --out-dir "$OUT_DIR"
+    --top-n "$POST_RANK_TOP_N"
+  )
+  if (( POST_RANK_INCLUDE_NON_SHORTLIST )); then
+    POST_CMD+=(--include-non-shortlist)
+  fi
+  echo "running post-rank out_dir=$OUT_DIR top_n=$POST_RANK_TOP_N include_non_shortlist=$POST_RANK_INCLUDE_NON_SHORTLIST"
+  printf '$ '
+  printf '%q ' "${POST_CMD[@]}"
+  echo
+  if command -v direnv >/dev/null 2>&1; then
+    if ! direnv exec . "${POST_CMD[@]}"; then
+      echo "post_rank_warn reason=postrank_failed"
+    fi
+  elif ! "${POST_CMD[@]}"; then
+    echo "post_rank_warn reason=postrank_failed"
+  fi
+fi
+
+if (( RUN_RC == 0 && POST_RANK && HEALTH_CHECK )); then
+  HEALTH_CMD=(
+    python3 "$ROOT_DIR/scripts/branding/check_campaign_health.py"
+    --out-dir "$OUT_DIR"
+  )
+  echo "running health-check out_dir=$OUT_DIR"
+  printf '$ '
+  printf '%q ' "${HEALTH_CMD[@]}"
+  echo
+  if command -v direnv >/dev/null 2>&1; then
+    set +e
+    direnv exec . "${HEALTH_CMD[@]}"
+    HEALTH_RC=$?
+    set -e
+  else
+    set +e
+    "${HEALTH_CMD[@]}"
+    HEALTH_RC=$?
+    set -e
+  fi
+  if (( HEALTH_RC != 0 )); then
+    echo "health_check_warn reason=failed code=$HEALTH_RC"
+    RUN_RC="$HEALTH_RC"
+  fi
+fi
+
+exit "$RUN_RC"

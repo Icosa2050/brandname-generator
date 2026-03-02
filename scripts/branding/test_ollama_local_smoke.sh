@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
-MODEL="${OLLAMA_MODEL:-gemma3:12b}"
+MODEL="${OLLAMA_MODEL:-mistral-small3.1:latest}"
 BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 OPENAI_BASE_URL="${OLLAMA_OPENAI_BASE_URL:-http://127.0.0.1:11434/v1}"
 KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
@@ -75,7 +75,7 @@ Runs:
 2) one-run local campaign smoke against OpenAI-compatible endpoint
 
 Options:
-  --model <id>                          Ollama model identifier (default: gemma3:12b)
+  --model <id>                          Ollama model identifier (default: mistral-small3.1:latest)
   --base-url <url>                      Ollama native base URL (default: http://127.0.0.1:11434)
   --openai-base-url <url>               Ollama OpenAI-compatible base URL (default: http://127.0.0.1:11434/v1)
   --keep-alive <value>                  Ollama keep_alive value (example: 30m)
@@ -153,8 +153,8 @@ if ! python3 "$ROOT_DIR/scripts/branding/naming_campaign_runner.py" \
   --llm-openai-keep-alive="$KEEP_ALIVE" \
   --llm-rounds="$CAMPAIGN_ROUNDS" \
   --llm-candidates-per-round="$CAMPAIGN_CANDIDATES_PER_ROUND" \
-  --llm-max-call-latency-ms=30000 \
-  --llm-stage-timeout-ms=70000 \
+  --llm-max-call-latency-ms=90000 \
+  --llm-stage-timeout-ms=240000 \
   --validator-checks=adversarial,psych,descriptive \
   --validator-tier=cheap \
   --validator-candidate-limit=25 \

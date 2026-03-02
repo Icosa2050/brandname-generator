@@ -300,6 +300,28 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             ).fetchone()[0]
             self.assertEqual(int(transition_count), 2)
 
+    def test_load_candidates_prefers_newest_ids(self) -> None:
+        with closing(sqlite3.connect(':memory:')) as conn:
+            ndb.ensure_schema(conn)
+            ids: list[int] = []
+            for name in ['FirstName', 'SecondName', 'ThirdName']:
+                ids.append(
+                    ndb.upsert_candidate(
+                        conn,
+                        name_display=name,
+                        total_score=70.0,
+                        risk_score=20.0,
+                        recommendation='consider',
+                        quality_score=75.0,
+                        engine_id='explicit',
+                        parent_ids='',
+                        status='new',
+                        rejection_reason='',
+                    )
+                )
+            rows = nva.load_candidates(conn, ['new'], 2)
+            self.assertEqual([row.candidate_id for row in rows], [ids[2], ids[1]])
+
     def test_run_single_job_uses_two_lock_acquisitions_on_success(self) -> None:
         with closing(sqlite3.connect(':memory:')) as conn:
             ndb.ensure_schema(conn)

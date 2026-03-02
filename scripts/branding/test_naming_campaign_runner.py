@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import sys
@@ -73,6 +74,49 @@ class NamingCampaignRunnerShardSchedulingTest(unittest.TestCase):
                 quota_profile='a:1,b:1',
             )
             self.assertEqual(got, {key: 90.0})
+
+    def test_load_combo_duration_history_accepts_ok_degraded_status(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'campaign_progress.csv'
+            headers = [
+                'source_influence_share',
+                'scope',
+                'gate',
+                'quota_profile',
+                'duration_s',
+                'status',
+            ]
+            rows = [
+                {
+                    'source_influence_share': '0.25',
+                    'scope': 'global',
+                    'gate': 'balanced',
+                    'quota_profile': 'a:1,b:1',
+                    'duration_s': '100',
+                    'status': 'ok_llm_degraded_empty',
+                },
+                {
+                    'source_influence_share': '0.25',
+                    'scope': 'global',
+                    'gate': 'balanced',
+                    'quota_profile': 'a:1,b:1',
+                    'duration_s': '50',
+                    'status': 'completed',
+                },
+            ]
+            with path.open('w', encoding='utf-8', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(rows)
+
+            got = ncr.load_combo_duration_history(path)
+            key = ncr.combo_history_key(
+                share=0.25,
+                scope='global',
+                gate='balanced',
+                quota_profile='a:1,b:1',
+            )
+            self.assertEqual(got, {key: 75.0})
 
     def test_assign_sweep_combos_to_shards_weighted_balances_load(self) -> None:
         combos: list[ncr.SweepCombo] = [
@@ -314,6 +358,73 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
         self.assertEqual(args.llm_hybrid_local_models, 'qwen3-vl-30b-a3b-instruct-mlx')
         self.assertEqual(args.llm_hybrid_remote_models, 'mistralai/mistral-small-creative')
 
+    def test_is_remote_llm_requested_flags(self) -> None:
+        self.assertFalse(
+            ncr.is_remote_llm_requested(
+                argparse.Namespace(
+                    llm_ideation_enabled=False,
+                    llm_provider='openrouter_http',
+                    llm_hybrid_local_share=0.75,
+                )
+            )
+        )
+        self.assertTrue(
+            ncr.is_remote_llm_requested(
+                argparse.Namespace(
+                    llm_ideation_enabled=True,
+                    llm_provider='openrouter_http',
+                    llm_hybrid_local_share=0.75,
+                )
+            )
+        )
+        self.assertFalse(
+            ncr.is_remote_llm_requested(
+                argparse.Namespace(
+                    llm_ideation_enabled=True,
+                    llm_provider='hybrid',
+                    llm_hybrid_local_share=1.0,
+                )
+            )
+        )
+        self.assertTrue(
+            ncr.is_remote_llm_requested(
+                argparse.Namespace(
+                    llm_ideation_enabled=True,
+                    llm_provider='hybrid',
+                    llm_hybrid_local_share=0.6,
+                )
+            )
+        )
+
+    def test_missing_remote_llm_api_key_env(self) -> None:
+        args = argparse.Namespace(
+            llm_ideation_enabled=True,
+            llm_provider='hybrid',
+            llm_hybrid_local_share=0.4,
+            llm_api_key_env='OPENROUTER_API_KEY',
+        )
+        with mock.patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(ncr.missing_remote_llm_api_key_env(args), 'OPENROUTER_API_KEY')
+        with mock.patch.dict('os.environ', {'OPENROUTER_API_KEY': 'test-key'}, clear=True):
+            self.assertEqual(ncr.missing_remote_llm_api_key_env(args), '')
+
+    def test_main_fails_fast_when_remote_key_missing(self) -> None:
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-ideation-enabled',
+            '--llm-provider',
+            'openrouter_http',
+            '--llm-api-key-env',
+            'OPENROUTER_API_KEY',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            with mock.patch.dict('os.environ', {}, clear=True):
+                with mock.patch('builtins.print') as mock_print:
+                    code = ncr.main()
+        self.assertEqual(code, 1)
+        printed = ' '.join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
+        self.assertIn('missing required environment variable OPENROUTER_API_KEY', printed)
+
     def test_parse_args_accepts_prompt_template_file(self) -> None:
         argv = [
             'naming_campaign_runner.py',
@@ -460,6 +571,8 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             '1',
             '--llm-candidates-per-round',
             '8',
+            '--llm-temperature',
+            '0.65',
         ]
         with mock.patch.object(sys, 'argv', argv):
             args = ncr.parse_args()
@@ -490,6 +603,7 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             mock_call_openai.assert_called_once()
             kwargs = mock_call_openai.call_args.kwargs
             self.assertEqual(kwargs.get('request_extras'), {'ttl': 3600, 'keep_alive': '20m'})
+            self.assertAlmostEqual(float(kwargs.get('temperature') or 0.0), 0.65, places=6)
 
     @mock.patch('naming_campaign_runner.nide.call_openrouter_candidates')
     @mock.patch('naming_campaign_runner.nide.list_openrouter_models')
@@ -530,6 +644,8 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
                 '2',
                 '--llm-candidates-per-round',
                 '1',
+                '--llm-temperature',
+                '0.95',
                 '--llm-api-key-env',
                 'OPENROUTER_API_KEY',
             ]
@@ -562,6 +678,8 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             self.assertEqual(got, ['tenantia', 'verodomo'])
             called_models = [call.kwargs.get('model') for call in mock_call_openrouter.call_args_list]
             self.assertEqual(called_models, [model_a, model_b])
+            called_temps = [call.kwargs.get('temperature') for call in mock_call_openrouter.call_args_list]
+            self.assertEqual(called_temps, [0.95, 0.95])
 
     @mock.patch('naming_campaign_runner.nide.call_openrouter_candidates')
     @mock.patch('naming_campaign_runner.nide.list_openrouter_models')
@@ -645,6 +763,159 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
             )
             mock_call_openai.assert_called_once()
             mock_call_openrouter.assert_called_once()
+
+    @mock.patch('naming_campaign_runner.nide.call_openai_compat_candidates')
+    @mock.patch('naming_campaign_runner.nide.list_openai_models')
+    def test_run_active_llm_ideation_openai_compat_reports_timeout_error(
+        self,
+        mock_list_models: mock.Mock,
+        mock_call_openai: mock.Mock,
+    ) -> None:
+        model = 'qwen3:latest'
+        mock_list_models.return_value = {model}
+        mock_call_openai.return_value = ([], {}, 'timeout')
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-ideation-enabled',
+            '--llm-provider',
+            'openai_compat',
+            '--llm-model',
+            model,
+            '--llm-rounds',
+            '1',
+            '--llm-candidates-per-round',
+            '1',
+            '--llm-max-retries',
+            '0',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs_dir = root / 'runs'
+            logs_dir = root / 'logs'
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path, report = ncr.run_active_llm_ideation(
+                args=args,
+                runs_dir=runs_dir,
+                logs_dir=logs_dir,
+                run_id='run_timeout_test',
+                run_index=1,
+                scope='global',
+                seen_shortlist=set(),
+                context_packet={},
+            )
+        self.assertIsNone(artifact_path)
+        self.assertEqual(report.get('status'), 'empty_with_errors')
+        self.assertEqual(report.get('candidate_count'), 0)
+        self.assertIn('round=1:timeout', report.get('errors', []))
+
+    @mock.patch('naming_campaign_runner.nide.list_openrouter_models')
+    @mock.patch('naming_campaign_runner.nide.list_openai_models')
+    def test_run_active_llm_ideation_hybrid_unavailable_without_provider_context(
+        self,
+        mock_list_openai_models: mock.Mock,
+        mock_list_openrouter_models: mock.Mock,
+    ) -> None:
+        del mock_list_openrouter_models
+        mock_list_openai_models.return_value = set()
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-ideation-enabled',
+            '--llm-provider',
+            'hybrid',
+            '--llm-hybrid-local-model',
+            'qwen3:latest',
+            '--llm-hybrid-remote-model',
+            'mistralai/mistral-small-creative',
+            '--llm-hybrid-local-share',
+            '0.5',
+            '--llm-rounds',
+            '2',
+            '--llm-candidates-per-round',
+            '1',
+            '--llm-api-key-env',
+            'OPENROUTER_API_KEY',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs_dir = root / 'runs'
+            logs_dir = root / 'logs'
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            with mock.patch.dict('os.environ', {}, clear=True):
+                artifact_path, report = ncr.run_active_llm_ideation(
+                    args=args,
+                    runs_dir=runs_dir,
+                    logs_dir=logs_dir,
+                    run_id='run_hybrid_unavailable',
+                    run_index=1,
+                    scope='global',
+                    seen_shortlist=set(),
+                    context_packet={},
+                )
+        self.assertIsNone(artifact_path)
+        self.assertEqual(report.get('status'), 'hybrid_unavailable')
+        self.assertEqual(report.get('candidate_count'), 0)
+        self.assertIn('openrouter_http:missing env OPENROUTER_API_KEY', report.get('errors', []))
+
+    @mock.patch('naming_campaign_runner.nide.call_openai_compat_candidates')
+    @mock.patch('naming_campaign_runner.nide.list_openrouter_models')
+    @mock.patch('naming_campaign_runner.nide.list_openai_models')
+    def test_run_active_llm_ideation_hybrid_local_only_still_generates_candidates(
+        self,
+        mock_list_openai_models: mock.Mock,
+        mock_list_openrouter_models: mock.Mock,
+        mock_call_openai: mock.Mock,
+    ) -> None:
+        del mock_list_openrouter_models
+        local_model = 'qwen3:latest'
+        mock_list_openai_models.return_value = {local_model}
+        mock_call_openai.return_value = (['verodomo'], {'cost': 0.001}, '')
+        argv = [
+            'naming_campaign_runner.py',
+            '--llm-ideation-enabled',
+            '--llm-provider',
+            'hybrid',
+            '--llm-hybrid-local-model',
+            local_model,
+            '--llm-hybrid-remote-model',
+            'mistralai/mistral-small-creative',
+            '--llm-hybrid-local-share',
+            '0.5',
+            '--llm-rounds',
+            '1',
+            '--llm-candidates-per-round',
+            '1',
+            '--llm-api-key-env',
+            'OPENROUTER_API_KEY',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs_dir = root / 'runs'
+            logs_dir = root / 'logs'
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            with mock.patch.dict('os.environ', {}, clear=True):
+                artifact_path, report = ncr.run_active_llm_ideation(
+                    args=args,
+                    runs_dir=runs_dir,
+                    logs_dir=logs_dir,
+                    run_id='run_hybrid_local_only',
+                    run_index=1,
+                    scope='global',
+                    seen_shortlist=set(),
+                    context_packet={},
+                )
+        self.assertIsNotNone(artifact_path)
+        self.assertEqual(report.get('status'), 'ok')
+        self.assertEqual(report.get('candidate_count'), 1)
+        self.assertIn('openrouter_http:missing env OPENROUTER_API_KEY', report.get('errors', []))
 
 
 if __name__ == '__main__':

@@ -267,6 +267,32 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertEqual(captured_body.get('keep_alive'), '20m')
 
     @mock.patch('naming_ideation_stage.request.urlopen')
+    def test_call_openai_compat_candidates_clamps_temperature(self, mock_urlopen: mock.Mock) -> None:
+        captured_body: dict[str, object] = {}
+
+        def _fake_urlopen(req: object, timeout: float) -> _FakeHTTPResponse:
+            del timeout
+            data = getattr(req, 'data', b'') if hasattr(req, 'data') else b''
+            if isinstance(data, (bytes, bytearray)):
+                captured_body.update(json.loads(bytes(data).decode('utf-8')))
+            payload = json.dumps({'choices': [{'message': {'content': '{"candidates":[{"name":"verodomo"}]}'}}]})
+            return _FakeHTTPResponse(payload)
+
+        mock_urlopen.side_effect = _fake_urlopen
+        names, _usage, err = nide.call_openai_compat_candidates(
+            api_key='ollama',
+            base_url='http://localhost:11434/v1',
+            model='qwen2.5:14b',
+            prompt='hello',
+            timeout_ms=500,
+            strict_json=True,
+            temperature=9.9,
+        )
+        self.assertEqual(err, '')
+        self.assertEqual(names, ['verodomo'])
+        self.assertEqual(captured_body.get('temperature'), 2.0)
+
+    @mock.patch('naming_ideation_stage.request.urlopen')
     def test_list_openai_models_reads_ids(self, mock_urlopen: mock.Mock) -> None:
         mock_urlopen.return_value = _FakeHTTPResponse(
             json.dumps({'data': [{'id': 'qwen2.5:14b'}, {'id': 'gemma3:12b'}]})
@@ -345,6 +371,31 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertEqual(usage.get('cost'), 0.0123)
         self.assertEqual(captured_headers.get('http-referer'), 'https://example.com/app')
         self.assertEqual(captured_headers.get('x-title'), 'Kostula Naming Pipeline')
+
+    @mock.patch('naming_ideation_stage.request.urlopen')
+    def test_call_openrouter_candidates_uses_configured_temperature(self, mock_urlopen: mock.Mock) -> None:
+        captured_body: dict[str, object] = {}
+
+        def _fake_urlopen(req: object, timeout: float) -> _FakeHTTPResponse:
+            del timeout
+            data = getattr(req, 'data', b'') if hasattr(req, 'data') else b''
+            if isinstance(data, (bytes, bytearray)):
+                captured_body.update(json.loads(bytes(data).decode('utf-8')))
+            payload = json.dumps({'choices': [{'message': {'content': '{"candidates":[{"name":"Verodomo"}]}'}}]})
+            return _FakeHTTPResponse(payload)
+
+        mock_urlopen.side_effect = _fake_urlopen
+        names, _usage, err = nide.call_openrouter_candidates(
+            api_key='k',
+            model='mistralai/mistral-small-creative',
+            prompt='hello',
+            timeout_ms=500,
+            strict_json=True,
+            temperature=1.1,
+        )
+        self.assertEqual(err, '')
+        self.assertEqual(names, ['verodomo'])
+        self.assertEqual(captured_body.get('temperature'), 1.1)
 
     @mock.patch('naming_ideation_stage.request.urlopen')
     def test_call_openrouter_candidates_normalizes_non_url_referer(self, mock_urlopen: mock.Mock) -> None:

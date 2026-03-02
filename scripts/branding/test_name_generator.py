@@ -143,6 +143,29 @@ class NameGeneratorTest(unittest.TestCase):
         self.assertTrue(with_gate.hard_fail)
         self.assertEqual(with_gate.fail_reason, 'quality_template_like')
 
+    def test_lazy_category_template_flag_is_hard_fail_even_without_quality_first(self) -> None:
+        item = ng.GeneratedCandidate(name='tenantlo', generator_family='seed', lineage_atoms=['tenant', 'lo'])
+        with (
+            mock.patch('name_generator.challenge_risk', return_value=(12, 9, 'objego', 0, 0)),
+            mock.patch('name_generator.adversarial_similarity_signal', return_value=(0, '')),
+            mock.patch('name_generator.gibberish_signal', return_value=(0, '')),
+            mock.patch('name_generator.false_friend_signal', return_value=(0, '')),
+            mock.patch('name_generator.template_likeness_signal', return_value=(30, 'lazy_category_suffix')),
+            mock.patch('name_generator.psych_spelling_risk', return_value=3),
+            mock.patch('name_generator.psych_trust_proxy_score', return_value=78),
+        ):
+            got = ng.evaluate_candidates(
+                scope='global',
+                generated_items=[item],
+                similarity_fail_threshold=95,
+                false_friend_fail_threshold=95,
+                gibberish_fail_threshold=95,
+                false_friend_rules={},
+                quality_first=False,
+            )[0]
+        self.assertTrue(got.hard_fail)
+        self.assertEqual(got.fail_reason, 'lazy_category_suffix')
+
     def test_quality_first_trust_proxy_gate(self) -> None:
         item = ng.GeneratedCandidate(name='clarivo', generator_family='seed', lineage_atoms=['clari', 'vo'])
         with (
@@ -235,6 +258,16 @@ class NameGeneratorTest(unittest.TestCase):
         self.assertEqual(out['coined'], 200)
         self.assertLess(out['source_pool'], 200)
         self.assertLess(out['blend'], 200)
+
+    def test_template_likeness_signal_penalizes_lazy_category_suffix(self) -> None:
+        penalty, flags = ng.template_likeness_signal('tenantlo')
+        self.assertGreaterEqual(penalty, 24)
+        self.assertIn('lazy_category_suffix', flags)
+
+    def test_template_likeness_signal_does_not_flag_unrelated_name(self) -> None:
+        penalty, flags = ng.template_likeness_signal('clarodus')
+        self.assertLess(penalty, 16)
+        self.assertNotIn('lazy_category_suffix', flags)
 
     def test_main_skips_failed_history_during_generation_phase(self) -> None:
         with tempfile.TemporaryDirectory() as td:
