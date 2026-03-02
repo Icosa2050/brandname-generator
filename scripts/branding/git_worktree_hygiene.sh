@@ -175,7 +175,21 @@ fi
 
 echo
 echo "applying cleanup..."
+current_wt_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+primary_wt_root=""
+if (( ${#worktree_paths[@]} > 0 )); then
+  primary_wt_root="${worktree_paths[1]}"
+fi
 for wt_path in "${detached_clean_candidates[@]}"; do
+  wt_path_canon="${wt_path:A}"
+  if [[ -n "$current_wt_root" && "$wt_path_canon" == "${current_wt_root:A}" ]]; then
+    echo "  skipping current worktree (rerun from a different worktree to remove): $wt_path"
+    continue
+  fi
+  if [[ -n "$primary_wt_root" && "$wt_path_canon" == "${primary_wt_root:A}" ]]; then
+    echo "  skipping primary worktree: $wt_path"
+    continue
+  fi
   echo "  removing worktree: $wt_path"
   git worktree remove "$wt_path"
 done
