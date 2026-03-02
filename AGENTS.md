@@ -52,3 +52,30 @@
   - Continuous targets are strict survivors (checked recommendation + full expensive-check pass/warn coverage + no expensive-check fail/error).
 - Hybrid campaign example:
   - `direnv exec . python3 scripts/branding/naming_campaign_runner.py --llm-ideation-enabled --llm-provider=hybrid --llm-hybrid-local-models=llama-3.3-8b-instruct-omniwriter --llm-hybrid-remote-models=mistralai/mistral-small-creative --llm-hybrid-local-share=0.75 --llm-openai-base-url=http://127.0.0.1:1234/v1 --llm-openai-ttl-s=3600`
+
+## Git & Worktree Discipline (PR-First)
+- Do not start task work on `main` unless explicitly requested.
+- Use one dedicated branch + worktree per task/thread (`codex/<task-slug>`), created from `origin/main`:
+  - `git fetch origin --prune`
+  - `git worktree add -b codex/<task-slug> <worktree-path> origin/main`
+- Mandatory startup check before edits or task tests:
+  - `git rev-parse --abbrev-ref HEAD`
+  - If output is `main` or `HEAD`, stop and switch/create the task worktree first.
+- Branch/worktree lock per thread: once work starts, do not switch branch/worktree in that thread unless explicitly requested.
+- Required PR flow: implement -> run relevant tests -> commit -> push -> open PR -> merge.
+- Mandatory post-merge cleanup for completed tasks:
+  - `git fetch origin --prune`
+  - `git branch --merged origin/main`
+  - `git branch -d codex/<task-slug>`
+  - `git worktree remove <worktree-path>`
+  - `git worktree prune`
+- Detached worktrees are temporary only (inspection/rescue). Before finishing a session:
+  - If clean, remove the detached worktree.
+  - If dirty, attach changes to a rescue branch before cleanup:
+    - `git -C <worktree-path> switch -c codex/rescue-<date>-<slug>`
+- Hygiene cadence (recommended at least weekly):
+  - `zsh scripts/branding/git_worktree_hygiene.sh` (report-only)
+  - `zsh scripts/branding/git_worktree_hygiene.sh --apply` (safe cleanup)
+  - `git worktree list --porcelain`
+  - `git branch -vv --all`
+  - `git remote prune origin`

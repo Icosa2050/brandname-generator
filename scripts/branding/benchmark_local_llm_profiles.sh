@@ -8,7 +8,7 @@ OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 
 LMSTUDIO_FAST_MODEL="${LMSTUDIO_FAST_MODEL:-llama-3.3-8b-instruct-omniwriter}"
 LMSTUDIO_QUALITY_MODEL="${LMSTUDIO_QUALITY_MODEL:-qwen3-vl-30b-a3b-instruct-mlx}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-gemma3:12b}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-mistral-small3.1:latest}"
 
 LMSTUDIO_TTL_S="${LMSTUDIO_TTL_S:-3600}"
 OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
@@ -75,7 +75,7 @@ Usage: scripts/branding/benchmark_local_llm_profiles.sh [options]
 
 Runs standardized warm-cache probes for three local profiles:
 1) LM Studio fast lane (default llama-3.3-8b-instruct-omniwriter)
-2) Ollama balanced lane (default gemma3:12b)
+2) Ollama balanced lane (default mistral-small3.1:latest)
 3) LM Studio quality lane (default qwen3-vl-30b-a3b-instruct-mlx)
 
 Options:

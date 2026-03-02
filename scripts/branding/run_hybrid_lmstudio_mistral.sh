@@ -5,7 +5,10 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
 OUT_DIR="${HYBRID_OUT_DIR:-/tmp/branding_hybrid_lmstudio}"
 LOCAL_MODEL="${HYBRID_LOCAL_MODEL:-llama-3.3-8b-instruct-omniwriter}"
-REMOTE_MODEL="${HYBRID_REMOTE_MODEL:-mistralai/mistral-small-creative}"
+REMOTE_BUNDLE_A="mistralai/mistral-small-creative,qwen/qwen3-next-80b-a3b-instruct,anthropic/claude-sonnet-4.6"
+REMOTE_BUNDLE_B="qwen/qwen3-next-80b-a3b-instruct,anthropic/claude-sonnet-4.6"
+REMOTE_BUNDLE_C="mistralai/mistral-small-creative,qwen/qwen3-next-80b-a3b-instruct,openai/gpt-5.2"
+REMOTE_MODEL="${HYBRID_REMOTE_MODEL:-$REMOTE_BUNDLE_A}"
 LOCAL_SHARE="${HYBRID_LOCAL_SHARE:-0.75}"
 BASE_URL="${HYBRID_LMSTUDIO_BASE_URL:-http://127.0.0.1:1234/v1}"
 TTL_S="${HYBRID_LMSTUDIO_TTL_S:-3600}"
@@ -13,6 +16,9 @@ MAX_RUNS="${HYBRID_MAX_RUNS:-1}"
 SLEEP_S="${HYBRID_SLEEP_S:-0}"
 LLM_ROUNDS="${HYBRID_LLM_ROUNDS:-2}"
 LLM_CANDIDATES_PER_ROUND="${HYBRID_LLM_CANDIDATES_PER_ROUND:-12}"
+LLM_MAX_CALL_LATENCY_MS="${HYBRID_LLM_MAX_CALL_LATENCY_MS:-90000}"
+LLM_STAGE_TIMEOUT_MS="${HYBRID_LLM_STAGE_TIMEOUT_MS:-240000}"
+LLM_MAX_RETRIES="${HYBRID_LLM_MAX_RETRIES:-2}"
 MAX_USD_PER_RUN="${HYBRID_MAX_USD_PER_RUN:-0.75}"
 GENERATOR_MIN_LEN="${HYBRID_GENERATOR_MIN_LEN:-6}"
 GENERATOR_MAX_LEN="${HYBRID_GENERATOR_MAX_LEN:-11}"
@@ -20,6 +26,10 @@ PROMPT_TEMPLATE_FILE="${HYBRID_LLM_PROMPT_TEMPLATE_FILE:-}"
 PROFILE="${HYBRID_PROFILE:-}"
 LIVE_PROGRESS=1
 NO_EXTERNAL_CHECKS=1
+POST_RANK=1
+POST_RANK_TOP_N="${HYBRID_POST_RANK_TOP_N:-40}"
+POST_RANK_INCLUDE_NON_SHORTLIST=0
+HEALTH_CHECK=1
 PROFILE_ARGS=()
 EXTRA_ARGS=()
 USER_LOCAL_SHARE=""
@@ -31,21 +41,25 @@ USER_PROMPT_TEMPLATE_FILE=""
 
 usage() {
   cat <<'EOF'
-Run hybrid ideation with LM Studio local model + OpenRouter Mistral Creative.
+Run hybrid ideation with LM Studio local model + OpenRouter model mix.
 
 Usage:
   scripts/branding/run_hybrid_lmstudio_mistral.sh [options] [-- <extra runner args>]
 
 Options:
-  --profile <fast|quality|creative>  Apply preset args (default: custom/manual)
+  --profile <fast|quality|creative|remote_quality>  Apply preset args (default: custom/manual)
   --fast                             Alias for --profile fast
   --quality                          Alias for --profile quality
   --creative                         Alias for --profile creative
+  --remote-quality                   Alias for --profile remote_quality
   --out-dir <path>                   Campaign output root (default: /tmp/branding_hybrid_lmstudio)
   --local-model <id|csv>             LM Studio model id(s), comma-separated allowed
   --local-models <csv>               Alias for --local-model
   --remote-model <id|csv>            OpenRouter model id(s), comma-separated allowed
   --remote-models <csv>              Alias for --remote-model
+  --bundle-a                         Use remote model Bundle A (default)
+  --bundle-b                         Use remote model Bundle B
+  --bundle-c                         Use remote model Bundle C
   --local-share <0..1>               Share of local rounds (default: 0.75)
   --base-url <url>                   LM Studio OpenAI-compatible URL (default: http://127.0.0.1:1234/v1)
   --ttl-s <seconds>                  LM Studio residency TTL hint (default: 3600)
@@ -53,10 +67,19 @@ Options:
   --sleep-s <seconds>                Sleep between runs (default: 0)
   --llm-rounds <n>                   LLM rounds per run (default: 2)
   --llm-candidates-per-round <n>     Candidates requested each round (default: 12)
+  --llm-max-call-latency-ms <ms>     Per-call LLM timeout (default: 90000)
+  --llm-stage-timeout-ms <ms>        Total ideation-stage timeout (default: 240000)
+  --llm-max-retries <n>              Retriable LLM call retries (default: 2)
   --max-usd-per-run <value>          Run-level LLM spend cap (default: 0.75)
   --generator-min-len <n>            Generator min length filter (default: 6)
   --generator-max-len <n>            Generator max length filter (default: 11)
   --llm-prompt-template-file <path>  Optional prompt template passed to campaign runner
+  --post-rank                        Run deterministic DE/EN post-ranker (default: on)
+  --no-post-rank                     Skip deterministic post-ranker
+  --post-rank-top-n <n>              Names kept by post-ranker (default: 40)
+  --post-rank-all                    Score all names, not only shortlist-selected ones
+  --health-check                     Run post-run health checks (default: on)
+  --no-health-check                  Skip post-run health checks
   --with-external-checks             Keep generator external checks enabled
   --no-live-progress                 Disable live progress stream
   -h, --help                         Show this help
@@ -64,14 +87,15 @@ Options:
 Profiles:
   fast:
     --local-share 1.0
-    --llm-rounds 1
+    --llm-rounds 2
     --llm-candidates-per-round 24
     --validator-tier cheap
 
   quality:
-    --local-share 0.75
-    --llm-rounds 4
+    --local-share 0.35
+    --llm-rounds 5
     --llm-candidates-per-round 12
+    --llm-prompt-template-file resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt
     --validator-expensive-finalist-limit 20
     --validator-timeout-s 12
     --validator-max-concurrency 16
@@ -87,9 +111,21 @@ Profiles:
     --validator-timeout-s 14
     --validator-max-concurrency 16
 
+  remote_quality:
+    --local-share 0.10
+    --llm-rounds 8
+    --llm-candidates-per-round 14
+    --generator-min-len 8
+    --generator-max-len 14
+    --llm-prompt-template-file resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt
+    --validator-expensive-finalist-limit 28
+    --validator-timeout-s 16
+    --validator-max-concurrency 18
+
 Notes:
   - Extra runner args after '--' are appended last and can override profile args.
   - Explicit CLI options (for share/rounds/candidates-per-round) override profile defaults.
+  - OpenRouter key preflight is required only when --local-share is below 1.0.
 EOF
 }
 
@@ -100,16 +136,17 @@ apply_profile() {
       ;;
     "fast")
       LOCAL_SHARE="1.0"
-      LLM_ROUNDS="1"
+      LLM_ROUNDS="2"
       LLM_CANDIDATES_PER_ROUND="24"
       PROFILE_ARGS=(
         --validator-tier cheap
       )
       ;;
     "quality")
-      LOCAL_SHARE="0.75"
-      LLM_ROUNDS="4"
+      LOCAL_SHARE="0.35"
+      LLM_ROUNDS="5"
       LLM_CANDIDATES_PER_ROUND="12"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
       PROFILE_ARGS=(
         --validator-expensive-finalist-limit 20
         --validator-timeout-s 12
@@ -129,8 +166,21 @@ apply_profile() {
         --validator-max-concurrency 16
       )
       ;;
+    "remote_quality")
+      LOCAL_SHARE="0.10"
+      LLM_ROUNDS="8"
+      LLM_CANDIDATES_PER_ROUND="14"
+      GENERATOR_MIN_LEN="8"
+      GENERATOR_MAX_LEN="14"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
+      PROFILE_ARGS=(
+        --validator-expensive-finalist-limit 28
+        --validator-timeout-s 16
+        --validator-max-concurrency 18
+      )
+      ;;
     *)
-      echo "Unknown profile: $PROFILE (expected fast|quality|creative)." >&2
+      echo "Unknown profile: $PROFILE (expected fast|quality|creative|remote_quality)." >&2
       exit 1
       ;;
   esac
@@ -154,6 +204,10 @@ while [[ $# -gt 0 ]]; do
       PROFILE="creative"
       shift
       ;;
+    --remote-quality)
+      PROFILE="remote_quality"
+      shift
+      ;;
     --out-dir)
       OUT_DIR="$2"
       shift 2
@@ -173,6 +227,18 @@ while [[ $# -gt 0 ]]; do
     --remote-models)
       REMOTE_MODEL="$2"
       shift 2
+      ;;
+    --bundle-a)
+      REMOTE_MODEL="$REMOTE_BUNDLE_A"
+      shift
+      ;;
+    --bundle-b)
+      REMOTE_MODEL="$REMOTE_BUNDLE_B"
+      shift
+      ;;
+    --bundle-c)
+      REMOTE_MODEL="$REMOTE_BUNDLE_C"
+      shift
       ;;
     --local-share)
       LOCAL_SHARE="$2"
@@ -205,6 +271,18 @@ while [[ $# -gt 0 ]]; do
       USER_LLM_CANDIDATES_PER_ROUND="$2"
       shift 2
       ;;
+    --llm-max-call-latency-ms)
+      LLM_MAX_CALL_LATENCY_MS="$2"
+      shift 2
+      ;;
+    --llm-stage-timeout-ms)
+      LLM_STAGE_TIMEOUT_MS="$2"
+      shift 2
+      ;;
+    --llm-max-retries)
+      LLM_MAX_RETRIES="$2"
+      shift 2
+      ;;
     --max-usd-per-run)
       MAX_USD_PER_RUN="$2"
       shift 2
@@ -223,6 +301,30 @@ while [[ $# -gt 0 ]]; do
       PROMPT_TEMPLATE_FILE="$2"
       USER_PROMPT_TEMPLATE_FILE="$2"
       shift 2
+      ;;
+    --post-rank)
+      POST_RANK=1
+      shift
+      ;;
+    --no-post-rank)
+      POST_RANK=0
+      shift
+      ;;
+    --post-rank-top-n)
+      POST_RANK_TOP_N="$2"
+      shift 2
+      ;;
+    --post-rank-all)
+      POST_RANK_INCLUDE_NON_SHORTLIST=1
+      shift
+      ;;
+    --health-check)
+      HEALTH_CHECK=1
+      shift
+      ;;
+    --no-health-check)
+      HEALTH_CHECK=0
+      shift
       ;;
     --with-external-checks)
       NO_EXTERNAL_CHECKS=0
@@ -277,6 +379,34 @@ if (( GENERATOR_MIN_LEN < 4 || GENERATOR_MAX_LEN > 20 || GENERATOR_MIN_LEN > GEN
   echo "Invalid generator length bounds: min=$GENERATOR_MIN_LEN max=$GENERATOR_MAX_LEN (expected 4..20 and min<=max)." >&2
   exit 2
 fi
+if ! [[ "$POST_RANK_TOP_N" =~ '^[1-9][0-9]*$' ]]; then
+  echo "--post-rank-top-n must be >= 1." >&2
+  exit 2
+fi
+
+typeset -a LOCAL_MODELS_LIST=()
+for raw_model in "${(@s:,:)LOCAL_MODEL}"; do
+  trimmed="${raw_model#"${raw_model%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  [[ -n "$trimmed" ]] && LOCAL_MODELS_LIST+=("$trimmed")
+done
+if (( ${#LOCAL_MODELS_LIST[@]} == 0 )); then
+  echo "No local LM Studio model configured. Use --local-model or HYBRID_LOCAL_MODEL." >&2
+  exit 2
+fi
+
+REMOTE_REQUIRED="$(
+  python3 - "$LOCAL_SHARE" <<'PY'
+import sys
+try:
+    share = float(sys.argv[1])
+except (IndexError, ValueError):
+    raise SystemExit(2)
+if not (0.0 <= share <= 1.0):
+    raise SystemExit(2)
+print(1 if share < 1.0 else 0)
+PY
+)"
 
 CMD=(
   python3 "$ROOT_DIR/scripts/branding/naming_campaign_runner.py"
@@ -293,6 +423,9 @@ CMD=(
   --llm-openai-ttl-s "$TTL_S"
   --llm-rounds "$LLM_ROUNDS"
   --llm-candidates-per-round "$LLM_CANDIDATES_PER_ROUND"
+  --llm-max-call-latency-ms "$LLM_MAX_CALL_LATENCY_MS"
+  --llm-stage-timeout-ms "$LLM_STAGE_TIMEOUT_MS"
+  --llm-max-retries "$LLM_MAX_RETRIES"
   --llm-max-usd-per-run "$MAX_USD_PER_RUN"
   --generator-min-len "$GENERATOR_MIN_LEN"
   --generator-max-len "$GENERATOR_MAX_LEN"
@@ -318,21 +451,93 @@ if (( ${#EXTRA_ARGS[@]} > 0 )); then
 fi
 
 echo "running preflight for hybrid=lmstudio+openrouter..."
-if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" \
+PREFLIGHT_ARGS=(
   --check-lmstudio \
   --lmstudio-base-url "$BASE_URL" \
-  --lmstudio-model "$LOCAL_MODEL" \
-  --require-openrouter; then
+  --lmstudio-model "$LOCAL_MODEL"
+)
+if (( REMOTE_REQUIRED )); then
+  PREFLIGHT_ARGS+=(--require-openrouter)
+fi
+if ! zsh "$ROOT_DIR/scripts/branding/preflight_llm.sh" "${PREFLIGHT_ARGS[@]}"; then
   exit 2
 fi
 
-echo "running hybrid=lmstudio+openrouter out_dir=$OUT_DIR profile=${PROFILE:-custom} local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE llm_rounds=$LLM_ROUNDS max_usd_per_run=$MAX_USD_PER_RUN generator_len=${GENERATOR_MIN_LEN}-${GENERATOR_MAX_LEN}"
+if command -v lms >/dev/null 2>&1; then
+  for warm_model in "${LOCAL_MODELS_LIST[@]}"; do
+    echo "lmstudio_warmup model=$warm_model ttl_s=$TTL_S"
+    if ! lms load "$warm_model" --ttl "$TTL_S" -y >/dev/null 2>&1; then
+      echo "lmstudio_warmup_warn model=$warm_model reason=load_failed"
+    fi
+  done
+else
+  echo "lmstudio_warmup_warn reason=lms_cli_missing"
+fi
+
+echo "running hybrid=lmstudio+openrouter out_dir=$OUT_DIR profile=${PROFILE:-custom} local_model=$LOCAL_MODEL remote_model=$REMOTE_MODEL local_share=$LOCAL_SHARE remote_required=$REMOTE_REQUIRED llm_rounds=$LLM_ROUNDS max_usd_per_run=$MAX_USD_PER_RUN generator_len=${GENERATOR_MIN_LEN}-${GENERATOR_MAX_LEN}"
 printf '$ '
 printf '%q ' "${CMD[@]}"
 echo
 
 cd "$ROOT_DIR"
 if command -v direnv >/dev/null 2>&1; then
-  exec direnv exec . "${CMD[@]}"
+  set +e
+  direnv exec . "${CMD[@]}"
+  RUN_RC=$?
+  set -e
+else
+  set +e
+  "${CMD[@]}"
+  RUN_RC=$?
+  set -e
 fi
-exec "${CMD[@]}"
+
+if (( RUN_RC == 0 && POST_RANK )); then
+  POST_CMD=(
+    python3 "$ROOT_DIR/scripts/branding/rerank_shortlist_deterministic.py"
+    --out-dir "$OUT_DIR"
+    --top-n "$POST_RANK_TOP_N"
+  )
+  if (( POST_RANK_INCLUDE_NON_SHORTLIST )); then
+    POST_CMD+=(--include-non-shortlist)
+  fi
+  echo "running post-rank out_dir=$OUT_DIR top_n=$POST_RANK_TOP_N include_non_shortlist=$POST_RANK_INCLUDE_NON_SHORTLIST"
+  printf '$ '
+  printf '%q ' "${POST_CMD[@]}"
+  echo
+  if command -v direnv >/dev/null 2>&1; then
+    if ! direnv exec . "${POST_CMD[@]}"; then
+      echo "post_rank_warn reason=postrank_failed"
+    fi
+  elif ! "${POST_CMD[@]}"; then
+    echo "post_rank_warn reason=postrank_failed"
+  fi
+fi
+
+if (( RUN_RC == 0 && POST_RANK && HEALTH_CHECK )); then
+  HEALTH_CMD=(
+    python3 "$ROOT_DIR/scripts/branding/check_campaign_health.py"
+    --out-dir "$OUT_DIR"
+  )
+  echo "running health-check out_dir=$OUT_DIR"
+  printf '$ '
+  printf '%q ' "${HEALTH_CMD[@]}"
+  echo
+  if command -v direnv >/dev/null 2>&1; then
+    set +e
+    direnv exec . "${HEALTH_CMD[@]}"
+    HEALTH_RC=$?
+    set -e
+  else
+    set +e
+    "${HEALTH_CMD[@]}"
+    HEALTH_RC=$?
+    set -e
+  fi
+  if (( HEALTH_RC != 0 )); then
+    echo "health_check_warn reason=failed code=$HEALTH_RC"
+    RUN_RC="$HEALTH_RC"
+  fi
+fi
+
+exit "$RUN_RC"

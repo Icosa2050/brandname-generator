@@ -53,7 +53,7 @@ Options:
   --out-dir <path>                 Supervisor --out-dir
   --backend <auto|lmstudio|ollama> Supervisor backend (default: auto)
   --fallback-backend <none|lmstudio|ollama>
-  --profile-plan <csv>             fast,fast,quality (default)
+  --profile-plan <csv>             fast,fast,quality (default; includes remote_quality support)
   --target-good <n>                Stop threshold for strict strong+consider
   --target-strong <n>              Stop threshold for strict strong
   --max-cycles <n>                 0 => unlimited

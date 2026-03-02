@@ -626,6 +626,7 @@ def call_openrouter_candidates(
     prompt: str,
     timeout_ms: int,
     strict_json: bool,
+    temperature: float = 0.8,
     http_referer: str = '',
     x_title: str = '',
 ) -> tuple[list[str], dict[str, Any], str]:
@@ -649,10 +650,15 @@ def call_openrouter_candidates(
             'additionalProperties': False,
         },
     }
+    try:
+        temp = float(temperature)
+    except (TypeError, ValueError):
+        temp = 0.8
+    temp = max(0.0, min(2.0, temp))
     base_body = {
         'model': model,
         'messages': [{'role': 'user', 'content': prompt}],
-        'temperature': 0.8,
+        'temperature': temp,
     }
     attempts: list[dict[str, Any]] = [
         {
@@ -758,6 +764,7 @@ def call_openai_compat_candidates(
     prompt: str,
     timeout_ms: int,
     strict_json: bool,
+    temperature: float = 0.8,
     request_extras: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, Any], str]:
     schema = {
@@ -788,10 +795,15 @@ def call_openai_compat_candidates(
                 continue
             extra_payload[key] = raw_value
 
+    try:
+        temp = float(temperature)
+    except (TypeError, ValueError):
+        temp = 0.8
+    temp = max(0.0, min(2.0, temp))
     base_body: dict[str, Any] = {
         'model': model,
         'messages': [{'role': 'user', 'content': prompt}],
-        'temperature': 0.8,
+        'temperature': temp,
     }
     if extra_payload:
         base_body.update(extra_payload)

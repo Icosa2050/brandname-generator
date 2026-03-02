@@ -122,7 +122,15 @@ import sys
 required = [m.strip() for m in sys.argv[1].split(",") if m.strip()]
 payload = json.loads(sys.argv[2])
 available = {str(item.get("name", "")).strip() for item in payload.get("models", []) if isinstance(item, dict)}
-missing = [model for model in required if model not in available]
+def is_present(model: str) -> bool:
+    if model in available:
+        return True
+    if ":" in model:
+        return False
+    prefix = model + ":"
+    return any(name.startswith(prefix) for name in available)
+
+missing = [model for model in required if not is_present(model)]
 if missing:
     print("missing=" + ",".join(missing))
     raise SystemExit(1)

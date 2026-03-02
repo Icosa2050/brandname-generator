@@ -264,6 +264,11 @@ def parse_args() -> argparse.Namespace:
         default=78,
         help='Warn threshold for cheap trademark pre-screen similarity score (0-100).',
     )
+    parser.add_argument(
+        '--cheap-trademark-blocklist-file',
+        default=str(bpaths.REPO_ROOT / 'resources' / 'branding' / 'inputs' / 'cheap_tm_collision_blocklist_v1.txt'),
+        help='Optional newline-delimited file with extra trademark collision tokens/stems for tm_cheap.',
+    )
     parser.add_argument('--min-trust-proxy', type=int, default=50)
     parser.add_argument('--warn-trust-proxy', type=int, default=62)
     parser.add_argument('--max-spelling-risk', type=int, default=28)
@@ -614,7 +619,7 @@ def load_candidates(conn: sqlite3.Connection, states: list[str], limit: int) -> 
         SELECT id, name_display, state, COALESCE(current_score, 0), COALESCE(current_recommendation, '')
         FROM candidates
         WHERE state IN ({placeholders})
-        ORDER BY id ASC
+        ORDER BY id DESC
         LIMIT ?
         """,
         (*states, limit),
@@ -648,6 +653,50 @@ CHEAP_TRADEMARK_BLOCKLIST = sorted(
         ]
     )
 )
+CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT = hashlib.sha1(
+    '|'.join(CHEAP_TRADEMARK_BLOCKLIST).encode('utf-8')
+).hexdigest()[:12]
+
+
+def _tokenize_collision_line(line: str) -> list[str]:
+    cleaned = line.strip().lower()
+    if not cleaned or cleaned.startswith('#'):
+        return []
+    for sep in ('/', ',', ';', '|', ':'):
+        cleaned = cleaned.replace(sep, ' ')
+    tokens: list[str] = []
+    for token in cleaned.split():
+        normalized = ''.join(ch for ch in token if 'a' <= ch <= 'z')
+        if len(normalized) >= 3:
+            tokens.append(normalized)
+    return tokens
+
+
+def _load_custom_collision_tokens(path: str) -> set[str]:
+    if not path:
+        return set()
+    candidate_path = Path(path).expanduser()
+    if not candidate_path.exists():
+        return set()
+    try:
+        raw = candidate_path.read_text(encoding='utf-8')
+    except OSError:
+        return set()
+    tokens: set[str] = set()
+    for line in raw.splitlines():
+        tokens.update(_tokenize_collision_line(line))
+    return tokens
+
+
+def configure_cheap_trademark_blocklist(args: argparse.Namespace) -> None:
+    global CHEAP_TRADEMARK_BLOCKLIST, CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT
+    merged = set(CHEAP_TRADEMARK_BLOCKLIST)
+    file_value = str(getattr(args, 'cheap_trademark_blocklist_file', '') or '').strip()
+    merged.update(_load_custom_collision_tokens(file_value))
+    CHEAP_TRADEMARK_BLOCKLIST = sorted(merged)
+    CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT = hashlib.sha1(
+        '|'.join(CHEAP_TRADEMARK_BLOCKLIST).encode('utf-8')
+    ).hexdigest()[:12]
 
 
 def cheap_trademark_similarity_signal(name: str) -> tuple[int, str]:
@@ -1097,7 +1146,12 @@ CACHE_SIGNATURE_FIELDS: dict[str, tuple[str, ...]] = {
     'adversarial': ('adversarial_fail_threshold', 'adversarial_warn_threshold'),
     'psych': ('min_trust_proxy', 'warn_trust_proxy', 'max_spelling_risk', 'warn_spelling_risk'),
     'descriptive': ('descriptive_fail_threshold', 'descriptive_warn_threshold'),
-    'tm_cheap': ('cheap_trademark_screen', 'cheap_trademark_fail_threshold', 'cheap_trademark_warn_threshold'),
+    'tm_cheap': (
+        'cheap_trademark_screen',
+        'cheap_trademark_fail_threshold',
+        'cheap_trademark_warn_threshold',
+        'cheap_trademark_blocklist_file',
+    ),
 }
 
 
@@ -1108,6 +1162,7 @@ def cheap_check_cache_signature(check_type: str, args: argparse.Namespace) -> st
         payload[field] = getattr(args, field, None)
     if check_type == 'tm_cheap':
         payload['blocklist_size'] = len(CHEAP_TRADEMARK_BLOCKLIST)
+        payload['blocklist_fp'] = CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]
 
@@ -1910,6 +1965,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
+    configure_cheap_trademark_blocklist(args)
     return asyncio.run(orchestrate(args))
 
 

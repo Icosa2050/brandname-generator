@@ -252,6 +252,27 @@ def clamp_share(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def is_remote_llm_requested(args: argparse.Namespace) -> bool:
+    if not bool(getattr(args, 'llm_ideation_enabled', False)):
+        return False
+    provider = str(getattr(args, 'llm_provider', '') or '').strip().lower()
+    if provider == 'openrouter_http':
+        return True
+    if provider != 'hybrid':
+        return False
+    local_share = clamp_share(float(getattr(args, 'llm_hybrid_local_share', 0.0) or 0.0))
+    return local_share < 1.0
+
+
+def missing_remote_llm_api_key_env(args: argparse.Namespace) -> str:
+    if not is_remote_llm_requested(args):
+        return ''
+    env_name = str(getattr(args, 'llm_api_key_env', 'OPENROUTER_API_KEY') or '').strip()
+    if not env_name:
+        return 'OPENROUTER_API_KEY'
+    return '' if os.environ.get(env_name, '').strip() else env_name
+
+
 def combo_history_key(*, share: float, scope: str, gate: str, quota_profile: str) -> str:
     return f'{clamp_share(float(share)):.4f}|{scope.strip()}|{gate.strip()}|{quota_profile.strip()}'
 
@@ -264,7 +285,7 @@ def load_combo_duration_history(progress_csv: Path) -> dict[str, float]:
         reader = csv.DictReader(handle)
         for row in reader:
             status = str(row.get('status') or '').strip().lower()
-            if status and status not in {'ok', 'completed'}:
+            if status and status != 'completed' and not status.startswith('ok'):
                 continue
             scope = str(row.get('scope') or '').strip()
             gate = str(row.get('gate') or '').strip()
@@ -1139,6 +1160,7 @@ def run_active_llm_ideation(
                         prompt=_prompt,
                         timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                         strict_json=bool(args.llm_strict_json),
+                        temperature=float(args.llm_temperature),
                         http_referer=args.llm_openrouter_http_referer,
                         x_title=args.llm_openrouter_x_title,
                     )
@@ -1171,6 +1193,7 @@ def run_active_llm_ideation(
                     prompt=_prompt,
                     timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                     strict_json=bool(args.llm_strict_json),
+                    temperature=float(args.llm_temperature),
                     request_extras=openai_request_extras,
                 )
 
@@ -1388,6 +1411,7 @@ def run_active_llm_ideation(
                         prompt=_prompt,
                         timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                         strict_json=bool(args.llm_strict_json),
+                        temperature=float(args.llm_temperature),
                         request_extras=openai_request_extras,
                     )
 
@@ -1434,6 +1458,7 @@ def run_active_llm_ideation(
                             prompt=_prompt,
                             timeout_ms=max(1000, int(args.llm_max_call_latency_ms)),
                             strict_json=bool(args.llm_strict_json),
+                            temperature=float(args.llm_temperature),
                             http_referer=args.llm_openrouter_http_referer,
                             x_title=args.llm_openrouter_x_title,
                         )
@@ -2152,6 +2177,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--llm-rounds', type=int, default=2, help='LLM ideation rounds per run.')
     parser.add_argument('--llm-candidates-per-round', type=int, default=20, help='Candidates requested per LLM round.')
     parser.add_argument(
+        '--llm-temperature',
+        type=float,
+        default=float(os.environ.get('LLM_TEMPERATURE', '0.8')),
+        help='Sampling temperature for LLM ideation calls (clamped to [0.0,2.0]).',
+    )
+    parser.add_argument(
         '--llm-prompt-template-file',
         default=os.environ.get('LLM_PROMPT_TEMPLATE_FILE', ''),
         help='Optional text template file for ideation prompt placeholders ({scope},{round_index},{target_count},{phonetic},{morphology},{semantic},{banned_tokens},{banned_prefixes},{context_block}).',
@@ -2268,6 +2299,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    missing_remote_env = missing_remote_llm_api_key_env(args)
+    if missing_remote_env:
+        print(
+            f'Invalid LLM config: missing required environment variable {missing_remote_env} '
+            f'for llm_provider={args.llm_provider}.'
+        )
+        return 1
     root = Path(__file__).resolve().parents[2]
     stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
 
@@ -2333,6 +2371,10 @@ def main() -> int:
     if args.generator_only_llm_candidates and not args.llm_ideation_enabled:
         print('Invalid config: --generator-only-llm-candidates requires --llm-ideation-enabled.')
         return 1
+    if not math.isfinite(float(args.llm_temperature)):
+        print('Invalid LLM config: --llm-temperature must be a finite number.')
+        return 1
+    args.llm_temperature = max(0.0, min(2.0, float(args.llm_temperature)))
     if int(args.generator_min_len) < 4 or int(args.generator_min_len) > 20:
         print('Invalid generator length config: --generator-min-len must be between 4 and 20.')
         return 1
@@ -2422,6 +2464,7 @@ def main() -> int:
         f'llm_hybrid_local_model={args.llm_hybrid_local_model} llm_hybrid_local_models={args.llm_hybrid_local_models} '
         f'llm_hybrid_remote_model={args.llm_hybrid_remote_model} llm_hybrid_remote_models={args.llm_hybrid_remote_models} '
         f'llm_model_config={args.llm_model_config} llm_model_selection={args.llm_model_selection} '
+        f'llm_temperature={float(args.llm_temperature):.2f} '
         f'llm_prompt_template_file={args.llm_prompt_template_file} '
         f'llm_base_url={nide.normalize_openai_compat_base_url(args.llm_openai_base_url) if args.llm_provider in {"openai_compat", "hybrid"} else ""} '
         f'llm_slo_min_success_rate={float(args.llm_slo_min_success_rate):.2f} '
@@ -2693,6 +2736,22 @@ def main() -> int:
                 f'llm_ideation_complete run={run_id} status={llm_report.get("status")} '
                 f'candidates={llm_report.get("candidate_count")} cost_usd={llm_report.get("cost_usd")}'
             )
+            if llm_artifact is None:
+                print(
+                    f'llm_ideation_degraded run={run_id} status={llm_report.get("status")} '
+                    f'errors={llm_report.get("errors", [])}',
+                    flush=True,
+                )
+                emit_campaign_event(
+                    enabled=bool(args.heartbeat_events),
+                    heartbeat_path=heartbeat_path,
+                    event='llm_degraded',
+                    run=run_count,
+                    run_id=run_id,
+                    llm_stage_status=str(llm_report.get('status') or ''),
+                    llm_candidate_count=int(llm_report.get('candidate_count') or 0),
+                    llm_error_count=len(llm_report.get('errors', []) or []),
+                )
         if args.generator_only_llm_candidates and llm_artifact is None:
             error_count += 1
             last_status = 'llm_candidates_missing'
@@ -2979,6 +3038,10 @@ def main() -> int:
         status_counts = run_summary.get('status_counts', {})
         tier_counts = run_summary.get('tier_result_counts', {})
         total_jobs = run_summary.get('total_jobs', 0)
+        run_status = 'ok'
+        if llm_active_for_run and llm_artifact is None:
+            llm_stage = str(llm_report.get('status') or 'missing').strip().lower() or 'missing'
+            run_status = f'ok_llm_degraded_{llm_stage}'
 
         duration_s = int(time.monotonic() - run_started)
         append_progress_row(
@@ -3017,7 +3080,7 @@ def main() -> int:
                 'validator_total_jobs': total_jobs,
                 'validator_status_counts': json.dumps(status_counts, ensure_ascii=False),
                 'validator_tier_result_counts': json.dumps(tier_counts, ensure_ascii=False),
-                'status': 'ok',
+                'status': run_status,
                 'duration_s': duration_s,
             },
         )
@@ -3037,6 +3100,8 @@ def main() -> int:
             f'new={len(new_names)} unique_total={len(seen_shortlist)} '
             f'hard_fail_ratio={hard_fail_ratio:.4f} validator_total_jobs={total_jobs} '
             f'history_skip={history_skip_count} history_skip_generated={history_skip_generated_count} '
+            f'llm_stage_status={llm_report.get("status", "")} llm_candidates={llm_report.get("candidate_count", 0)} '
+            f'status={run_status} '
             f'remaining_s={remaining_s} shard={args.shard_id + 1}/{args.shard_count}'
         )
         emit_campaign_event(
@@ -3045,7 +3110,7 @@ def main() -> int:
             event='run_complete',
             run=run_count,
             run_id=run_id,
-            status='ok',
+            status=run_status,
             duration_s=duration_s,
             shortlist_count=len(shortlist),
             new_shortlist_count=len(new_names),
@@ -3053,7 +3118,7 @@ def main() -> int:
             history_skip_count=int(history_skip_count),
             history_skip_generated_count=int(history_skip_generated_count),
         )
-        last_status = 'ok'
+        last_status = run_status
 
         if (
             len(novelty_window) >= max(1, args.stop_window)
