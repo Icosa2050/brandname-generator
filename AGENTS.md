@@ -55,9 +55,9 @@
 
 ## Git & Worktree Discipline (PR-First)
 - Do not start task work on `main` unless explicitly requested.
-- Use one dedicated branch + worktree per task/thread (`codex/<task-slug>`), created from `main`:
+- Use one dedicated branch + worktree per task/thread (`codex/<task-slug>`), created from `origin/main`:
   - `git fetch origin --prune`
-  - `git worktree add -b codex/<task-slug> <worktree-path> main`
+  - `git worktree add -b codex/<task-slug> <worktree-path> origin/main`
 - Mandatory startup check before edits or task tests:
   - `git rev-parse --abbrev-ref HEAD`
   - If output is `main` or `HEAD`, stop and switch/create the task worktree first.
