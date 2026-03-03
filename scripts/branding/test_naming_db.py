@@ -53,6 +53,48 @@ class NamingDbConnectionTest(unittest.TestCase):
                 conn_b.close()
                 conn_a.close()
 
+    def test_ensure_schema_adds_collision_rejection_metadata_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / 'schema.db'
+            with ndb.open_connection(db_path, busy_timeout_ms=5000, wal=True) as conn:
+                ndb.ensure_schema(conn, busy_timeout_ms=5000, wal=True)
+                cols = {
+                    str(row[1])
+                    for row in conn.execute('PRAGMA table_info(candidates)').fetchall()
+                }
+            self.assertIn('rejection_stage', cols)
+            self.assertIn('rejection_reason_code', cols)
+            self.assertIn('policy_version', cols)
+            self.assertIn('query_fingerprint', cols)
+
+    def test_parse_json_rows_invalid_payload_returns_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'bad.json'
+            path.write_text('{not json', encoding='utf-8')
+            rows, scope, gate = ndb.parse_json_rows(path)
+        self.assertEqual(rows, [])
+        self.assertIsNone(scope)
+        self.assertIsNone(gate)
+
+    def test_parse_jsonl_rows_skips_invalid_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'mixed.jsonl'
+            path.write_text(
+                '\n'.join(
+                    [
+                        '{"name": "validone", "scope": "global", "gate": "balanced"}',
+                        '{not json}',
+                        '{"top_candidates": [{"name": "validtwo"}]}',
+                    ]
+                )
+                + '\n',
+                encoding='utf-8',
+            )
+            rows, scope, gate = ndb.parse_jsonl_rows(path)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(scope, 'global')
+        self.assertEqual(gate, 'balanced')
+
 
 if __name__ == '__main__':
     unittest.main()

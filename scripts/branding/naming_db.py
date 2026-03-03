@@ -48,7 +48,11 @@ def configure_connection(
             conn.execute('PRAGMA journal_mode = WAL;')
         except sqlite3.DatabaseError:
             # Some SQLite backends (e.g. in-memory modes) do not support WAL.
-            pass
+            try:
+                conn.execute('PRAGMA journal_mode = DELETE;')
+            except sqlite3.DatabaseError:
+                # Fall back to backend default journal mode.
+                conn.execute('PRAGMA journal_mode;')
     conn.execute(f'PRAGMA busy_timeout = {timeout};')
     conn.execute('PRAGMA foreign_keys = ON;')
 
@@ -248,6 +252,10 @@ def ensure_schema(
     _ensure_column(conn, 'candidates', 'parent_ids', "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, 'candidates', 'status', "TEXT NOT NULL DEFAULT 'new'")
     _ensure_column(conn, 'candidates', 'rejection_reason', "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, 'candidates', 'rejection_stage', "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, 'candidates', 'rejection_reason_code', "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, 'candidates', 'policy_version', "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, 'candidates', 'query_fingerprint', "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, 'candidates', 'score_quality', 'REAL')
     _ensure_column(conn, 'candidates', 'score_total', 'REAL')
     conn.execute(
@@ -305,6 +313,10 @@ def upsert_candidate(
     parent_ids: str | None = None,
     status: str | None = None,
     rejection_reason: str | None = None,
+    rejection_stage: str | None = None,
+    rejection_reason_code: str | None = None,
+    policy_version: str | None = None,
+    query_fingerprint: str | None = None,
 ) -> int:
     normalized = normalize_name(name_display)
     if not normalized:
@@ -315,14 +327,19 @@ def upsert_candidate(
     engine_insert = (engine_id or '').strip()
     parent_insert = (parent_ids or '').strip()
     rejection_insert = (rejection_reason or '').strip()
+    rejection_stage_insert = (rejection_stage or '').strip()
+    rejection_reason_code_insert = (rejection_reason_code or '').strip()
+    policy_version_insert = (policy_version or '').strip()
+    query_fingerprint_insert = (query_fingerprint or '').strip()
     conn.execute(
         """
         INSERT INTO candidates(
           name_display, name_normalized, first_seen_at, last_seen_at,
           current_score, current_risk, current_recommendation, state, state_updated_at,
-          engine_id, parent_ids, status, rejection_reason, score_quality, score_total
+          engine_id, parent_ids, status, rejection_reason, rejection_stage, rejection_reason_code,
+          policy_version, query_fingerprint, score_quality, score_total
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(name_normalized) DO UPDATE SET
           name_display = excluded.name_display,
           last_seen_at = excluded.last_seen_at,
@@ -338,6 +355,10 @@ def upsert_candidate(
             ELSE candidates.parent_ids
           END,
           rejection_reason = excluded.rejection_reason,
+          rejection_stage = excluded.rejection_stage,
+          rejection_reason_code = excluded.rejection_reason_code,
+          policy_version = excluded.policy_version,
+          query_fingerprint = excluded.query_fingerprint,
           score_quality = COALESCE(excluded.score_quality, candidates.score_quality),
           score_total = COALESCE(excluded.score_total, candidates.score_total)
         """,
@@ -355,6 +376,10 @@ def upsert_candidate(
             parent_insert,
             status_insert,
             rejection_insert,
+            rejection_stage_insert,
+            rejection_reason_code_insert,
+            policy_version_insert,
+            query_fingerprint_insert,
             quality_score,
             total_score,
         ),
@@ -749,7 +774,10 @@ def parse_csv_rows(path: Path) -> tuple[list[dict], str | None, str | None]:
 
 
 def parse_json_rows(path: Path) -> tuple[list[dict], str | None, str | None]:
-    data = json.loads(path.read_text(encoding='utf-8'))
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return [], None, None
     if isinstance(data, dict) and isinstance(data.get('candidates'), list):
         rows = [dict(item) for item in data['candidates'] if isinstance(item, dict)]
         return rows, data.get('scope'), data.get('gate')
@@ -768,7 +796,10 @@ def parse_jsonl_rows(path: Path) -> tuple[list[dict], str | None, str | None]:
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if not isinstance(obj, dict):
                 continue
             # Run summaries may contain top_candidates only.
