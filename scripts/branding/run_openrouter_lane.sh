@@ -84,8 +84,8 @@ Options:
   --llm-rounds <n>                   LLM rounds per run (default: 1)
   --llm-candidates-per-round <n>     LLM candidates requested per round (default: 10)
   --llm-temperature <float>          LLM sampling temperature (default: profile-specific)
-  --llm-max-call-latency-ms <ms>     Per-call LLM timeout (default: profile-specific)
-  --llm-stage-timeout-ms <ms>        Total ideation-stage timeout (default: profile-specific)
+  --llm-max-call-latency-ms <ms>     Per-call LLM timeout in ms (>=1000; default: profile-specific)
+  --llm-stage-timeout-ms <ms>        Total ideation-stage timeout in ms (>=1000; default: profile-specific)
   --llm-max-retries <n>              Retriable LLM call retries (default: profile-specific)
   --llm-prompt-template-file <path>  Optional prompt template file
   --post-rank                        Run deterministic DE/EN post-ranker (default: on)
@@ -419,11 +419,19 @@ if ! [[ "$POST_RANK_TOP_N" =~ '^[1-9][0-9]*$' ]]; then
   exit 2
 fi
 if ! [[ "$LLM_MAX_CALL_LATENCY_MS" =~ '^[1-9][0-9]*$' ]]; then
-  echo "--llm-max-call-latency-ms must be >= 1." >&2
+  echo "--llm-max-call-latency-ms must be a positive integer." >&2
   exit 2
 fi
 if ! [[ "$LLM_STAGE_TIMEOUT_MS" =~ '^[1-9][0-9]*$' ]]; then
-  echo "--llm-stage-timeout-ms must be >= 1." >&2
+  echo "--llm-stage-timeout-ms must be a positive integer." >&2
+  exit 2
+fi
+if (( LLM_MAX_CALL_LATENCY_MS < 1000 )); then
+  echo "--llm-max-call-latency-ms must be >= 1000." >&2
+  exit 2
+fi
+if (( LLM_STAGE_TIMEOUT_MS < 1000 )); then
+  echo "--llm-stage-timeout-ms must be >= 1000." >&2
   exit 2
 fi
 if ! [[ "$LLM_MAX_RETRIES" =~ '^[0-9]+$' ]]; then
