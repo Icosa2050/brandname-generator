@@ -419,11 +419,19 @@ if ! [[ "$POST_RANK_TOP_N" =~ '^[1-9][0-9]*$' ]]; then
   exit 2
 fi
 if ! [[ "$LLM_MAX_CALL_LATENCY_MS" =~ '^[1-9][0-9]*$' ]]; then
-  echo "--llm-max-call-latency-ms must be >= 1." >&2
+  echo "--llm-max-call-latency-ms must be a positive integer." >&2
+  exit 2
+fi
+if (( LLM_MAX_CALL_LATENCY_MS < 1000 )); then
+  echo "--llm-max-call-latency-ms must be >= 1000." >&2
   exit 2
 fi
 if ! [[ "$LLM_STAGE_TIMEOUT_MS" =~ '^[1-9][0-9]*$' ]]; then
-  echo "--llm-stage-timeout-ms must be >= 1." >&2
+  echo "--llm-stage-timeout-ms must be a positive integer." >&2
+  exit 2
+fi
+if (( LLM_STAGE_TIMEOUT_MS < 1000 )); then
+  echo "--llm-stage-timeout-ms must be >= 1000." >&2
   exit 2
 fi
 if ! [[ "$LLM_MAX_RETRIES" =~ '^[0-9]+$' ]]; then
