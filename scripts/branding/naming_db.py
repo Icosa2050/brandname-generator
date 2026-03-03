@@ -355,10 +355,22 @@ def upsert_candidate(
             ELSE candidates.parent_ids
           END,
           rejection_reason = excluded.rejection_reason,
-          rejection_stage = excluded.rejection_stage,
-          rejection_reason_code = excluded.rejection_reason_code,
-          policy_version = excluded.policy_version,
-          query_fingerprint = excluded.query_fingerprint,
+          rejection_stage = CASE
+            WHEN excluded.rejection_stage IS NOT NULL AND excluded.rejection_stage <> '' THEN excluded.rejection_stage
+            ELSE candidates.rejection_stage
+          END,
+          rejection_reason_code = CASE
+            WHEN excluded.rejection_reason_code IS NOT NULL AND excluded.rejection_reason_code <> '' THEN excluded.rejection_reason_code
+            ELSE candidates.rejection_reason_code
+          END,
+          policy_version = CASE
+            WHEN excluded.policy_version IS NOT NULL AND excluded.policy_version <> '' THEN excluded.policy_version
+            ELSE candidates.policy_version
+          END,
+          query_fingerprint = CASE
+            WHEN excluded.query_fingerprint IS NOT NULL AND excluded.query_fingerprint <> '' THEN excluded.query_fingerprint
+            ELSE candidates.query_fingerprint
+          END,
           score_quality = COALESCE(excluded.score_quality, candidates.score_quality),
           score_total = COALESCE(excluded.score_total, candidates.score_total)
         """,

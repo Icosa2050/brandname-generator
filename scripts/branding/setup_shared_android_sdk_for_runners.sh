@@ -51,6 +51,10 @@ Example:
   ./setup_shared_android_sdk_for_runners.sh \
     --source-sdk /Users/bernhard/Library/Android/sdk \
     --dest-sdk /opt/android-sdk
+
+Security override:
+  Set ALLOW_INSECURE_RUNNER_DIR=1 to bypass runner-dir permission hardening
+  (not recommended; only for controlled environments).
 EOF
 }
 
@@ -146,11 +150,71 @@ contains_entry() {
   return 1
 }
 
+stat_mode_octal() {
+  local path="$1"
+  local mode=""
+  if mode="$(stat -f '%Lp' "$path" 2>/dev/null)"; then
+    printf '%s\n' "$mode"
+    return 0
+  fi
+  if mode="$(stat -c '%a' "$path" 2>/dev/null)"; then
+    printf '%s\n' "$mode"
+    return 0
+  fi
+  return 1
+}
+
+assert_not_symlink_path() {
+  local path="$1"
+  if [[ -L "$path" ]]; then
+    die "Refusing to operate on symlink path: $path"
+  fi
+}
+
+assert_secure_runner_dir() {
+  local runner_dir="$1"
+  [[ -d "$runner_dir" ]] || die "Runner directory not found: $runner_dir"
+  assert_not_symlink_path "$runner_dir"
+
+  local mode=""
+  mode="$(stat_mode_octal "$runner_dir" || true)"
+  if [[ -z "$mode" ]]; then
+    log "WARNING: Could not determine permissions for $runner_dir; continuing without mode check."
+    return 0
+  fi
+
+  local mode_dec
+  mode_dec=$((8#$mode))
+  if (( (mode_dec & 18) != 0 )) && [[ "${ALLOW_INSECURE_RUNNER_DIR:-0}" != "1" ]]; then
+    die "Runner directory must not be group/world writable: $runner_dir (mode=$mode). Set ALLOW_INSECURE_RUNNER_DIR=1 to override."
+  fi
+}
+
+assert_runner_metadata_file_safe() {
+  local file="$1"
+  local runner_dir="$2"
+  local file_parent_real
+  local runner_real
+
+  # Refuse symlinks for existing metadata files.
+  if [[ -e "$file" || -L "$file" ]]; then
+    assert_not_symlink_path "$file"
+  fi
+
+  file_parent_real="$(cd "$(dirname "$file")" && pwd -P)"
+  runner_real="$(cd "$runner_dir" && pwd -P)"
+  if [[ "$file_parent_real" != "$runner_real" ]]; then
+    die "Runner metadata file must live directly under runner dir: file=$file runner_dir=$runner_dir"
+  fi
+}
+
 upsert_env_key() {
   local file="$1"
   local key="$2"
   local value="$3"
+  local runner_dir="$4"
   local tmp
+  assert_runner_metadata_file_safe "$file" "$runner_dir"
   tmp="$(mktemp)"
   if [[ -f "$file" ]]; then
     awk -v k="$key" -v v="$value" '
@@ -162,14 +226,15 @@ upsert_env_key() {
   else
     printf '%s=%s\n' "$key" "$value" >"$tmp"
   fi
-  as_root install -m 0644 "$tmp" "$file"
-  as_root chown "$RUNNER_USER:$RUNNER_GROUP" "$file"
+  as_root install -m 0644 -o "$RUNNER_USER" -g "$RUNNER_GROUP" "$tmp" "$file"
   rm -f "$tmp"
 }
 
 rewrite_runner_path_file() {
   local file="$1"
+  local runner_dir="$2"
   local existing_path
+  assert_runner_metadata_file_safe "$file" "$runner_dir"
   if [[ -f "$file" ]]; then
     existing_path="$(tr '\n' ':' <"$file")"
     existing_path="${existing_path%:}"
@@ -220,8 +285,7 @@ rewrite_runner_path_file() {
   tmp="$(mktemp)"
   IFS=':' new_path="${filtered[*]}"
   printf '%s\n' "$new_path" >"$tmp"
-  as_root install -m 0644 "$tmp" "$file"
-  as_root chown "$RUNNER_USER:$RUNNER_GROUP" "$file"
+  as_root install -m 0644 -o "$RUNNER_USER" -g "$RUNNER_GROUP" "$tmp" "$file"
   rm -f "$tmp"
 }
 
@@ -316,13 +380,13 @@ configure_runner_dir() {
   local path_file="$runner_dir/.path"
   local svc_file="$runner_dir/svc.sh"
 
-  [[ -d "$runner_dir" ]] || die "Runner directory not found: $runner_dir"
+  assert_secure_runner_dir "$runner_dir"
   [[ -x "$svc_file" ]] || die "Missing runner service script: $svc_file"
 
   log "Configuring runner: $runner_dir"
-  upsert_env_key "$env_file" "ANDROID_HOME" "$DEST_SDK"
-  upsert_env_key "$env_file" "ANDROID_SDK_ROOT" "$DEST_SDK"
-  rewrite_runner_path_file "$path_file"
+  upsert_env_key "$env_file" "ANDROID_HOME" "$DEST_SDK" "$runner_dir"
+  upsert_env_key "$env_file" "ANDROID_SDK_ROOT" "$DEST_SDK" "$runner_dir"
+  rewrite_runner_path_file "$path_file" "$runner_dir"
 
   if [[ "$RESTART_RUNNERS" == "1" ]]; then
     restart_runner "$runner_dir" || true
