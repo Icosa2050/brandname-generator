@@ -86,9 +86,15 @@ def main() -> int:
         print('no new tokens to add')
         return 0
 
+    auto_header = '# auto-added tokens'
     lines = existing_raw[:]
-    lines.append('')
-    lines.append('# auto-added tokens')
+    if auto_header not in lines:
+        if lines and lines[-1].strip():
+            lines.append('')
+        lines.append(auto_header)
+    elif lines and lines[-1].strip() == auto_header:
+        # Keep file tidy when the header is currently the last line.
+        pass
     lines.extend(new_tokens)
     path.write_text('\n'.join(lines).rstrip() + '\n', encoding='utf-8')
     print(f'added_tokens={len(new_tokens)} file={path}')

@@ -19,11 +19,20 @@ import naming_validate_async as nva
 
 def _base_args() -> argparse.Namespace:
     return argparse.Namespace(
+        policy_version='collision_first_v1',
+        class_profile='9,42',
+        market_scope='eu,ch',
         adversarial_fail_threshold=82,
         adversarial_warn_threshold=68,
         cheap_trademark_screen=True,
         cheap_trademark_fail_threshold=90,
         cheap_trademark_warn_threshold=78,
+        cheap_trademark_blocklist_file='',
+        company_cheap_screen=True,
+        company_cheap_top=8,
+        company_cheap_exact_fail_threshold=1,
+        company_cheap_near_fail_threshold=2,
+        company_cheap_near_warn_threshold=1,
         min_trust_proxy=50,
         warn_trust_proxy=62,
         max_spelling_risk=28,
@@ -65,6 +74,25 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         with mock.patch('sys.argv', ['naming_validate_async.py', '--no-track-job-lifecycle']):
             args = nva.parse_args()
         self.assertFalse(args.track_job_lifecycle)
+        with mock.patch(
+            'sys.argv',
+            [
+                'naming_validate_async.py',
+                '--company-cheap-top',
+                '11',
+                '--company-cheap-exact-fail-threshold',
+                '2',
+                '--company-cheap-near-fail-threshold',
+                '4',
+                '--policy-version',
+                'policy_x',
+            ],
+        ):
+            args = nva.parse_args()
+        self.assertEqual(args.company_cheap_top, 11)
+        self.assertEqual(args.company_cheap_exact_fail_threshold, 2)
+        self.assertEqual(args.company_cheap_near_fail_threshold, 4)
+        self.assertEqual(args.policy_version, 'policy_x')
 
     def test_policy_signature_is_stable(self) -> None:
         args = _base_args()
@@ -132,12 +160,29 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 [row],
                 actor='test',
                 note='memory hit',
+                policy_version='policy_a',
+                query_fingerprint='sig_abc',
             )
             got = conn.execute(
-                'SELECT state, status, rejection_reason FROM candidates WHERE id = ?',
+                """
+                SELECT state, status, rejection_reason, rejection_stage, rejection_reason_code, policy_version, query_fingerprint
+                FROM candidates
+                WHERE id = ?
+                """,
                 (candidate_id,),
             ).fetchone()
-            self.assertEqual(got, ('memory_excluded', 'rejected_memory', 'memory_excluded'))
+            self.assertEqual(
+                got,
+                (
+                    'memory_excluded',
+                    'rejected_memory',
+                    'memory_excluded',
+                    'memory_prefilter',
+                    'memory_excluded',
+                    'policy_a',
+                    'sig_abc',
+                ),
+            )
 
     def test_collect_hard_fail_reasons_by_name(self) -> None:
         with closing(sqlite3.connect(':memory:')) as conn:
@@ -276,21 +321,56 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             demoted = nva.demote_checked_candidates_with_validation_failures(
                 conn,
                 actor='test',
+                policy_version='policy_b',
+                query_fingerprint='run:42',
             )
             self.assertEqual(demoted, 2)
             rows = conn.execute(
                 """
-                SELECT id, state, status, rejection_reason
+                SELECT id, state, status, rejection_reason, rejection_stage, rejection_reason_code, policy_version, query_fingerprint
                 FROM candidates
                 WHERE id IN (?, ?, ?)
                 ORDER BY id
                 """,
                 (hard_fail_id, expensive_fail_id, keep_id),
             ).fetchall()
-            got = {int(row[0]): (str(row[1]), str(row[2]), str(row[3])) for row in rows}
-            self.assertEqual(got[hard_fail_id], ('rejected_validation', 'rejected', 'validation_failed'))
-            self.assertEqual(got[expensive_fail_id], ('rejected_validation', 'rejected', 'validation_failed'))
-            self.assertEqual(got[keep_id], ('checked', 'checked', ''))
+            got = {
+                int(row[0]): (
+                    str(row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                    str(row[4]),
+                    str(row[5]),
+                    str(row[6]),
+                    str(row[7]),
+                )
+                for row in rows
+            }
+            self.assertEqual(
+                got[hard_fail_id],
+                (
+                    'rejected_validation',
+                    'rejected',
+                    'validation_failed',
+                    'validation_gate',
+                    'validation_failed',
+                    'policy_b',
+                    'run:42',
+                ),
+            )
+            self.assertEqual(
+                got[expensive_fail_id],
+                (
+                    'rejected_validation',
+                    'rejected',
+                    'validation_failed',
+                    'validation_gate',
+                    'validation_failed',
+                    'policy_b',
+                    'run:42',
+                ),
+            )
+            self.assertEqual(got[keep_id], ('checked', 'checked', '', '', '', '', ''))
             transition_count = conn.execute(
                 """
                 SELECT COUNT(*)
@@ -510,6 +590,43 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(got['status'], 'fail')
         self.assertTrue(got['hard_fail'])
         self.assertEqual(got['reason'], 'web_exact_collision')
+
+    def test_check_company_cheap_exact_hit_is_hard_fail(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.company_collision_signal',
+            return_value=(1, 0, 12, 'example.com', True, 'bing'),
+        ):
+            got = nva.check_company_cheap('verasettle', args)
+        self.assertEqual(got['status'], 'fail')
+        self.assertTrue(got['hard_fail'])
+        self.assertEqual(got['reason'], 'company_exact_hit')
+
+    def test_check_company_cheap_near_hit_warns_before_fail_threshold(self) -> None:
+        args = _base_args()
+        args.company_cheap_near_fail_threshold = 3
+        args.company_cheap_near_warn_threshold = 1
+        with mock.patch(
+            'naming_validate_async.company_collision_signal',
+            return_value=(0, 1, 8, 'example.org', True, 'bing'),
+        ):
+            got = nva.check_company_cheap('verasettle', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertFalse(got['hard_fail'])
+        self.assertEqual(got['reason'], 'company_near_warning')
+
+    def test_tm_cheap_cache_signature_changes_when_blocklist_changes(self) -> None:
+        args = _base_args()
+        original = list(nva.CHEAP_TRADEMARK_BLOCKLIST)
+        try:
+            sig_before = nva.cheap_check_cache_signature('tm_cheap', args)
+            nva.CHEAP_TRADEMARK_BLOCKLIST = original + ['collisiontokenx']
+            nva._update_cheap_trademark_blocklist_fingerprint()
+            sig_after = nva.cheap_check_cache_signature('tm_cheap', args)
+        finally:
+            nva.CHEAP_TRADEMARK_BLOCKLIST = original
+            nva._update_cheap_trademark_blocklist_fingerprint()
+        self.assertNotEqual(sig_before, sig_after)
 
 
 if __name__ == '__main__':

@@ -317,6 +317,61 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
         self.assertEqual(args.validator_max_concurrency, 12)
         self.assertAlmostEqual(args.validator_timeout_s, 4.5, places=6)
 
+    def test_parse_args_accepts_collision_first_flags(self) -> None:
+        argv = [
+            'naming_campaign_runner.py',
+            '--no-collision-first-mode',
+            '--collision-policy-version',
+            'policy_x',
+            '--collision-class-profile',
+            '9,42,35',
+            '--collision-market-scope',
+            'eu,ch,de',
+            '--validator-cheap-trademark-blocklist-file',
+            'resources/branding/inputs/cheap_tm_collision_blocklist_v1.txt',
+            '--prefix-audit-csv',
+            'test_outputs/branding/prefix_collision_audit/latest_prefix_audit.csv',
+            '--prefix-audit-top-n',
+            '15',
+        ]
+        with mock.patch.object(sys, 'argv', argv):
+            args = ncr.parse_args()
+        self.assertFalse(args.collision_first_mode)
+        self.assertEqual(args.collision_policy_version, 'policy_x')
+        self.assertEqual(args.collision_class_profile, '9,42,35')
+        self.assertEqual(args.collision_market_scope, 'eu,ch,de')
+        self.assertEqual(
+            args.validator_cheap_trademark_blocklist_file,
+            'resources/branding/inputs/cheap_tm_collision_blocklist_v1.txt',
+        )
+        self.assertEqual(args.prefix_audit_csv, 'test_outputs/branding/prefix_collision_audit/latest_prefix_audit.csv')
+        self.assertEqual(args.prefix_audit_top_n, 15)
+
+    def test_ensure_collision_first_validator_checks_includes_company_cheap(self) -> None:
+        got = ncr.ensure_collision_first_validator_checks('web,app_store')
+        checks = [part.strip() for part in got.split(',') if part.strip()]
+        self.assertIn('tm_cheap', checks)
+        self.assertIn('company_cheap', checks)
+        self.assertIn('web', checks)
+        self.assertEqual(len(checks), len(set(checks)))
+
+    def test_load_prefixes_from_audit_csv_filters_by_risk_and_pronounceability(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            csv_path = Path(td) / 'prefix_audit.csv'
+            headers = ['prefix', 'pronounce_score', 'risk_score']
+            rows = [
+                {'prefix': 'verano', 'pronounce_score': '100', 'risk_score': '0.0'},
+                {'prefix': 'zzqpt', 'pronounce_score': '50', 'risk_score': '0.0'},
+                {'prefix': 'takenx', 'pronounce_score': '95', 'risk_score': '30.0'},
+                {'prefix': 'solvra', 'pronounce_score': '92', 'risk_score': '8.0'},
+            ]
+            with csv_path.open('w', encoding='utf-8', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(rows)
+            got = ncr.load_prefixes_from_audit_csv(csv_path=csv_path, top_n=10)
+        self.assertEqual(got, ['verano', 'solvra'])
+
     def test_parse_args_accepts_openai_compat_provider_flags(self) -> None:
         argv = [
             'naming_campaign_runner.py',

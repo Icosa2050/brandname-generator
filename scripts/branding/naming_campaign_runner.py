@@ -41,11 +41,66 @@ except ModuleNotFoundError:  # pragma: no cover - Python <3.11 fallback
 
 TRUTHY_VALUES = {'1', 'true', 'yes', 'y'}
 DEFAULT_GENERATOR_FAMILIES = ['coined', 'stem', 'suggestive', 'morphology', 'seed', 'expression', 'source_pool', 'blend']
+DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS = [
+    'adversarial',
+    'psych',
+    'descriptive',
+    'tm_cheap',
+    'company_cheap',
+    'domain',
+    'web',
+    'app_store',
+    'package',
+    'social',
+]
 SweepCombo = tuple[float, str, str, str]
 
 
 def parse_csv_list(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(',') if part.strip()]
+
+
+def ensure_collision_first_validator_checks(raw_checks: str) -> str:
+    requested = parse_csv_list(raw_checks)
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for check in DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS + requested:
+        token = str(check or '').strip()
+        if not token or token in seen:
+            continue
+        ordered.append(token)
+        seen.add(token)
+    return ','.join(ordered)
+
+
+def load_prefixes_from_audit_csv(*, csv_path: Path, top_n: int) -> list[str]:
+    if top_n <= 0 or not csv_path.exists():
+        return []
+    out: list[str] = []
+    with csv_path.open('r', encoding='utf-8', newline='') as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            prefix = str(row.get('prefix') or row.get('name') or '').strip().lower()
+            if not prefix or not prefix.isalpha():
+                continue
+            try:
+                pronounce_score = float(row.get('pronounce_score') or 0.0)
+                risk_score = float(row.get('risk_score') or 100.0)
+            except (TypeError, ValueError):
+                continue
+            if pronounce_score < 70.0 or risk_score > 20.0:
+                continue
+            out.append(prefix)
+            if len(out) >= int(top_n):
+                break
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in out:
+        if value in seen:
+            continue
+        deduped.append(value)
+        seen.add(value)
+    return deduped
 
 
 def parse_model_list(raw: str) -> list[str]:
@@ -1932,8 +1987,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--no-generator-quality-first', dest='generator_quality_first', action='store_false')
     parser.add_argument(
         '--validator-checks',
-        default='adversarial,psych,descriptive,tm_cheap,domain,web,app_store,package,social',
+        default=','.join(DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS),
         help='Comma-separated validator checks.',
+    )
+    parser.add_argument(
+        '--collision-first-mode',
+        dest='collision_first_mode',
+        action='store_true',
+        default=True,
+        help='Enable collision-first validator defaults and policy wiring.',
+    )
+    parser.add_argument('--no-collision-first-mode', dest='collision_first_mode', action='store_false')
+    parser.add_argument(
+        '--collision-policy-version',
+        default='collision_first_v1',
+        help='Policy version tag passed to validator and persisted in rejection metadata.',
+    )
+    parser.add_argument(
+        '--collision-class-profile',
+        default='9,42',
+        help='Comma-separated class profile passed to validator metadata.',
+    )
+    parser.add_argument(
+        '--collision-market-scope',
+        default='eu,ch',
+        help='Comma-separated market scope passed to validator metadata.',
+    )
+    parser.add_argument(
+        '--validator-cheap-trademark-blocklist-file',
+        default=str(bpaths.RESOURCES_BRANDING_DIR / 'inputs' / 'cheap_tm_collision_blocklist_v1.txt'),
+        help='Optional cheap trademark collision blocklist file passed to validator.',
     )
     parser.add_argument(
         '--validator-tier',
@@ -1992,6 +2075,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         help='Validator expensive finalist limit when tier includes expensive checks.',
+    )
+    parser.add_argument(
+        '--prefix-audit-csv',
+        default='',
+        help='Optional prefix audit CSV used to inject low-risk pronounceable seeds.',
+    )
+    parser.add_argument(
+        '--prefix-audit-top-n',
+        type=int,
+        default=0,
+        help='Inject up to N prefixes from --prefix-audit-csv into generator seeds (0 disables).',
     )
     parser.add_argument(
         '--stop-window',
@@ -2331,6 +2425,24 @@ def main() -> int:
     active_families = parse_csv_list(args.generator_families) or list(DEFAULT_GENERATOR_FAMILIES)
     source_input_files = [part.strip() for part in parse_csv_list(args.source_input_files) if part.strip()]
     source_exclusion_files = [part.strip() for part in parse_csv_list(args.source_exclusion_files) if part.strip()]
+    if args.collision_first_mode:
+        args.validator_checks = ensure_collision_first_validator_checks(str(args.validator_checks or ''))
+    prefix_seed_injected: list[str] = []
+    if str(args.prefix_audit_csv).strip() and int(args.prefix_audit_top_n) > 0:
+        prefix_seed_injected = load_prefixes_from_audit_csv(
+            csv_path=Path(str(args.prefix_audit_csv).strip()).expanduser(),
+            top_n=max(1, int(args.prefix_audit_top_n)),
+        )
+        if prefix_seed_injected:
+            merged_seeds: list[str] = []
+            seen_seed: set[str] = set()
+            for token in parse_csv_list(str(args.generator_seeds or '')) + prefix_seed_injected:
+                value = str(token or '').strip().lower()
+                if not value or value in seen_seed:
+                    continue
+                merged_seeds.append(value)
+                seen_seed.add(value)
+            args.generator_seeds = ','.join(merged_seeds)
     if not shares or not scopes or not gates or not quota_profiles:
         print('Invalid sweep configuration: shares/scopes/gates/quota-profiles must be non-empty.')
         return 1
@@ -2457,6 +2569,12 @@ def main() -> int:
         f'source_input_files={source_input_files} source_exclusion_files={source_exclusion_files} '
         f'source_zipf_min={float(args.source_zipf_min):.3f} source_zipf_max={float(args.source_zipf_max):.3f} '
         f'source_zipf_language={args.source_zipf_language} '
+        f'prefix_audit_csv={args.prefix_audit_csv} prefix_audit_top_n={int(args.prefix_audit_top_n)} '
+        f'prefix_seed_injected={prefix_seed_injected[:12]} '
+        f'collision_first_mode={bool(args.collision_first_mode)} '
+        f'collision_policy_version={args.collision_policy_version} '
+        f'collision_class_profile={args.collision_class_profile} '
+        f'collision_market_scope={args.collision_market_scope} '
         f'reset_db={args.reset_db} '
         f'llm_enabled={args.llm_ideation_enabled} llm_provider={args.llm_provider} '
         f'llm_model={args.llm_model} llm_models={args.llm_models} '
@@ -2940,6 +3058,9 @@ def main() -> int:
             f'--expensive-finalist-limit={max(1, int(args.validator_expensive_finalist_limit))}',
             '--finalist-recommendations=strong,consider',
             f'--checks={args.validator_checks}',
+            f'--policy-version={str(args.collision_policy_version or "").strip() or "collision_first_v1"}',
+            f'--class-profile={str(args.collision_class_profile or "").strip() or "9,42"}',
+            f'--market-scope={str(args.collision_market_scope or "").strip() or "eu,ch"}',
             f'--validation-tier={args.validator_tier}',
             f'--candidate-limit={max(1, int(args.validator_candidate_limit))}',
             f'--concurrency={int(validator_runtime["concurrency"])}',
@@ -2948,6 +3069,9 @@ def main() -> int:
             f'--timeout-s={float(validator_runtime["timeout_s"]):.2f}',
             f'--memory-ttl-days={max(1, int(args.validator_memory_ttl_days))}',
         ]
+        blocklist_file = str(args.validator_cheap_trademark_blocklist_file or '').strip()
+        if blocklist_file:
+            validator_cmd.append(f'--cheap-trademark-blocklist-file={blocklist_file}')
         if str(args.validator_memory_db).strip():
             validator_cmd.append(f'--memory-db={str(args.validator_memory_db).strip()}')
         code = run_cmd(

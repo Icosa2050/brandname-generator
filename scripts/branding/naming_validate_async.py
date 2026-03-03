@@ -18,6 +18,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import re
 import sqlite3
 import time
 from collections import deque
@@ -227,7 +228,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--timeout-s', type=float, default=8.0, help='Per-check timeout seconds.')
     parser.add_argument(
         '--checks',
-        default='adversarial,psych,descriptive',
+        default='adversarial,psych,descriptive,tm_cheap,company_cheap',
         help='Comma-separated check types to execute.',
     )
     parser.add_argument(
@@ -237,6 +238,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--scope', choices=['dach', 'eu', 'global'], default='global')
     parser.add_argument('--gate', choices=['strict', 'balanced'], default='balanced')
+    parser.add_argument(
+        '--policy-version',
+        default='collision_first_v1',
+        help='Collision-policy version tag used for run config and rejection metadata.',
+    )
+    parser.add_argument(
+        '--class-profile',
+        default='9,42',
+        help='Comma-separated Nice classes targeted by this run (metadata only).',
+    )
+    parser.add_argument(
+        '--market-scope',
+        default='eu,ch',
+        help='Comma-separated legal market scope targeted by this run (metadata only).',
+    )
 
     parser.add_argument('--adversarial-fail-threshold', type=int, default=82)
     parser.add_argument('--adversarial-warn-threshold', type=int, default=68)
@@ -266,8 +282,44 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--cheap-trademark-blocklist-file',
-        default=str(bpaths.REPO_ROOT / 'resources' / 'branding' / 'inputs' / 'cheap_tm_collision_blocklist_v1.txt'),
-        help='Optional newline-delimited file with extra trademark collision tokens/stems for tm_cheap.',
+        default=str(bpaths.RESOURCES_BRANDING_DIR / 'inputs' / 'cheap_tm_collision_blocklist_v1.txt'),
+        help='Optional newline-delimited blocklist file merged into cheap trademark pre-screen.',
+    )
+    parser.add_argument(
+        '--company-cheap-screen',
+        dest='company_cheap_screen',
+        action='store_true',
+        default=True,
+        help='Enable cheap company collision pre-screen in cheap tier.',
+    )
+    parser.add_argument(
+        '--no-company-cheap-screen',
+        dest='company_cheap_screen',
+        action='store_false',
+    )
+    parser.add_argument(
+        '--company-cheap-top',
+        type=int,
+        default=8,
+        help='Top-N search hits to inspect for cheap company pre-screen.',
+    )
+    parser.add_argument(
+        '--company-cheap-exact-fail-threshold',
+        type=int,
+        default=1,
+        help='Hard-fail when this many exact company-like hits are observed.',
+    )
+    parser.add_argument(
+        '--company-cheap-near-fail-threshold',
+        type=int,
+        default=2,
+        help='Hard-fail when this many near company-like hits are observed.',
+    )
+    parser.add_argument(
+        '--company-cheap-near-warn-threshold',
+        type=int,
+        default=1,
+        help='Warn threshold for near company-like hits below fail threshold.',
     )
     parser.add_argument('--min-trust-proxy', type=int, default=50)
     parser.add_argument('--warn-trust-proxy', type=int, default=62)
@@ -384,11 +436,19 @@ def resolve_feature_flags(args: argparse.Namespace) -> ValidationFeatureFlags:
 
 
 MEMORY_POLICY_FIELDS: tuple[str, ...] = (
+    'policy_version',
+    'class_profile',
+    'market_scope',
     'adversarial_fail_threshold',
     'adversarial_warn_threshold',
     'cheap_trademark_screen',
     'cheap_trademark_fail_threshold',
     'cheap_trademark_warn_threshold',
+    'company_cheap_screen',
+    'company_cheap_top',
+    'company_cheap_exact_fail_threshold',
+    'company_cheap_near_fail_threshold',
+    'company_cheap_near_warn_threshold',
     'min_trust_proxy',
     'warn_trust_proxy',
     'max_spelling_risk',
@@ -416,6 +476,7 @@ def exclusion_memory_policy_signature(
         'scope': str(getattr(args, 'scope', '') or ''),
         'gate': str(getattr(args, 'gate', '') or ''),
         'blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
+        'blocklist_fingerprint': CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT,
     }
     for field in MEMORY_POLICY_FIELDS:
         payload[field] = getattr(args, field, None)
@@ -484,16 +545,29 @@ def mark_candidates_memory_excluded(
     *,
     actor: str,
     note: str,
+    policy_version: str = '',
+    query_fingerprint: str = '',
 ) -> None:
     ts = ndb.now_iso()
     for row in rows:
         conn.execute(
             """
             UPDATE candidates
-            SET state = ?, status = ?, rejection_reason = ?, state_updated_at = ?
+            SET state = ?, status = ?, rejection_reason = ?, rejection_stage = ?, rejection_reason_code = ?,
+                policy_version = ?, query_fingerprint = ?, state_updated_at = ?
             WHERE id = ?
             """,
-            ('memory_excluded', 'rejected_memory', 'memory_excluded', ts, row.candidate_id),
+            (
+                'memory_excluded',
+                'rejected_memory',
+                'memory_excluded',
+                'memory_prefilter',
+                'memory_excluded',
+                str(policy_version or ''),
+                str(query_fingerprint or ''),
+                ts,
+                row.candidate_id,
+            ),
         )
         conn.execute(
             """
@@ -636,7 +710,7 @@ def load_candidates(conn: sqlite3.Connection, states: list[str], limit: int) -> 
     ]
 
 
-CHEAP_TRADEMARK_BLOCKLIST = sorted(
+BASE_CHEAP_TRADEMARK_BLOCKLIST = sorted(
     set(
         list(ng.PROTECTED_MARKS)
         + list(ng.ADVERSARIAL_MARKS)
@@ -653,50 +727,144 @@ CHEAP_TRADEMARK_BLOCKLIST = sorted(
         ]
     )
 )
+CHEAP_TRADEMARK_BLOCKLIST = list(BASE_CHEAP_TRADEMARK_BLOCKLIST)
 CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT = hashlib.sha1(
     '|'.join(CHEAP_TRADEMARK_BLOCKLIST).encode('utf-8')
 ).hexdigest()[:12]
 
-
-def _tokenize_collision_line(line: str) -> list[str]:
-    cleaned = line.strip().lower()
-    if not cleaned or cleaned.startswith('#'):
-        return []
-    for sep in ('/', ',', ';', '|', ':'):
-        cleaned = cleaned.replace(sep, ' ')
-    tokens: list[str] = []
-    for token in cleaned.split():
-        normalized = ''.join(ch for ch in token if 'a' <= ch <= 'z')
-        if len(normalized) >= 3:
-            tokens.append(normalized)
-    return tokens
-
-
-def _load_custom_collision_tokens(path: str) -> set[str]:
-    if not path:
-        return set()
-    candidate_path = Path(path).expanduser()
-    if not candidate_path.exists():
-        return set()
-    try:
-        raw = candidate_path.read_text(encoding='utf-8')
-    except OSError:
-        return set()
-    tokens: set[str] = set()
-    for line in raw.splitlines():
-        tokens.update(_tokenize_collision_line(line))
-    return tokens
+COMPANY_ENTITY_HINTS: tuple[str, ...] = (
+    'gmbh',
+    'ag',
+    'kg',
+    'ug',
+    'llc',
+    'ltd',
+    'limited',
+    'inc',
+    'corp',
+    'corporation',
+    'company',
+    'co.',
+    'sa',
+    's.a.',
+    'sarl',
+    'bv',
+    'oy',
+    'ab',
+    'holding',
+    'group',
+    'platform',
+    'official',
+)
 
 
-def configure_cheap_trademark_blocklist(args: argparse.Namespace) -> None:
-    global CHEAP_TRADEMARK_BLOCKLIST, CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT
-    merged = set(CHEAP_TRADEMARK_BLOCKLIST)
-    file_value = str(getattr(args, 'cheap_trademark_blocklist_file', '') or '').strip()
-    merged.update(_load_custom_collision_tokens(file_value))
-    CHEAP_TRADEMARK_BLOCKLIST = sorted(merged)
+def _update_cheap_trademark_blocklist_fingerprint() -> None:
+    global CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT
     CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT = hashlib.sha1(
         '|'.join(CHEAP_TRADEMARK_BLOCKLIST).encode('utf-8')
     ).hexdigest()[:12]
+
+
+def load_cheap_trademark_blocklist(path: str) -> tuple[int, str]:
+    raw_path = str(path or '').strip()
+    if not raw_path:
+        return 0, ''
+    blocklist_path = Path(raw_path).expanduser()
+    if not blocklist_path.exists():
+        return 0, str(blocklist_path)
+    additions: set[str] = set()
+    for raw in blocklist_path.read_text(encoding='utf-8', errors='replace').splitlines():
+        line = raw.split('#', 1)[0].strip().lower()
+        if not line:
+            continue
+        token = ndb.normalize_name(line)
+        if len(token) < 3:
+            continue
+        additions.add(token)
+    merged = sorted(set(BASE_CHEAP_TRADEMARK_BLOCKLIST).union(additions))
+    global CHEAP_TRADEMARK_BLOCKLIST
+    CHEAP_TRADEMARK_BLOCKLIST = merged
+    _update_cheap_trademark_blocklist_fingerprint()
+    return len(additions), str(blocklist_path)
+
+
+def _looks_company_result(title_lc: str, domain: str) -> bool:
+    if any(hint in title_lc for hint in COMPANY_ENTITY_HINTS):
+        return True
+    token = ng.domain_label(domain)
+    if not token:
+        return False
+    if token in {'linkedin', 'wikipedia', 'facebook', 'instagram', 'x', 'twitter'}:
+        return False
+    return True
+
+
+def company_collision_signal(name: str, top_n: int) -> tuple[int, int, int, str, bool, str]:
+    query_suffix = ' company'
+    quoted_matches, quoted_ok, quoted_source = ng.fetch_search_matches(f'"{name}"{query_suffix}')
+    plain_matches, plain_ok, plain_source = ng.fetch_search_matches(f'{name}{query_suffix}')
+
+    if not quoted_ok and not plain_ok:
+        return -1, -1, -1, '', False, ''
+
+    if quoted_ok and plain_ok:
+        source = f'{quoted_source}+{plain_source}'
+    elif quoted_ok:
+        source = quoted_source
+    else:
+        source = plain_source
+
+    exact_domains: set[str] = set()
+    near_hits = 0
+    sample_domains: list[str] = []
+    seen_domains: set[str] = set()
+    quoted_slice = quoted_matches[: max(1, int(top_n))]
+    plain_slice = plain_matches[: max(1, int(top_n))]
+
+    for href, raw_title in quoted_slice + plain_slice:
+        domain = ng.extract_result_domain(href)
+        if ng.is_social_profile_domain(domain):
+            continue
+        title = re.sub(r'<[^>]+>', ' ', str(raw_title or ''))
+        title_lc = title.lower()
+        title_norm = ng.normalize_alpha(title)
+        domain_norm = ng.domain_label(domain)
+        title_exact = title_norm == name or bool(re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title_lc))
+        domain_exact = domain_norm == name
+        if (title_exact or domain_exact) and _looks_company_result(title_lc, domain):
+            exact_domains.add(domain or title_lc[:80] or f'row_{len(exact_domains) + 1}')
+        if domain and domain not in seen_domains and len(sample_domains) < 6:
+            sample_domains.append(domain)
+            seen_domains.add(domain)
+
+    for href, raw_title in plain_slice:
+        domain = ng.extract_result_domain(href)
+        if ng.is_social_profile_domain(domain):
+            continue
+        title = re.sub(r'<[^>]+>', ' ', str(raw_title or ''))
+        title_lc = title.lower()
+        if not _looks_company_result(title_lc, domain):
+            continue
+        tokens = set(re.findall(r'[a-z]{4,}', title_lc))
+        near_found = False
+        for token in tokens:
+            if token == name:
+                continue
+            ratio = ng.similarity_with_prefix_boost(token, name)
+            if ratio >= 0.88 and abs(len(token) - len(name)) <= 2:
+                near_found = True
+                break
+        if not near_found:
+            domain_norm = ng.domain_label(domain)
+            if domain_norm and domain_norm != name:
+                ratio = ng.similarity_with_prefix_boost(domain_norm, name)
+                if ratio >= 0.90 and abs(len(domain_norm) - len(name)) <= 2:
+                    near_found = True
+        if near_found:
+            near_hits += 1
+    total_results = len(quoted_matches) + len(plain_matches)
+    exact_hits = len(exact_domains)
+    return exact_hits, near_hits, total_results, ';'.join(sample_domains), True, source
 
 
 def cheap_trademark_similarity_signal(name: str) -> tuple[int, str]:
@@ -848,6 +1016,71 @@ def check_trademark_cheap(name: str, args: argparse.Namespace) -> dict:
             'closest_mark': closest_mark,
             'blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
         },
+    }
+
+
+def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
+    normalized = ng.normalize_alpha(name)
+    if not getattr(args, 'company_cheap_screen', True):
+        return {
+            'status': 'pass',
+            'hard_fail': False,
+            'score_delta': 0.0,
+            'reason': 'company_cheap_screen_disabled',
+            'evidence': {'screen_enabled': False},
+        }
+    top_n = max(1, int(getattr(args, 'company_cheap_top', 8)))
+    exact_hits, near_hits, result_count, sample_domains, ok, source = company_collision_signal(normalized, top_n=top_n)
+    evidence = {
+        'screen_enabled': True,
+        'exact_hits': int(exact_hits),
+        'near_hits': int(near_hits),
+        'result_count': int(result_count),
+        'sample_domains': sample_domains,
+        'source': source,
+        'top_n': int(top_n),
+    }
+    if not ok or result_count < 0:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -2.0,
+            'reason': 'company_cheap_check_unknown',
+            'evidence': evidence,
+        }
+    exact_fail_threshold = max(1, int(getattr(args, 'company_cheap_exact_fail_threshold', 1)))
+    near_fail_threshold = max(1, int(getattr(args, 'company_cheap_near_fail_threshold', 2)))
+    near_warn_threshold = max(1, int(getattr(args, 'company_cheap_near_warn_threshold', 1)))
+    if exact_hits >= exact_fail_threshold:
+        return {
+            'status': 'fail',
+            'hard_fail': True,
+            'score_delta': -14.0,
+            'reason': 'company_exact_hit',
+            'evidence': evidence,
+        }
+    if near_hits >= near_fail_threshold:
+        return {
+            'status': 'fail',
+            'hard_fail': True,
+            'score_delta': -10.0,
+            'reason': 'company_near_hit',
+            'evidence': evidence,
+        }
+    if near_hits >= near_warn_threshold:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -4.0,
+            'reason': 'company_near_warning',
+            'evidence': evidence,
+        }
+    return {
+        'status': 'pass',
+        'hard_fail': False,
+        'score_delta': 0.0,
+        'reason': '',
+        'evidence': evidence,
     }
 
 
@@ -1114,6 +1347,7 @@ CHECK_SPECS: dict[str, ValidationCheckSpec] = {
     'psych': ValidationCheckSpec('psych', 'cheap', check_psych),
     'descriptive': ValidationCheckSpec('descriptive', 'cheap', check_descriptive),
     'tm_cheap': ValidationCheckSpec('tm_cheap', 'cheap', check_trademark_cheap),
+    'company_cheap': ValidationCheckSpec('company_cheap', 'cheap', check_company_cheap),
     'domain': ValidationCheckSpec('domain', 'expensive', check_domain),
     'web': ValidationCheckSpec('web', 'expensive', check_web),
     'app_store': ValidationCheckSpec('app_store', 'expensive', check_app_store),
@@ -1146,11 +1380,13 @@ CACHE_SIGNATURE_FIELDS: dict[str, tuple[str, ...]] = {
     'adversarial': ('adversarial_fail_threshold', 'adversarial_warn_threshold'),
     'psych': ('min_trust_proxy', 'warn_trust_proxy', 'max_spelling_risk', 'warn_spelling_risk'),
     'descriptive': ('descriptive_fail_threshold', 'descriptive_warn_threshold'),
-    'tm_cheap': (
-        'cheap_trademark_screen',
-        'cheap_trademark_fail_threshold',
-        'cheap_trademark_warn_threshold',
-        'cheap_trademark_blocklist_file',
+    'tm_cheap': ('cheap_trademark_screen', 'cheap_trademark_fail_threshold', 'cheap_trademark_warn_threshold'),
+    'company_cheap': (
+        'company_cheap_screen',
+        'company_cheap_top',
+        'company_cheap_exact_fail_threshold',
+        'company_cheap_near_fail_threshold',
+        'company_cheap_near_warn_threshold',
     ),
 }
 
@@ -1162,7 +1398,7 @@ def cheap_check_cache_signature(check_type: str, args: argparse.Namespace) -> st
         payload[field] = getattr(args, field, None)
     if check_type == 'tm_cheap':
         payload['blocklist_size'] = len(CHEAP_TRADEMARK_BLOCKLIST)
-        payload['blocklist_fp'] = CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT
+        payload['blocklist_fingerprint'] = CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]
 
@@ -1473,6 +1709,8 @@ def demote_checked_candidates_with_validation_failures(
     conn: sqlite3.Connection,
     *,
     actor: str,
+    policy_version: str = '',
+    query_fingerprint: str = '',
 ) -> int:
     ts = ndb.now_iso()
     rows = conn.execute(
@@ -1504,10 +1742,21 @@ def demote_checked_candidates_with_validation_failures(
         conn.execute(
             """
             UPDATE candidates
-            SET state = ?, status = ?, rejection_reason = ?, state_updated_at = ?
+            SET state = ?, status = ?, rejection_reason = ?, rejection_stage = ?, rejection_reason_code = ?,
+                policy_version = ?, query_fingerprint = ?, state_updated_at = ?
             WHERE id = ?
             """,
-            ('rejected_validation', 'rejected', 'validation_failed', ts, candidate_id),
+            (
+                'rejected_validation',
+                'rejected',
+                'validation_failed',
+                'validation_gate',
+                'validation_failed',
+                str(policy_version or ''),
+                str(query_fingerprint or ''),
+                ts,
+                candidate_id,
+            ),
         )
         conn.execute(
             """
@@ -1531,6 +1780,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
     started_monotonic = time.monotonic()
     db_path = Path(args.db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    tm_blocklist_extra_entries, tm_blocklist_path_resolved = load_cheap_trademark_blocklist(
+        str(getattr(args, 'cheap_trademark_blocklist_file', '') or '')
+    )
 
     try:
         checks, flags = select_checks(args)
@@ -1597,6 +1849,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 memory_rows,
                 actor='naming_validate_memory',
                 note=f'memory exclusion match signature={memory_policy_signature}',
+                policy_version=str(getattr(args, 'policy_version', '') or ''),
+                query_fingerprint=memory_policy_signature,
             )
             conn.commit()
             memory_prefilter_count += len(memory_rows)
@@ -1656,6 +1910,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
             validation_tier=flags.validation_tier,
             cheap_tm_enabled=bool(args.cheap_trademark_screen),
             cheap_tm_blocklist_size=len(CHEAP_TRADEMARK_BLOCKLIST),
+            company_cheap_enabled=bool(args.company_cheap_screen),
+            company_cheap_top=max(1, int(args.company_cheap_top)),
         )
 
         run_id = ndb.create_run(
@@ -1674,6 +1930,9 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'max_retries': args.max_retries,
                 'state_filter': states,
                 'pipeline_version': flags.pipeline_version,
+                'policy_version': str(getattr(args, 'policy_version', '') or ''),
+                'class_profile': str(getattr(args, 'class_profile', '') or ''),
+                'market_scope': str(getattr(args, 'market_scope', '') or ''),
                 'v3_enabled': flags.v3_enabled,
                 'validation_tier': flags.validation_tier,
                 'cheap_checks': cheap_checks,
@@ -1686,6 +1945,13 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'cheap_trademark_fail_threshold': int(args.cheap_trademark_fail_threshold),
                 'cheap_trademark_warn_threshold': int(args.cheap_trademark_warn_threshold),
                 'cheap_trademark_blocklist_size': len(CHEAP_TRADEMARK_BLOCKLIST),
+                'cheap_trademark_blocklist_file': tm_blocklist_path_resolved,
+                'cheap_trademark_blocklist_extra_entries': int(tm_blocklist_extra_entries),
+                'company_cheap_screen': bool(args.company_cheap_screen),
+                'company_cheap_top': int(args.company_cheap_top),
+                'company_cheap_exact_fail_threshold': int(args.company_cheap_exact_fail_threshold),
+                'company_cheap_near_fail_threshold': int(args.company_cheap_near_fail_threshold),
+                'company_cheap_near_warn_threshold': int(args.company_cheap_near_warn_threshold),
                 'cheap_cache': bool(args.cheap_cache),
                 'cheap_cache_ttl_s': int(args.cheap_cache_ttl_s),
                 'memory_db': str(memory_db_path) if memory_db_path is not None else '',
@@ -1829,6 +2095,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
         demoted_validation_count = demote_checked_candidates_with_validation_failures(
             conn,
             actor='naming_validate_async',
+            policy_version=str(getattr(args, 'policy_version', '') or ''),
+            query_fingerprint=f'run:{run_id}',
         )
         summary = summarize_run(conn, run_id)
         tier_summary = summarize_results_by_tier(
@@ -1965,7 +2233,6 @@ async def orchestrate(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
-    configure_cheap_trademark_blocklist(args)
     return asyncio.run(orchestrate(args))
 
 
