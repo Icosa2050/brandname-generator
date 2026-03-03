@@ -25,6 +25,9 @@ VALIDATOR_TIMEOUT_S=6
 LLM_ROUNDS=1
 LLM_CANDIDATES_PER_ROUND=10
 LLM_TEMPERATURE="${OPENROUTER_LLM_TEMPERATURE:-0.8}"
+LLM_MAX_CALL_LATENCY_MS="${OPENROUTER_LLM_MAX_CALL_LATENCY_MS:-60000}"
+LLM_STAGE_TIMEOUT_MS="${OPENROUTER_LLM_STAGE_TIMEOUT_MS:-180000}"
+LLM_MAX_RETRIES="${OPENROUTER_LLM_MAX_RETRIES:-1}"
 PROMPT_TEMPLATE_FILE="${OPENROUTER_PROMPT_TEMPLATE_FILE:-}"
 LIVE_PROGRESS=1
 NO_EXTERNAL_CHECKS=1
@@ -40,6 +43,9 @@ USER_MODEL_SELECTION=""
 USER_LLM_ROUNDS=""
 USER_LLM_CANDIDATES_PER_ROUND=""
 USER_LLM_TEMPERATURE=""
+USER_LLM_MAX_CALL_LATENCY_MS=""
+USER_LLM_STAGE_TIMEOUT_MS=""
+USER_LLM_MAX_RETRIES=""
 USER_VALIDATOR_CANDIDATE_LIMIT=""
 USER_VALIDATOR_EXPENSIVE_FINALIST_LIMIT=""
 USER_VALIDATOR_CONCURRENCY=""
@@ -78,6 +84,9 @@ Options:
   --llm-rounds <n>                   LLM rounds per run (default: 1)
   --llm-candidates-per-round <n>     LLM candidates requested per round (default: 10)
   --llm-temperature <float>          LLM sampling temperature (default: profile-specific)
+  --llm-max-call-latency-ms <ms>     Per-call LLM timeout (default: profile-specific)
+  --llm-stage-timeout-ms <ms>        Total ideation-stage timeout (default: profile-specific)
+  --llm-max-retries <n>              Retriable LLM call retries (default: profile-specific)
   --llm-prompt-template-file <path>  Optional prompt template file
   --post-rank                        Run deterministic DE/EN post-ranker (default: on)
   --no-post-rank                     Skip deterministic post-ranker
@@ -105,6 +114,9 @@ apply_profile() {
       LLM_ROUNDS="2"
       LLM_CANDIDATES_PER_ROUND="10"
       LLM_TEMPERATURE="0.8"
+      LLM_MAX_CALL_LATENCY_MS="30000"
+      LLM_STAGE_TIMEOUT_MS="90000"
+      LLM_MAX_RETRIES="1"
       VALIDATOR_CANDIDATE_LIMIT="28"
       VALIDATOR_EXPENSIVE_FINALIST_LIMIT="10"
       VALIDATOR_TIMEOUT_S="6"
@@ -117,6 +129,9 @@ apply_profile() {
       LLM_ROUNDS="3"
       LLM_CANDIDATES_PER_ROUND="14"
       LLM_TEMPERATURE="0.7"
+      LLM_MAX_CALL_LATENCY_MS="60000"
+      LLM_STAGE_TIMEOUT_MS="180000"
+      LLM_MAX_RETRIES="1"
       VALIDATOR_CANDIDATE_LIMIT="36"
       VALIDATOR_EXPENSIVE_FINALIST_LIMIT="16"
       VALIDATOR_TIMEOUT_S="10"
@@ -129,6 +144,9 @@ apply_profile() {
       LLM_ROUNDS="6"
       LLM_CANDIDATES_PER_ROUND="14"
       LLM_TEMPERATURE="1.05"
+      LLM_MAX_CALL_LATENCY_MS="90000"
+      LLM_STAGE_TIMEOUT_MS="240000"
+      LLM_MAX_RETRIES="2"
       VALIDATOR_CANDIDATE_LIMIT="48"
       VALIDATOR_EXPENSIVE_FINALIST_LIMIT="24"
       VALIDATOR_TIMEOUT_S="14"
@@ -249,6 +267,21 @@ while [[ $# -gt 0 ]]; do
       USER_LLM_TEMPERATURE="$2"
       shift 2
       ;;
+    --llm-max-call-latency-ms)
+      LLM_MAX_CALL_LATENCY_MS="$2"
+      USER_LLM_MAX_CALL_LATENCY_MS="$2"
+      shift 2
+      ;;
+    --llm-stage-timeout-ms)
+      LLM_STAGE_TIMEOUT_MS="$2"
+      USER_LLM_STAGE_TIMEOUT_MS="$2"
+      shift 2
+      ;;
+    --llm-max-retries)
+      LLM_MAX_RETRIES="$2"
+      USER_LLM_MAX_RETRIES="$2"
+      shift 2
+      ;;
     --llm-prompt-template-file)
       PROMPT_TEMPLATE_FILE="$2"
       USER_PROMPT_TEMPLATE_FILE="$2"
@@ -327,6 +360,15 @@ fi
 if [[ -n "$USER_LLM_TEMPERATURE" ]]; then
   LLM_TEMPERATURE="$USER_LLM_TEMPERATURE"
 fi
+if [[ -n "$USER_LLM_MAX_CALL_LATENCY_MS" ]]; then
+  LLM_MAX_CALL_LATENCY_MS="$USER_LLM_MAX_CALL_LATENCY_MS"
+fi
+if [[ -n "$USER_LLM_STAGE_TIMEOUT_MS" ]]; then
+  LLM_STAGE_TIMEOUT_MS="$USER_LLM_STAGE_TIMEOUT_MS"
+fi
+if [[ -n "$USER_LLM_MAX_RETRIES" ]]; then
+  LLM_MAX_RETRIES="$USER_LLM_MAX_RETRIES"
+fi
 if [[ -n "$USER_VALIDATOR_CANDIDATE_LIMIT" ]]; then
   VALIDATOR_CANDIDATE_LIMIT="$USER_VALIDATOR_CANDIDATE_LIMIT"
 fi
@@ -376,6 +418,18 @@ if ! [[ "$POST_RANK_TOP_N" =~ '^[1-9][0-9]*$' ]]; then
   echo "--post-rank-top-n must be >= 1." >&2
   exit 2
 fi
+if ! [[ "$LLM_MAX_CALL_LATENCY_MS" =~ '^[1-9][0-9]*$' ]]; then
+  echo "--llm-max-call-latency-ms must be >= 1." >&2
+  exit 2
+fi
+if ! [[ "$LLM_STAGE_TIMEOUT_MS" =~ '^[1-9][0-9]*$' ]]; then
+  echo "--llm-stage-timeout-ms must be >= 1." >&2
+  exit 2
+fi
+if ! [[ "$LLM_MAX_RETRIES" =~ '^[0-9]+$' ]]; then
+  echo "--llm-max-retries must be >= 0." >&2
+  exit 2
+fi
 if (( LANE >= SHARD_COUNT )); then
   echo "--lane must be smaller than --shard-count." >&2
   exit 2
@@ -404,6 +458,9 @@ CMD=(
   --llm-rounds "$LLM_ROUNDS"
   --llm-candidates-per-round "$LLM_CANDIDATES_PER_ROUND"
   --llm-temperature "$LLM_TEMPERATURE"
+  --llm-max-call-latency-ms "$LLM_MAX_CALL_LATENCY_MS"
+  --llm-stage-timeout-ms "$LLM_STAGE_TIMEOUT_MS"
+  --llm-max-retries "$LLM_MAX_RETRIES"
   --shard-id "$LANE"
   --shard-count "$SHARD_COUNT"
   --out-dir "$OUT_DIR"
