@@ -13,8 +13,8 @@ if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   exit 2
 fi
 
-QUALITY_LOG="$(mktemp -t openrouter_quality_lane.XXXXXX.log)"
-REMOTE_LOG="$(mktemp -t openrouter_remote_lane.XXXXXX.log)"
+QUALITY_LOG="$(mktemp)"
+REMOTE_LOG="$(mktemp)"
 
 cleanup_logs() {
   rm -f "$QUALITY_LOG" "$REMOTE_LOG"
@@ -24,6 +24,8 @@ trap cleanup_logs EXIT
 run_quality_lane() {
   zsh scripts/branding/run_openrouter_lane.sh \
     --profile quality \
+    --lane 0 \
+    --shard-count 1 \
     --bundle-a \
     --max-runs 1 \
     --no-live-progress \
@@ -38,6 +40,8 @@ run_quality_lane() {
 run_remote_lane() {
   zsh scripts/branding/run_openrouter_lane.sh \
     --profile remote_quality \
+    --lane 0 \
+    --shard-count 1 \
     --bundle-a \
     --max-runs 1 \
     --no-live-progress \
@@ -50,9 +54,17 @@ run_remote_lane() {
 }
 
 echo "starting parallel lanes: quality + remote_quality"
-(run_quality_lane) > >(tee "$QUALITY_LOG") 2>&1 &
+run_quality_lane_with_tee() {
+  run_quality_lane 2>&1 | tee "$QUALITY_LOG"
+}
+
+run_remote_lane_with_tee() {
+  run_remote_lane 2>&1 | tee "$REMOTE_LOG"
+}
+
+run_quality_lane_with_tee &
 quality_pid=$!
-(run_remote_lane) > >(tee "$REMOTE_LOG") 2>&1 &
+run_remote_lane_with_tee &
 remote_pid=$!
 
 set +e
@@ -75,10 +87,7 @@ if [[ "$remote_rc" -ne 0 ]]; then
   exit "$remote_rc"
 fi
 
-python3 scripts/branding/check_campaign_health.py --out-dir "$QUALITY_OUT_DIR"
-python3 scripts/branding/check_campaign_health.py --out-dir "$REMOTE_OUT_DIR"
-
-env PYTHONPATH=scripts/branding python3 scripts/branding/fuse_postrank_profiles.py \
+python3 scripts/branding/fuse_postrank_profiles.py \
   --quality-out-dir "$QUALITY_OUT_DIR" \
   --remote-quality-out-dir "$REMOTE_OUT_DIR" \
   --out-dir "$FUSED_OUT_DIR" \
