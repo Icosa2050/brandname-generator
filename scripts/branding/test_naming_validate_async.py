@@ -8,6 +8,7 @@ import argparse
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -465,6 +466,90 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             self.assertEqual(stats['lock_acquisitions'], 2)
             status = conn.execute('SELECT status FROM validation_jobs WHERE id = ?', (job_id,)).fetchone()
             self.assertEqual(status[0], 'success')
+
+    def test_run_single_job_timeout_records_error_without_retry(self) -> None:
+        with closing(sqlite3.connect(':memory:')) as conn:
+            ndb.ensure_schema(conn)
+            run_id = ndb.create_run(
+                conn,
+                source_path=':memory:',
+                scope='global',
+                gate_mode='balanced',
+                variation_profile='test',
+                status='running',
+                config={},
+                summary={},
+            )
+            candidate_id = ndb.upsert_candidate(
+                conn,
+                name_display='Verodoma',
+                total_score=65.0,
+                risk_score=22.0,
+                recommendation='strong',
+                quality_score=71.0,
+                engine_id='explicit',
+                parent_ids='',
+                status='new',
+                rejection_reason='',
+            )
+            job_id = ndb.create_validation_job(
+                conn,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                check_type='adversarial',
+                status='pending',
+            )
+            conn.commit()
+            spec = nva.ValidationJobSpec(
+                job_id=job_id,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                candidate_name='Verodoma',
+                candidate_prev_state='new',
+                check_type='adversarial',
+            )
+            args = _job_args(timeout_s=0.01, max_retries=5, retry_backoff_ms=1)
+            lock = nva.InstrumentedLock()
+            semaphore = asyncio.Semaphore(1)
+            runner_calls = {'count': 0}
+
+            def _runner(_name: str, _args: argparse.Namespace) -> dict:
+                runner_calls['count'] += 1
+                time.sleep(0.05)
+                return {'status': 'pass', 'score_delta': 0.0, 'hard_fail': False, 'reason': '', 'evidence': {}}
+
+            asyncio.run(
+                nva.run_single_job(
+                    conn=conn,
+                    args=args,
+                    spec=spec,
+                    runner=_runner,
+                    db_lock=lock,
+                    semaphore=semaphore,
+                    on_complete=None,
+                )
+            )
+
+            self.assertEqual(runner_calls['count'], 1)
+            result = conn.execute(
+                """
+                SELECT status, reason
+                FROM validation_results
+                WHERE candidate_id = ? AND run_id = ? AND check_type = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (candidate_id, run_id, 'adversarial'),
+            ).fetchone()
+            self.assertEqual(result, ('error', 'validator_execution_timeout'))
+
+            job = conn.execute(
+                "SELECT status, attempt_count, last_error FROM validation_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            self.assertEqual(job[0], 'fail')
+            self.assertEqual(int(job[1]), 1)
+            self.assertIn('TimeoutError', str(job[2]))
 
     def test_instrumented_lock_reports_contention(self) -> None:
         lock = nva.InstrumentedLock()

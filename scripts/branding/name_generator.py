@@ -2068,12 +2068,12 @@ def parse_bing_results(page: str) -> list[tuple[str, str]]:
 def fetch_search_matches(query: str) -> tuple[list[tuple[str, str]], bool, str]:
     source = 'ddg'
     url = 'https://duckduckgo.com/html/?' + parse.urlencode({'q': query})
-    page = fetch_text(url, timeout=12.0, retries=2)
+    page = fetch_text(url, timeout=6.0, retries=1)
     if page is not None:
         return parse_ddg_results(page), True, source
     source = 'bing'
     url = 'https://www.bing.com/search?' + parse.urlencode({'q': query})
-    page = fetch_text(url, timeout=12.0, retries=2)
+    page = fetch_text(url, timeout=6.0, retries=1)
     if page is None:
         return [], False, ''
     return parse_bing_results(page), True, source

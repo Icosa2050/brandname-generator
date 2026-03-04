@@ -75,12 +75,12 @@ Options:
   --max-runs <n>                     Max runs per invocation (default: 1)
   --pool-size <n>                    Generator pool size (default: 400)
   --check-limit <n>                  Generator check limit (default: 80)
-  --validator-candidate-limit <n>    Validator candidate limit (default: 40)
-  --validator-expensive-limit <n>    Expensive finalist limit (default: 20)
-  --validator-concurrency <n>        Initial validator concurrency (default: 8)
-  --validator-min-concurrency <n>    Validator adaptive min concurrency (default: 4)
-  --validator-max-concurrency <n>    Validator adaptive max concurrency (default: 12)
-  --validator-timeout-s <seconds>    Validator per-check timeout (default: 6)
+  --validator-candidate-limit <n>    Validator candidate limit (default: 36 via profile=quality)
+  --validator-expensive-limit <n>    Expensive finalist limit (default: 16 via profile=quality)
+  --validator-concurrency <n>        Initial validator concurrency (default: 6 via profile=quality)
+  --validator-min-concurrency <n>    Validator adaptive min concurrency (default: 3 via profile=quality)
+  --validator-max-concurrency <n>    Validator adaptive max concurrency (default: 8 via profile=quality)
+  --validator-timeout-s <seconds>    Validator per-check timeout (default: 30 via profile=quality)
   --llm-rounds <n>                   LLM rounds per run (default: 1)
   --llm-candidates-per-round <n>     LLM candidates requested per round (default: 10)
   --llm-temperature <float>          LLM sampling temperature (default: profile-specific)
@@ -134,10 +134,10 @@ apply_profile() {
       LLM_MAX_RETRIES="1"
       VALIDATOR_CANDIDATE_LIMIT="36"
       VALIDATOR_EXPENSIVE_FINALIST_LIMIT="16"
-      VALIDATOR_TIMEOUT_S="10"
-      VALIDATOR_CONCURRENCY="12"
-      VALIDATOR_MIN_CONCURRENCY="6"
-      VALIDATOR_MAX_CONCURRENCY="18"
+      VALIDATOR_TIMEOUT_S="30"
+      VALIDATOR_CONCURRENCY="6"
+      VALIDATOR_MIN_CONCURRENCY="3"
+      VALIDATOR_MAX_CONCURRENCY="8"
       PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
       ;;
     "remote_quality")
@@ -149,10 +149,10 @@ apply_profile() {
       LLM_MAX_RETRIES="2"
       VALIDATOR_CANDIDATE_LIMIT="48"
       VALIDATOR_EXPENSIVE_FINALIST_LIMIT="24"
-      VALIDATOR_TIMEOUT_S="14"
-      VALIDATOR_CONCURRENCY="14"
-      VALIDATOR_MIN_CONCURRENCY="8"
-      VALIDATOR_MAX_CONCURRENCY="20"
+      VALIDATOR_TIMEOUT_S="30"
+      VALIDATOR_CONCURRENCY="6"
+      VALIDATOR_MIN_CONCURRENCY="3"
+      VALIDATOR_MAX_CONCURRENCY="8"
       PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
       ;;
     *)

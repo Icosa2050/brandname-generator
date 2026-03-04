@@ -210,7 +210,7 @@ def parse_args() -> argparse.Namespace:
         default='strong,consider',
         help='Comma-separated recommendations prioritized for expensive tier in v3.',
     )
-    parser.add_argument('--concurrency', type=int, default=12, help='Max concurrent jobs.')
+    parser.add_argument('--concurrency', type=int, default=6, help='Max concurrent jobs.')
     parser.add_argument(
         '--min-concurrency',
         type=int,
@@ -223,8 +223,8 @@ def parse_args() -> argparse.Namespace:
         default=24,
         help='Upper bound for adaptive concurrency scaling.',
     )
-    parser.add_argument('--max-retries', type=int, default=2, help='Retry attempts per job.')
-    parser.add_argument('--retry-backoff-ms', type=int, default=300, help='Base retry backoff (ms).')
+    parser.add_argument('--max-retries', type=int, default=1, help='Retry attempts per job.')
+    parser.add_argument('--retry-backoff-ms', type=int, default=2000, help='Base retry backoff (ms).')
     parser.add_argument('--timeout-s', type=float, default=8.0, help='Per-check timeout seconds.')
     parser.add_argument(
         '--checks',
@@ -1550,6 +1550,35 @@ async def run_single_job(
                     conn.commit()
                 if on_complete is not None:
                     await on_complete('success')
+                return
+            except asyncio.TimeoutError as exc:
+                err = f'{type(exc).__name__}: {exc}'
+                # Do not retry wait_for timeouts. The thread-backed runner may still be
+                # unwinding network I/O, and retrying here can amplify worker contention.
+                async with db_lock:
+                    ndb.add_validation_result(
+                        conn,
+                        candidate_id=spec.candidate_id,
+                        run_id=spec.run_id,
+                        check_type=spec.check_type,
+                        status='error',
+                        score_delta=-5.0,
+                        hard_fail=False,
+                        reason='validator_execution_timeout',
+                        evidence={'error': err, 'timeout_s': float(args.timeout_s)},
+                    )
+                    ndb.update_validation_job(
+                        conn,
+                        job_id=spec.job_id,
+                        status='fail',
+                        attempt_count=attempt,
+                        started_at=started_at,
+                        finished_at=ndb.now_iso(),
+                        last_error=err,
+                    )
+                    conn.commit()
+                if on_complete is not None:
+                    await on_complete('fail')
                 return
             except Exception as exc:  # noqa: BLE001
                 err = f'{type(exc).__name__}: {exc}'
