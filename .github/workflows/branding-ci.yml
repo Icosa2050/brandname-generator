@@ -143,4 +143,4 @@ jobs:
           name: branding-ci-smoke-${{ github.run_id }}
           path: /tmp/branding_ci_smoke
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 4

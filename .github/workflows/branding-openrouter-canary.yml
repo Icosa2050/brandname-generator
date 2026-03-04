@@ -155,4 +155,4 @@ jobs:
           name: branding-openrouter-canary-${{ github.run_id }}
           path: /tmp/branding_openrouter_canary
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 4
