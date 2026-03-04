@@ -1,5 +1,9 @@
 # Agent Notes
 
+## Shared Policies
+- Load and follow `/Users/bernhard/.codex/policies/second-brain.md` for second-brain memory behavior.
+- This project `AGENTS.md` may define stricter local rules; on conflict, local project rules win.
+
 ## Environment Loading (important)
 - This repo uses `.envrc` + `.env`.
 - `OPENROUTER_*` variables are **not** guaranteed to exist in plain subprocesses.
