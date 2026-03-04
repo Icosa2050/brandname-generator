@@ -1,7 +1,7 @@
 # Agent Notes
 
 ## Shared Policies
-- Load and follow `/Users/bernhard/.codex/policies/second-brain.md` for second-brain memory behavior.
+- If available, load and follow the second-brain policy from `$CODEX_POLICY_PATH` or `~/.codex/policies/second-brain.md`.
 - This project `AGENTS.md` may define stricter local rules; on conflict, local project rules win.
 
 ## Environment Loading (important)
