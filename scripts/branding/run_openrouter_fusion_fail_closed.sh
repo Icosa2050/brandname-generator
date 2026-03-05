@@ -4,9 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-QUALITY_OUT_DIR="test_outputs/branding/automation_openrouter_quality_v4"
-REMOTE_OUT_DIR="test_outputs/branding/automation_openrouter_remote_quality_v4"
-FUSED_OUT_DIR="test_outputs/branding/automation_openrouter_fused_v4"
+QUALITY_OUT_DIR="${BRANDING_AUTOMATION_QUALITY_OUT_DIR:-test_outputs/branding/automation_openrouter_quality_v4}"
+REMOTE_OUT_DIR="${BRANDING_AUTOMATION_REMOTE_OUT_DIR:-test_outputs/branding/automation_openrouter_remote_quality_v4}"
+FUSED_OUT_DIR="${BRANDING_AUTOMATION_FUSED_OUT_DIR:-test_outputs/branding/automation_openrouter_fused_v4}"
 
 if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "OPENROUTER_API_KEY is not set; refusing to run." >&2

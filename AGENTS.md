@@ -83,3 +83,13 @@
   - `git worktree list --porcelain`
   - `git branch -vv --all`
   - `git remote prune origin`
+
+## Persistent Automation Worktrees (do not remove)
+- Keep these worktrees present even during cleanup; active automations depend on them:
+  - `~/.codex/worktrees/automation-branding-fusion/brandname-generator`
+  - `~/.codex/worktrees/automation-branding-health/brandname-generator`
+- Current mapping:
+  - `branding-fusion-run` (generation lane) -> `automation-branding-fusion`
+  - `branding-fusion-run-2` (fusion lane) -> `automation-branding-fusion`
+  - `creative-run-check` (validation lane) -> `automation-branding-health`
+- Cleanup rule: never remove either path unless the linked automations are paused or re-pointed first.
