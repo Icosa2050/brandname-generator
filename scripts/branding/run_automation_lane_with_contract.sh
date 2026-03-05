@@ -1,0 +1,462 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+ARTIFACT_ROOT="${BRANDING_AUTOMATION_DATA_ROOT:-$HOME/.codex/automation-data/branding}"
+STATE_DIR="$ARTIFACT_ROOT/state"
+RUNS_DIR="$ARTIFACT_ROOT/runs"
+LOCK_DIR="$ARTIFACT_ROOT/locks"
+LOCK_FILE="$LOCK_DIR/branding_generation_queue.lock"
+SMOKE_DIR="$ARTIFACT_ROOT/smoke"
+
+WORK_DIR="$ARTIFACT_ROOT/work"
+GEN_QUALITY_OUT="$WORK_DIR/automation_openrouter_quality_v4"
+GEN_REMOTE_OUT="$WORK_DIR/automation_openrouter_remote_quality_v4"
+FUSED_OUT="$WORK_DIR/automation_openrouter_fused_v4"
+
+MAX_WAIT_S="${BRANDING_AUTOMATION_LOCK_WAIT_S:-7200}"
+POLL_S=10
+GEN_MAX_AGE_S="${BRANDING_AUTOMATION_GEN_MAX_AGE_S:-21600}"
+FUS_MAX_AGE_S="${BRANDING_AUTOMATION_FUS_MAX_AGE_S:-21600}"
+
+mkdir -p "$STATE_DIR" "$RUNS_DIR" "$LOCK_DIR" "$SMOKE_DIR" "$WORK_DIR"
+
+usage() {
+  cat <<'EOF'
+Run branding automation lanes with local artifact contracts (no git sync dependency).
+
+Usage:
+  scripts/branding/run_automation_lane_with_contract.sh --lane <generation|fusion|validation|smoke|watch>
+
+Environment:
+  BRANDING_AUTOMATION_DATA_ROOT      Artifact root (default: ~/.codex/automation-data/branding)
+  BRANDING_AUTOMATION_LOCK_WAIT_S    Lock wait timeout seconds (default: 7200)
+  BRANDING_AUTOMATION_GEN_MAX_AGE_S  Max age for generation artifacts in fusion/validation (default: 21600)
+  BRANDING_AUTOMATION_FUS_MAX_AGE_S  Max age for fusion artifacts in validation (default: 21600)
+EOF
+}
+
+lane=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lane)
+      lane="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$lane" ]]; then
+  usage
+  exit 2
+fi
+
+utc_now() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+epoch_now() {
+  date -u +%s
+}
+
+run_id_for() {
+  local lane_name="$1"
+  printf "%s_%s_%s" "$lane_name" "$(date -u +%Y%m%dT%H%M%SZ)" "$$"
+}
+
+json_get() {
+  local json_path="$1"
+  local key="$2"
+  python3 - "$json_path" "$key" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+key = sys.argv[2]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+value = data.get(key)
+if value is None:
+    sys.exit(3)
+if isinstance(value, (dict, list)):
+    print(json.dumps(value, ensure_ascii=True))
+else:
+    print(value)
+PY
+}
+
+write_manifest() {
+  local out_path="$1"
+  local lane_name="$2"
+  local run_id="$3"
+  local manifest_status="$4"
+  local started_at="$5"
+  local completed_at="$6"
+  local source_commit="$7"
+  local sync_state="$8"
+  local details_json="$9"
+  python3 - "$out_path" "$lane_name" "$run_id" "$manifest_status" "$started_at" "$completed_at" "$source_commit" "$sync_state" "$details_json" <<'PY'
+import json
+import sys
+
+out_path, lane_name, run_id, manifest_status, started_at, completed_at, source_commit, sync_state, details_json = sys.argv[1:]
+payload = {
+    "lane": lane_name,
+    "run_id": run_id,
+    "status": manifest_status,
+    "started_at": started_at,
+    "completed_at": completed_at,
+    "source_commit": source_commit,
+    "sync_state": sync_state,
+    "details": json.loads(details_json),
+}
+with open(out_path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, ensure_ascii=True)
+    fh.write("\n")
+PY
+}
+
+write_pointer() {
+  local out_path="$1"
+  local lane_name="$2"
+  local run_id="$3"
+  local manifest_path="$4"
+  local completed_at="$5"
+  local extra_json="$6"
+  local tmp_path="${out_path}.tmp.$$"
+  python3 - "$tmp_path" "$lane_name" "$run_id" "$manifest_path" "$completed_at" "$extra_json" <<'PY'
+import json
+import sys
+
+tmp_path, lane_name, run_id, manifest_path, completed_at, extra_json = sys.argv[1:]
+payload = {
+    "lane": lane_name,
+    "run_id": run_id,
+    "manifest_path": manifest_path,
+    "completed_at": completed_at,
+}
+payload.update(json.loads(extra_json))
+with open(tmp_path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, ensure_ascii=True)
+    fh.write("\n")
+PY
+  mv "$tmp_path" "$out_path"
+}
+
+acquire_lock() {
+  local start_ts elapsed
+  start_ts="$(epoch_now)"
+  while true; do
+    if (set -o noclobber; printf '1' > "$LOCK_FILE") 2>/dev/null; then
+      trap 'rm -f "$LOCK_FILE"' EXIT INT TERM
+      return 0
+    fi
+    elapsed=$(( $(epoch_now) - start_ts ))
+    if (( elapsed >= MAX_WAIT_S )); then
+      echo "lock timeout after ${elapsed}s: $LOCK_FILE" >&2
+      return 1
+    fi
+    sleep "$POLL_S"
+  done
+}
+
+read_pointer_checked() {
+  local pointer_path="$1"
+  if [[ ! -f "$pointer_path" ]]; then
+    echo "missing pointer: $pointer_path" >&2
+    return 1
+  fi
+  local manifest_path
+  manifest_path="$(json_get "$pointer_path" "manifest_path")"
+  if [[ ! -f "$manifest_path" ]]; then
+    echo "pointer manifest missing: $manifest_path" >&2
+    return 1
+  fi
+  local manifest_status
+  manifest_status="$(json_get "$manifest_path" "status")"
+  if [[ "$manifest_status" != "success" ]]; then
+    echo "upstream manifest not successful: $manifest_path (status=$manifest_status)" >&2
+    return 1
+  fi
+  echo "$manifest_path"
+}
+
+age_guard_from_manifest() {
+  local manifest_path="$1"
+  local max_age_s="$2"
+  local completed_at
+  completed_at="$(json_get "$manifest_path" "completed_at")"
+  local completed_epoch
+  completed_epoch="$(python3 - "$completed_at" <<'PY'
+import datetime
+import sys
+
+ts = sys.argv[1]
+dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+print(int(dt.timestamp()))
+PY
+)"
+  local age_s
+  age_s=$(( $(epoch_now) - completed_epoch ))
+  if (( age_s > max_age_s )); then
+    echo "artifact too old: ${age_s}s > ${max_age_s}s ($manifest_path)" >&2
+    return 1
+  fi
+}
+
+lane_generation() {
+  local started_at completed_at run_id run_dir manifest_path commit_sha
+  started_at="$(utc_now)"
+  run_id="$(run_id_for generation)"
+  run_dir="$RUNS_DIR/generation/$run_id"
+  mkdir -p "$run_dir"
+  manifest_path="$run_dir/manifest.json"
+  commit_sha="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+
+  write_manifest "$manifest_path" "generation" "$run_id" "running" "$started_at" "" "$commit_sha" "local_worktree" "{}"
+
+  acquire_lock
+
+  local quality_rc=0 remote_rc=0
+  direnv exec . zsh scripts/branding/run_openrouter_lane.sh --profile quality --lane 0 --shard-count 1 --bundle-a --max-runs 1 --no-live-progress --post-rank-top-n 30 --out-dir "$GEN_QUALITY_OUT" || quality_rc=$?
+  direnv exec . zsh scripts/branding/run_openrouter_lane.sh --profile remote_quality --lane 0 --shard-count 1 --bundle-a --max-runs 1 --no-live-progress --post-rank-top-n 30 --out-dir "$GEN_REMOTE_OUT" || remote_rc=$?
+
+  completed_at="$(utc_now)"
+  if [[ "$quality_rc" -ne 0 || "$remote_rc" -ne 0 ]]; then
+    write_manifest "$manifest_path" "generation" "$run_id" "failed" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"quality_rc\": $quality_rc, \"remote_quality_rc\": $remote_rc}"
+    echo "generation failed: quality_rc=$quality_rc remote_quality_rc=$remote_rc" >&2
+    return 1
+  fi
+
+  write_manifest "$manifest_path" "generation" "$run_id" "success" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"quality_out_dir\": \"$GEN_QUALITY_OUT\", \"remote_quality_out_dir\": \"$GEN_REMOTE_OUT\"}"
+  write_pointer "$STATE_DIR/latest_generation.json" "generation" "$run_id" "$manifest_path" "$completed_at" "{}"
+  echo "generation_success run_id=$run_id manifest=$manifest_path"
+}
+
+lane_fusion() {
+  local started_at completed_at run_id run_dir manifest_path commit_sha
+  started_at="$(utc_now)"
+  run_id="$(run_id_for fusion)"
+  run_dir="$RUNS_DIR/fusion/$run_id"
+  mkdir -p "$run_dir"
+  manifest_path="$run_dir/manifest.json"
+  commit_sha="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+
+  write_manifest "$manifest_path" "fusion" "$run_id" "running" "$started_at" "" "$commit_sha" "local_worktree" "{}"
+
+  local gen_manifest
+  gen_manifest="$(read_pointer_checked "$STATE_DIR/latest_generation.json")"
+  age_guard_from_manifest "$gen_manifest" "$GEN_MAX_AGE_S"
+  local consumed_generation_run_id
+  consumed_generation_run_id="$(json_get "$gen_manifest" "run_id")"
+
+  acquire_lock
+
+  local fusion_rc=0
+  BRANDING_AUTOMATION_QUALITY_OUT_DIR="$GEN_QUALITY_OUT" \
+  BRANDING_AUTOMATION_REMOTE_OUT_DIR="$GEN_REMOTE_OUT" \
+  BRANDING_AUTOMATION_FUSED_OUT_DIR="$FUSED_OUT" \
+    direnv exec . zsh scripts/branding/run_openrouter_fusion_fail_closed.sh || fusion_rc=$?
+
+  completed_at="$(utc_now)"
+  if [[ "$fusion_rc" -ne 0 ]]; then
+    write_manifest "$manifest_path" "fusion" "$run_id" "failed" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"fusion_rc\": $fusion_rc, \"consumed_generation_run_id\": \"$consumed_generation_run_id\"}"
+    echo "fusion failed rc=$fusion_rc" >&2
+    return 1
+  fi
+
+  write_manifest "$manifest_path" "fusion" "$run_id" "success" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"fused_out_dir\": \"$FUSED_OUT\", \"consumed_generation_run_id\": \"$consumed_generation_run_id\"}"
+  write_pointer "$STATE_DIR/latest_fusion.json" "fusion" "$run_id" "$manifest_path" "$completed_at" "{\"consumed_generation_run_id\": \"$consumed_generation_run_id\"}"
+  echo "fusion_success run_id=$run_id manifest=$manifest_path"
+}
+
+lane_validation() {
+  local started_at completed_at run_id run_dir manifest_path provenance_path commit_sha
+  started_at="$(utc_now)"
+  run_id="$(run_id_for validation)"
+  run_dir="$RUNS_DIR/validation/$run_id"
+  mkdir -p "$run_dir"
+  manifest_path="$run_dir/manifest.json"
+  provenance_path="$run_dir/provenance.json"
+  commit_sha="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+
+  write_manifest "$manifest_path" "validation" "$run_id" "running" "$started_at" "" "$commit_sha" "local_worktree" "{}"
+
+  local gen_manifest fus_manifest
+  gen_manifest="$(read_pointer_checked "$STATE_DIR/latest_generation.json")"
+  fus_manifest="$(read_pointer_checked "$STATE_DIR/latest_fusion.json")"
+  age_guard_from_manifest "$gen_manifest" "$GEN_MAX_AGE_S"
+  age_guard_from_manifest "$fus_manifest" "$FUS_MAX_AGE_S"
+
+  local consumed_generation_run_id consumed_fusion_run_id
+  consumed_generation_run_id="$(json_get "$gen_manifest" "run_id")"
+  consumed_fusion_run_id="$(json_get "$fus_manifest" "run_id")"
+
+  python3 - "$provenance_path" "$consumed_generation_run_id" "$consumed_fusion_run_id" <<'PY'
+import json
+import sys
+
+out_path, gen_run, fus_run = sys.argv[1:]
+payload = {"consumed_generation_run_id": gen_run, "consumed_fusion_run_id": fus_run}
+with open(out_path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, indent=2, ensure_ascii=True)
+    fh.write("\n")
+PY
+
+  acquire_lock
+
+  local q_health_rc=0 r_health_rc=0 q_report_rc=0 r_report_rc=0
+  direnv exec . python3 scripts/branding/check_campaign_health.py --out-dir "$GEN_QUALITY_OUT" || q_health_rc=$?
+  direnv exec . python3 scripts/branding/check_campaign_health.py --out-dir "$GEN_REMOTE_OUT" || r_health_rc=$?
+  direnv exec . zsh scripts/branding/report_campaign_progress.sh --out-dir "$GEN_QUALITY_OUT" --top-n 20 || q_report_rc=$?
+  direnv exec . zsh scripts/branding/report_campaign_progress.sh --out-dir "$GEN_REMOTE_OUT" --top-n 20 || r_report_rc=$?
+
+  completed_at="$(utc_now)"
+  local fatal=0
+  if [[ "$q_report_rc" -ne 0 || "$r_report_rc" -ne 0 ]]; then
+    fatal=1
+  fi
+  if [[ "$q_health_rc" -ne 0 && "$q_health_rc" -ne 3 ]]; then
+    fatal=1
+  fi
+  if [[ "$r_health_rc" -ne 0 && "$r_health_rc" -ne 3 ]]; then
+    fatal=1
+  fi
+
+  if [[ "$fatal" -ne 0 ]]; then
+    write_manifest "$manifest_path" "validation" "$run_id" "failed" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"q_health_rc\": $q_health_rc, \"r_health_rc\": $r_health_rc, \"q_report_rc\": $q_report_rc, \"r_report_rc\": $r_report_rc, \"provenance\": \"$provenance_path\"}"
+    echo "validation failed: qh=$q_health_rc rh=$r_health_rc qr=$q_report_rc rr=$r_report_rc" >&2
+    return 1
+  fi
+
+  local health_state="healthy"
+  if [[ "$q_health_rc" -eq 3 || "$r_health_rc" -eq 3 ]]; then
+    health_state="warning_unhealthy_campaign"
+  fi
+  write_manifest "$manifest_path" "validation" "$run_id" "success" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"q_health_rc\": $q_health_rc, \"r_health_rc\": $r_health_rc, \"q_report_rc\": $q_report_rc, \"r_report_rc\": $r_report_rc, \"health_state\": \"$health_state\", \"provenance\": \"$provenance_path\"}"
+  echo "validation_success run_id=$run_id manifest=$manifest_path provenance=$provenance_path"
+}
+
+lane_smoke() {
+  local ts report
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  report="$SMOKE_DIR/smoke_${ts}.txt"
+  {
+    echo "timestamp=$(utc_now)"
+    echo "root=$ROOT_DIR"
+    echo "artifact_root=$ARTIFACT_ROOT"
+
+    rm -f "$LOCK_FILE"
+    if (set -o noclobber; printf '1' > "$LOCK_FILE") 2>/dev/null; then
+      echo "lock_create=ok"
+    else
+      echo "lock_create=fail"
+    fi
+    rm -f "$LOCK_FILE"
+    echo "lock_cleanup=$( [[ ! -e "$LOCK_FILE" ]] && echo ok || echo fail )"
+
+    echo "syntax_lane=$(zsh -n scripts/branding/run_openrouter_lane.sh >/dev/null 2>&1 && echo ok || echo fail)"
+    echo "syntax_fusion=$(zsh -n scripts/branding/run_openrouter_fusion_fail_closed.sh >/dev/null 2>&1 && echo ok || echo fail)"
+    echo "syntax_contract_runner=$(zsh -n scripts/branding/run_automation_lane_with_contract.sh >/dev/null 2>&1 && echo ok || echo fail)"
+
+    local http_models
+    http_models="$(direnv exec . python3 - <<'PY'
+import os
+import urllib.request
+
+key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+if not key:
+    print("missing_key")
+    raise SystemExit(0)
+request = urllib.request.Request(
+    "https://openrouter.ai/api/v1/models",
+    headers={"Authorization": f"Bearer {key}"},
+)
+try:
+    with urllib.request.urlopen(request, timeout=20) as response:
+        print(response.status)
+except Exception:
+    print("error")
+PY
+)"
+    echo "openrouter_models_http=${http_models:-none}"
+  } | tee "$report"
+  echo "smoke_report=$report"
+}
+
+lane_watch() {
+  local gen_ptr="$STATE_DIR/latest_generation.json"
+  local fus_ptr="$STATE_DIR/latest_fusion.json"
+  echo "watch_timestamp=$(utc_now)"
+  echo "artifact_root=$ARTIFACT_ROOT"
+  local missing=0
+  for ptr in "$gen_ptr" "$fus_ptr"; do
+    if [[ ! -f "$ptr" ]]; then
+      echo "missing_pointer=$ptr"
+      missing=1
+      continue
+    fi
+    echo "pointer=$ptr"
+    cat "$ptr"
+    local manifest
+    manifest="$(json_get "$ptr" "manifest_path")" || manifest=""
+    if [[ -z "$manifest" || ! -f "$manifest" ]]; then
+      echo "missing_manifest_for_pointer=$ptr"
+      missing=1
+      continue
+    fi
+    local manifest_status completed_at
+    manifest_status="$(json_get "$manifest" "status")"
+    completed_at="$(json_get "$manifest" "completed_at")"
+    local age_s
+    age_s="$(python3 - "$completed_at" <<'PY'
+import datetime
+import sys
+dt = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+now = datetime.datetime.now(datetime.timezone.utc)
+print(int((now - dt).total_seconds()))
+PY
+)"
+    echo "manifest=$manifest status=$manifest_status age_s=$age_s"
+    if [[ "$manifest_status" != "success" ]]; then
+      missing=1
+    fi
+  done
+  if [[ "$missing" -ne 0 ]]; then
+    return 1
+  fi
+}
+
+case "$lane" in
+  generation)
+    lane_generation
+    ;;
+  fusion)
+    lane_fusion
+    ;;
+  validation)
+    lane_validation
+    ;;
+  smoke)
+    lane_smoke
+    ;;
+  watch)
+    lane_watch
+    ;;
+  *)
+    echo "Invalid lane: $lane" >&2
+    usage
+    exit 2
+    ;;
+esac

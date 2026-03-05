@@ -20,6 +20,19 @@ direnv exec . env | rg OPENROUTER
 
 Important: run commands that need remote access via `direnv exec . <command>`.
 
+## Automation Worktrees (protected)
+The recurring branding automations currently run from dedicated Codex worktrees.
+Do not remove these paths during routine worktree cleanup:
+- `/Users/bernhard/.codex/worktrees/automation-branding-fusion/brandname-generator`
+- `/Users/bernhard/.codex/worktrees/automation-branding-health/brandname-generator`
+
+Current automation mapping:
+- `branding-fusion-run` (generation lane): `automation-branding-fusion`
+- `branding-fusion-run-2` (fusion lane): `automation-branding-fusion`
+- `creative-run-check` (validation lane): `automation-branding-health`
+
+If you need to reclaim them, pause or reconfigure the automations first.
+
 ## Python Setup (recommended)
 Use Python 3.11+ and a local virtual environment:
 
