@@ -228,9 +228,18 @@ lane_generation() {
 
   acquire_lock
 
-  local quality_rc=0 remote_rc=0
-  direnv exec . zsh scripts/branding/run_openrouter_lane.sh --profile quality --lane 0 --shard-count 1 --bundle-a --max-runs 1 --no-live-progress --post-rank-top-n 30 --out-dir "$GEN_QUALITY_OUT" || quality_rc=$?
-  direnv exec . zsh scripts/branding/run_openrouter_lane.sh --profile remote_quality --lane 0 --shard-count 1 --bundle-a --max-runs 1 --no-live-progress --post-rank-top-n 30 --out-dir "$GEN_REMOTE_OUT" || remote_rc=$?
+  local quality_rc=0 remote_rc=0 quality_pid remote_pid
+  direnv exec . zsh scripts/branding/run_openrouter_lane.sh --profile quality --lane 0 --shard-count 1 --bundle-a --max-runs 1 --no-live-progress --post-rank-top-n 30 --out-dir "$GEN_QUALITY_OUT" &
+  quality_pid=$!
+  direnv exec . zsh scripts/branding/run_openrouter_lane.sh --profile remote_quality --lane 0 --shard-count 1 --bundle-a --max-runs 1 --no-live-progress --post-rank-top-n 30 --out-dir "$GEN_REMOTE_OUT" &
+  remote_pid=$!
+
+  set +e
+  wait "$quality_pid"
+  quality_rc=$?
+  wait "$remote_pid"
+  remote_rc=$?
+  set -e
 
   completed_at="$(utc_now)"
   if [[ "$quality_rc" -ne 0 || "$remote_rc" -ne 0 ]]; then
@@ -316,11 +325,47 @@ PY
 
   acquire_lock
 
-  local q_health_rc=0 r_health_rc=0 q_report_rc=0 r_report_rc=0
+  local fused_out_dir
+  fused_out_dir="$(python3 - "$fus_manifest" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+print((data.get("details") or {}).get("fused_out_dir", ""))
+PY
+)"
+  if [[ -z "$fused_out_dir" ]]; then
+    echo "missing fused_out_dir in fusion manifest: $fus_manifest" >&2
+    return 1
+  fi
+
+  local q_health_rc=0 r_health_rc=0 q_report_rc=0 r_report_rc=0 fused_integrity_rc=0
   direnv exec . python3 scripts/branding/check_campaign_health.py --out-dir "$GEN_QUALITY_OUT" || q_health_rc=$?
   direnv exec . python3 scripts/branding/check_campaign_health.py --out-dir "$GEN_REMOTE_OUT" || r_health_rc=$?
   direnv exec . zsh scripts/branding/report_campaign_progress.sh --out-dir "$GEN_QUALITY_OUT" --top-n 20 || q_report_rc=$?
   direnv exec . zsh scripts/branding/report_campaign_progress.sh --out-dir "$GEN_REMOTE_OUT" --top-n 20 || r_report_rc=$?
+  python3 - "$fused_out_dir/postrank/fused_quality_remote_rank.csv" "$fused_out_dir/postrank/fused_quality_remote_summary.json" <<'PY' || fused_integrity_rc=$?
+import csv
+import json
+import os
+import sys
+
+rank_csv, summary_json = sys.argv[1], sys.argv[2]
+if not os.path.isfile(rank_csv):
+    raise SystemExit(2)
+if not os.path.isfile(summary_json):
+    raise SystemExit(3)
+with open(rank_csv, "r", encoding="utf-8", newline="") as fh:
+    rows = list(csv.DictReader(fh))
+if not rows:
+    raise SystemExit(4)
+with open(summary_json, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+if not isinstance(payload, dict):
+    raise SystemExit(5)
+print(f"fused_integrity_ok rows={len(rows)} rank_csv={rank_csv}")
+PY
 
   completed_at="$(utc_now)"
   local fatal=0
@@ -333,10 +378,13 @@ PY
   if [[ "$r_health_rc" -ne 0 && "$r_health_rc" -ne 3 ]]; then
     fatal=1
   fi
+  if [[ "$fused_integrity_rc" -ne 0 ]]; then
+    fatal=1
+  fi
 
   if [[ "$fatal" -ne 0 ]]; then
-    write_manifest "$manifest_path" "validation" "$run_id" "failed" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"q_health_rc\": $q_health_rc, \"r_health_rc\": $r_health_rc, \"q_report_rc\": $q_report_rc, \"r_report_rc\": $r_report_rc, \"provenance\": \"$provenance_path\"}"
-    echo "validation failed: qh=$q_health_rc rh=$r_health_rc qr=$q_report_rc rr=$r_report_rc" >&2
+    write_manifest "$manifest_path" "validation" "$run_id" "failed" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"q_health_rc\": $q_health_rc, \"r_health_rc\": $r_health_rc, \"q_report_rc\": $q_report_rc, \"r_report_rc\": $r_report_rc, \"fused_integrity_rc\": $fused_integrity_rc, \"fused_out_dir\": \"$fused_out_dir\", \"provenance\": \"$provenance_path\"}"
+    echo "validation failed: qh=$q_health_rc rh=$r_health_rc qr=$q_report_rc rr=$r_report_rc fi=$fused_integrity_rc" >&2
     return 1
   fi
 
@@ -344,27 +392,28 @@ PY
   if [[ "$q_health_rc" -eq 3 || "$r_health_rc" -eq 3 ]]; then
     health_state="warning_unhealthy_campaign"
   fi
-  write_manifest "$manifest_path" "validation" "$run_id" "success" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"q_health_rc\": $q_health_rc, \"r_health_rc\": $r_health_rc, \"q_report_rc\": $q_report_rc, \"r_report_rc\": $r_report_rc, \"health_state\": \"$health_state\", \"provenance\": \"$provenance_path\"}"
+  write_manifest "$manifest_path" "validation" "$run_id" "success" "$started_at" "$completed_at" "$commit_sha" "local_worktree" "{\"q_health_rc\": $q_health_rc, \"r_health_rc\": $r_health_rc, \"q_report_rc\": $q_report_rc, \"r_report_rc\": $r_report_rc, \"fused_integrity_rc\": $fused_integrity_rc, \"fused_out_dir\": \"$fused_out_dir\", \"health_state\": \"$health_state\", \"provenance\": \"$provenance_path\"}"
   echo "validation_success run_id=$run_id manifest=$manifest_path provenance=$provenance_path"
 }
 
 lane_smoke() {
-  local ts report
+  local ts report smoke_lock_file
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   report="$SMOKE_DIR/smoke_${ts}.txt"
+  smoke_lock_file="$LOCK_DIR/branding_generation_queue_smoke.lock"
   {
     echo "timestamp=$(utc_now)"
     echo "root=$ROOT_DIR"
     echo "artifact_root=$ARTIFACT_ROOT"
 
-    rm -f "$LOCK_FILE"
-    if (set -o noclobber; printf '1' > "$LOCK_FILE") 2>/dev/null; then
+    rm -f "$smoke_lock_file"
+    if (set -o noclobber; printf '1' > "$smoke_lock_file") 2>/dev/null; then
       echo "lock_create=ok"
     else
       echo "lock_create=fail"
     fi
-    rm -f "$LOCK_FILE"
-    echo "lock_cleanup=$( [[ ! -e "$LOCK_FILE" ]] && echo ok || echo fail )"
+    rm -f "$smoke_lock_file"
+    echo "lock_cleanup=$( [[ ! -e "$smoke_lock_file" ]] && echo ok || echo fail )"
 
     echo "syntax_lane=$(zsh -n scripts/branding/run_openrouter_lane.sh >/dev/null 2>&1 && echo ok || echo fail)"
     echo "syntax_fusion=$(zsh -n scripts/branding/run_openrouter_fusion_fail_closed.sh >/dev/null 2>&1 && echo ok || echo fail)"

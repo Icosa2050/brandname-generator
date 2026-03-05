@@ -86,8 +86,8 @@
 
 ## Persistent Automation Worktrees (do not remove)
 - Keep these worktrees present even during cleanup; active automations depend on them:
-  - `/Users/bernhard/.codex/worktrees/automation-branding-fusion/brandname-generator`
-  - `/Users/bernhard/.codex/worktrees/automation-branding-health/brandname-generator`
+  - `~/.codex/worktrees/automation-branding-fusion/brandname-generator`
+  - `~/.codex/worktrees/automation-branding-health/brandname-generator`
 - Current mapping:
   - `branding-fusion-run` (generation lane) -> `automation-branding-fusion`
   - `branding-fusion-run-2` (fusion lane) -> `automation-branding-fusion`
