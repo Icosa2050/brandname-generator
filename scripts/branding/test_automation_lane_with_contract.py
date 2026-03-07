@@ -35,9 +35,9 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
         fake_direnv.chmod(0o755)
         return fake_bin
 
-    def _run_watch(self, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    def _run_validation_probe(self, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["zsh", str(self.script), "--lane", "watch"],
+            ["zsh", str(self.script), "--lane", "validation"],
             cwd=self.repo_root,
             capture_output=True,
             text=True,
@@ -62,10 +62,10 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
             env["BRANDING_AUTOMATION_DOTENV_FILE"] = str(dotenv_file)
             env.pop("BRANDING_AUTOMATION_REQUIRE_DIRENV", None)
 
-            proc = self._run_watch(env)
+            proc = self._run_validation_probe(env)
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("warning: direnv allow failed; falling back to dotenv (.env)", proc.stderr)
-            self.assertIn("missing_pointer=", proc.stdout)
+            self.assertIn("missing pointer:", proc.stderr)
 
     def test_dotenv_mode_does_not_call_direnv(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -83,10 +83,10 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "dotenv"
             env["BRANDING_AUTOMATION_DOTENV_FILE"] = str(dotenv_file)
 
-            proc = self._run_watch(env)
+            proc = self._run_validation_probe(env)
             self.assertNotEqual(proc.returncode, 0)
             self.assertNotIn("direnv should not be called", proc.stderr)
-            self.assertIn("missing_pointer=", proc.stdout)
+            self.assertIn("missing pointer:", proc.stderr)
 
     def test_auto_mode_honors_require_direnv_strict_failure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -102,10 +102,10 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "auto"
             env["BRANDING_AUTOMATION_REQUIRE_DIRENV"] = "1"
 
-            proc = self._run_watch(env)
+            proc = self._run_validation_probe(env)
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("direnv allow failed and BRANDING_AUTOMATION_REQUIRE_DIRENV=1", proc.stderr)
-            self.assertNotIn("missing_pointer=", proc.stdout)
+            self.assertNotIn("missing pointer:", proc.stderr)
 
     def test_none_mode_skips_direnv_and_dotenv(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -120,11 +120,11 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "none"
 
-            proc = self._run_watch(env)
+            proc = self._run_validation_probe(env)
             self.assertNotEqual(proc.returncode, 0)
             self.assertNotIn("direnv should not be called", proc.stderr)
             self.assertNotIn("dotenv fallback requested but missing file", proc.stderr)
-            self.assertIn("missing_pointer=", proc.stdout)
+            self.assertIn("missing pointer:", proc.stderr)
 
     def test_default_mode_is_none(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -139,11 +139,11 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env.pop("BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE", None)
 
-            proc = self._run_watch(env)
+            proc = self._run_validation_probe(env)
             self.assertNotEqual(proc.returncode, 0)
             self.assertNotIn("direnv should not be called", proc.stderr)
             self.assertNotIn("dotenv fallback requested but missing file", proc.stderr)
-            self.assertIn("missing_pointer=", proc.stdout)
+            self.assertIn("missing pointer:", proc.stderr)
 
 
 if __name__ == "__main__":
