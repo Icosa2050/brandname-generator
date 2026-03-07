@@ -115,6 +115,10 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(args.web_google_top, 9)
         self.assertEqual(args.tm_registry_top, 14)
         self.assertEqual(args.policy_version, 'policy_x')
+        with mock.patch.dict('os.environ', {'OPENROUTER_GOOGLE_CSE_API_KEY': 'key_from_env'}, clear=False):
+            with mock.patch('sys.argv', ['naming_validate_async.py']):
+                args = nva.parse_args()
+        self.assertEqual(args.web_google_cse_api_key, 'key_from_env')
 
     def test_policy_signature_is_stable(self) -> None:
         args = _base_args()
@@ -764,6 +768,40 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(got['status'], 'warn')
         self.assertFalse(got['hard_fail'])
         self.assertEqual(got['reason'], 'web_google_near_warning')
+
+    def test_web_google_like_signal_uses_first_non_social_hit(self) -> None:
+        args = _base_args()
+        args.timeout_s = 8.0
+        with mock.patch(
+            'naming_validate_async._google_cse_search',
+            side_effect=[
+                ([], True, 'google_cse'),
+                (
+                    [
+                        ('https://x.com/metronis', 'metronis on x'),
+                        ('https://www.metronis-technologies.de/', 'Metronis Technologies'),
+                        ('https://example.com/unrelated', 'unrelated'),
+                    ],
+                    True,
+                    'google_cse',
+                ),
+            ],
+        ):
+            signal = nva.web_google_like_signal('metronis', args)
+        self.assertTrue(bool(signal.get('ok')))
+        self.assertEqual(signal.get('first_hit_url'), 'https://www.metronis-technologies.de/')
+        self.assertTrue(bool(signal.get('first_hit_exact')))
+
+    def test_tm_registry_global_signal_does_not_require_name_generator_probe_symbol(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.ng.fetch_search_matches',
+            return_value=([('https://registry.example/metronis', 'METRONIS')], True, 'ddg'),
+        ):
+            signal = nva.tm_registry_global_signal('metronis', args)
+        self.assertTrue(bool(signal.get('ok')))
+        self.assertEqual(int(signal.get('source_count', 0)), 5)
+        self.assertGreaterEqual(int(signal.get('exact_hits_total', 0)), 1)
 
     def test_check_tm_registry_global_exact_is_hard_fail(self) -> None:
         args = _base_args()
