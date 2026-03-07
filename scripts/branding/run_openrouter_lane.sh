@@ -489,18 +489,8 @@ CMD=(
 if (( NO_EXTERNAL_CHECKS )); then
   CMD+=(--generator-no-external-checks)
 fi
-if [[ -n "${OPENROUTER_GOOGLE_CSE_API_KEY:-}" ]]; then
-  CMD+=(--web-google-cse-api-key "${OPENROUTER_GOOGLE_CSE_API_KEY}")
-fi
-if [[ -n "${OPENROUTER_GOOGLE_CSE_CX:-}" ]]; then
-  CMD+=(--web-google-cse-cx "${OPENROUTER_GOOGLE_CSE_CX}")
-fi
-if [[ -n "${OPENROUTER_GOOGLE_CSE_GL:-}" ]]; then
-  CMD+=(--web-google-gl "${OPENROUTER_GOOGLE_CSE_GL}")
-fi
-if [[ -n "${OPENROUTER_GOOGLE_CSE_HL:-}" ]]; then
-  CMD+=(--web-google-hl "${OPENROUTER_GOOGLE_CSE_HL}")
-fi
+# Keep Google CSE settings in environment so secrets are not exposed in argv/logs.
+# naming_validate_async reads OPENROUTER_GOOGLE_CSE_API_KEY / OPENROUTER_GOOGLE_CSE_CX directly.
 if [[ -n "${PROMPT_TEMPLATE_FILE:-}" ]]; then
   CMD+=(--llm-prompt-template-file "$PROMPT_TEMPLATE_FILE")
 fi

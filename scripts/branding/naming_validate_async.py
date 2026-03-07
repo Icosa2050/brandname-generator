@@ -18,6 +18,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
@@ -386,12 +387,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--web-google-cse-api-key',
-        default='',
-        help='Google Programmable Search API key (optional; falls back to generic search if unset).',
+        default=str(os.environ.get('OPENROUTER_GOOGLE_CSE_API_KEY', '')),
+        help='Google Programmable Search API key (optional; if unset, OPENROUTER_GOOGLE_CSE_API_KEY is used when present).',
     )
     parser.add_argument(
         '--web-google-cse-cx',
-        default='',
+        default=str(os.environ.get('OPENROUTER_GOOGLE_CSE_CX', '')),
         help='Google Programmable Search engine id (cx).',
     )
     parser.add_argument(
@@ -991,6 +992,7 @@ def _google_cse_search(
     top_n: int,
     gl: str,
     hl: str,
+    timeout_s: float,
 ) -> tuple[list[tuple[str, str]], bool, str]:
     token = str(api_key or '').strip()
     engine = str(cx or '').strip()
@@ -1009,8 +1011,9 @@ def _google_cse_search(
         params['hl'] = str(hl).strip().lower()
     url = 'https://customsearch.googleapis.com/customsearch/v1?' + parse.urlencode(params)
     req = request.Request(url, headers={'User-Agent': 'brandname-generator-validator/1.0'})
+    request_timeout = max(1.0, min(8.0, float(timeout_s)))
     try:
-        with request.urlopen(req, timeout=8.0) as resp:
+        with request.urlopen(req, timeout=request_timeout) as resp:
             payload = json.loads(resp.read().decode('utf-8', errors='replace'))
     except Exception:
         return [], False, 'google_cse_error'
@@ -1044,6 +1047,7 @@ def web_google_like_signal(name: str, args: argparse.Namespace) -> dict[str, obj
     cx = str(getattr(args, 'web_google_cse_cx', '') or '').strip()
     gl = str(getattr(args, 'web_google_gl', 'de') or 'de')
     hl = str(getattr(args, 'web_google_hl', 'en') or 'en')
+    timeout_s = max(1.0, float(getattr(args, 'timeout_s', 8.0)))
 
     quoted_matches, quoted_ok, quoted_source = _google_cse_search(
         query=f'"{name}"',
@@ -1052,6 +1056,7 @@ def web_google_like_signal(name: str, args: argparse.Namespace) -> dict[str, obj
         top_n=top_n,
         gl=gl,
         hl=hl,
+        timeout_s=timeout_s,
     )
     plain_matches, plain_ok, plain_source = _google_cse_search(
         query=name,
@@ -1060,6 +1065,7 @@ def web_google_like_signal(name: str, args: argparse.Namespace) -> dict[str, obj
         top_n=top_n,
         gl=gl,
         hl=hl,
+        timeout_s=timeout_s,
     )
     provider = 'google_cse'
 
@@ -1101,15 +1107,14 @@ def web_google_like_signal(name: str, args: argparse.Namespace) -> dict[str, obj
     first_hit_url = ''
     first_hit_title = ''
 
-    for idx, (href, raw_title) in enumerate(plain_slice):
+    for href, raw_title in plain_slice:
         domain = ng.extract_result_domain(href)
         if ng.is_social_profile_domain(domain):
             continue
         first_hit_url = str(href or '')
         first_hit_title = str(raw_title or '')
         first_hit_exact = _full_token_in_url(name, first_hit_url)
-        if idx == 0:
-            break
+        break
 
     for href, raw_title in quoted_slice + plain_slice:
         domain = ng.extract_result_domain(href)
@@ -1181,12 +1186,44 @@ def tm_registry_global_signal(name: str, args: argparse.Namespace) -> dict[str, 
     result_total = 0
     ok_count = 0
 
+    def _probe_registry(site_query: str) -> tuple[int, int, int, str, bool, str]:
+        query = f'site:{site_query} "{name}"'
+        matches, ok, source = ng.fetch_search_matches(query)
+        if not ok:
+            return -1, -1, -1, '', False, ''
+        exact_hits = 0
+        near_hits = 0
+        sample_domains: list[str] = []
+        seen_domains: set[str] = set()
+        for href, raw_title in matches[:top_n]:
+            title = re.sub(r'<[^>]+>', ' ', str(raw_title or '')).strip().lower()
+            title_norm = ng.normalize_alpha(title)
+            is_exact = bool(
+                title_norm == name
+                or re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title)
+            )
+            is_near = False
+            if not is_exact:
+                tokens = set(re.findall(r'[a-z]{4,}', title))
+                for token in tokens:
+                    if token == name:
+                        continue
+                    ratio = ng.similarity_with_prefix_boost(token, name)
+                    if ratio >= 0.86 and abs(len(token) - len(name)) <= 2:
+                        is_near = True
+                        break
+            if is_exact:
+                exact_hits += 1
+            elif is_near:
+                near_hits += 1
+            domain = ng.extract_result_domain(href)
+            if domain and domain not in seen_domains and len(sample_domains) < 4:
+                seen_domains.add(domain)
+                sample_domains.append(domain)
+        return exact_hits, near_hits, len(matches), ';'.join(sample_domains), True, source
+
     for label, site_query in sources.items():
-        exact_hits, near_hits, result_count, sample_domains, ok, source = ng.probe_registry_signal(
-            name,
-            site_query=site_query,
-            top_n=top_n,
-        )
+        exact_hits, near_hits, result_count, sample_domains, ok, source = _probe_registry(site_query)
         registry[label] = {
             'site_query': site_query,
             'exact_hits': int(exact_hits),
