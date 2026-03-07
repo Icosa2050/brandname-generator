@@ -49,6 +49,8 @@ DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS = [
     'company_cheap',
     'domain',
     'web',
+    'web_google_like',
+    'tm_registry_global',
     'app_store',
     'package',
     'social',

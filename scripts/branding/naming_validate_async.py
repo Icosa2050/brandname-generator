@@ -25,6 +25,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
+from urllib import parse, request
 
 import name_generator as ng
 import naming_db as ndb
@@ -228,7 +229,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--timeout-s', type=float, default=8.0, help='Per-check timeout seconds.')
     parser.add_argument(
         '--checks',
-        default='adversarial,psych,descriptive,tm_cheap,company_cheap',
+        default='adversarial,psych,descriptive,tm_cheap,company_cheap,web_google_like,tm_registry_global',
         help='Comma-separated check types to execute.',
     )
     parser.add_argument(
@@ -335,6 +336,110 @@ def parse_args() -> argparse.Namespace:
         help='Hard-fail only when exact web collisions appear on this many distinct non-social domains.',
     )
     parser.add_argument('--web-near-fail-threshold', type=int, default=2)
+    parser.add_argument(
+        '--web-google-like-enabled',
+        dest='web_google_like_enabled',
+        action='store_true',
+        default=True,
+        help='Enable Google-like web collision check (API first, search fallback).',
+    )
+    parser.add_argument(
+        '--no-web-google-like-enabled',
+        dest='web_google_like_enabled',
+        action='store_false',
+    )
+    parser.add_argument(
+        '--web-google-top',
+        type=int,
+        default=10,
+        help='Top-N search results to inspect for Google-like web collision.',
+    )
+    parser.add_argument(
+        '--web-google-exact-domain-fail-threshold',
+        type=int,
+        default=1,
+        help='Hard-fail when this many exact URL/domain collisions are found in Google-like check.',
+    )
+    parser.add_argument(
+        '--web-google-near-fail-threshold',
+        type=int,
+        default=3,
+        help='Fail when near-collision hits in Google-like check reach this threshold.',
+    )
+    parser.add_argument(
+        '--web-google-near-warn-threshold',
+        type=int,
+        default=1,
+        help='Warn when near-collision hits in Google-like check reach this threshold.',
+    )
+    parser.add_argument(
+        '--web-google-first-hit-hard-fail',
+        dest='web_google_first_hit_hard_fail',
+        action='store_true',
+        default=True,
+        help='Hard-fail when the first non-social hit URL contains the full candidate token.',
+    )
+    parser.add_argument(
+        '--no-web-google-first-hit-hard-fail',
+        dest='web_google_first_hit_hard_fail',
+        action='store_false',
+    )
+    parser.add_argument(
+        '--web-google-cse-api-key',
+        default='',
+        help='Google Programmable Search API key (optional; falls back to generic search if unset).',
+    )
+    parser.add_argument(
+        '--web-google-cse-cx',
+        default='',
+        help='Google Programmable Search engine id (cx).',
+    )
+    parser.add_argument(
+        '--web-google-gl',
+        default='de',
+        help='Google search geolocation country code (gl).',
+    )
+    parser.add_argument(
+        '--web-google-hl',
+        default='en',
+        help='Google search UI language hint (hl).',
+    )
+    parser.add_argument(
+        '--tm-registry-global-enabled',
+        dest='tm_registry_global_enabled',
+        action='store_true',
+        default=True,
+        help='Enable aggregated global trademark registry collision check.',
+    )
+    parser.add_argument(
+        '--no-tm-registry-global-enabled',
+        dest='tm_registry_global_enabled',
+        action='store_false',
+    )
+    parser.add_argument(
+        '--tm-registry-top',
+        type=int,
+        default=12,
+        help='Top-N registry search hits inspected per registry source.',
+    )
+    parser.add_argument(
+        '--tm-registry-exact-fail-threshold',
+        type=int,
+        default=1,
+        help='Hard-fail when aggregated exact registry hits reach this threshold.',
+    )
+    parser.add_argument(
+        '--tm-registry-near-fail-threshold',
+        type=int,
+        default=10,
+        help='Fail when aggregated near registry hits reach this threshold.',
+    )
+    parser.add_argument(
+        '--tm-registry-near-warn-threshold',
+        type=int,
+        default=4,
+        help='Warn when aggregated near registry hits reach this threshold.',
+    )
     parser.add_argument('--store-countries', default='de,ch,us')
     parser.add_argument('--social-unavailable-fail-threshold', type=int, default=3)
     parser.add_argument('--strict-required-domains', action='store_true')
@@ -457,6 +562,17 @@ MEMORY_POLICY_FIELDS: tuple[str, ...] = (
     'descriptive_warn_threshold',
     'web_top',
     'web_near_fail_threshold',
+    'web_google_like_enabled',
+    'web_google_top',
+    'web_google_exact_domain_fail_threshold',
+    'web_google_near_fail_threshold',
+    'web_google_near_warn_threshold',
+    'web_google_first_hit_hard_fail',
+    'tm_registry_global_enabled',
+    'tm_registry_top',
+    'tm_registry_exact_fail_threshold',
+    'tm_registry_near_fail_threshold',
+    'tm_registry_near_warn_threshold',
     'social_unavailable_fail_threshold',
     'strict_required_domains',
 )
@@ -867,6 +983,236 @@ def company_collision_signal(name: str, top_n: int) -> tuple[int, int, int, str,
     return exact_hits, near_hits, total_results, ';'.join(sample_domains), True, source
 
 
+def _google_cse_search(
+    *,
+    query: str,
+    api_key: str,
+    cx: str,
+    top_n: int,
+    gl: str,
+    hl: str,
+) -> tuple[list[tuple[str, str]], bool, str]:
+    token = str(api_key or '').strip()
+    engine = str(cx or '').strip()
+    if not token or not engine:
+        return [], False, 'google_cse_unconfigured'
+    num = max(1, min(10, int(top_n)))
+    params = {
+        'key': token,
+        'cx': engine,
+        'q': query,
+        'num': str(num),
+    }
+    if gl:
+        params['gl'] = str(gl).strip().lower()
+    if hl:
+        params['hl'] = str(hl).strip().lower()
+    url = 'https://customsearch.googleapis.com/customsearch/v1?' + parse.urlencode(params)
+    req = request.Request(url, headers={'User-Agent': 'brandname-generator-validator/1.0'})
+    try:
+        with request.urlopen(req, timeout=8.0) as resp:
+            payload = json.loads(resp.read().decode('utf-8', errors='replace'))
+    except Exception:
+        return [], False, 'google_cse_error'
+    rows: list[tuple[str, str]] = []
+    for item in payload.get('items', []) or []:
+        link = str(item.get('link') or '').strip()
+        title = str(item.get('title') or '').strip()
+        if not link:
+            continue
+        rows.append((link, title))
+        if len(rows) >= num:
+            break
+    return rows, True, 'google_cse'
+
+
+def _full_token_in_url(name: str, href: str) -> bool:
+    token = str(name or '').strip().lower()
+    if not token:
+        return False
+    try:
+        parsed = parse.urlparse(str(href or ''))
+    except Exception:
+        return False
+    url_norm = ng.normalize_alpha(f'{parsed.netloc}{parsed.path}')
+    return bool(url_norm and token in url_norm)
+
+
+def web_google_like_signal(name: str, args: argparse.Namespace) -> dict[str, object]:
+    top_n = max(1, min(10, int(getattr(args, 'web_google_top', 10))))
+    api_key = str(getattr(args, 'web_google_cse_api_key', '') or '').strip()
+    cx = str(getattr(args, 'web_google_cse_cx', '') or '').strip()
+    gl = str(getattr(args, 'web_google_gl', 'de') or 'de')
+    hl = str(getattr(args, 'web_google_hl', 'en') or 'en')
+
+    quoted_matches, quoted_ok, quoted_source = _google_cse_search(
+        query=f'"{name}"',
+        api_key=api_key,
+        cx=cx,
+        top_n=top_n,
+        gl=gl,
+        hl=hl,
+    )
+    plain_matches, plain_ok, plain_source = _google_cse_search(
+        query=name,
+        api_key=api_key,
+        cx=cx,
+        top_n=top_n,
+        gl=gl,
+        hl=hl,
+    )
+    provider = 'google_cse'
+
+    # Fallback if Google API is unavailable/unconfigured.
+    if not quoted_ok and not plain_ok:
+        quoted_matches, quoted_ok, quoted_source = ng.fetch_search_matches(f'"{name}"')
+        plain_matches, plain_ok, plain_source = ng.fetch_search_matches(name)
+        provider = 'search_fallback'
+
+    if not quoted_ok and not plain_ok:
+        return {
+            'exact_hits': -1,
+            'near_hits': -1,
+            'result_count': -1,
+            'sample_domains': '',
+            'ok': False,
+            'source': '',
+            'provider': provider,
+            'first_hit_exact': False,
+            'first_hit_url': '',
+            'first_hit_title': '',
+        }
+
+    source = ''
+    if quoted_ok and plain_ok:
+        source = f'{quoted_source}+{plain_source}'
+    elif quoted_ok:
+        source = quoted_source
+    else:
+        source = plain_source
+
+    quoted_slice = quoted_matches[:top_n]
+    plain_slice = plain_matches[:top_n]
+    exact_domains: set[str] = set()
+    near_hits = 0
+    sample_domains: list[str] = []
+    seen_domains: set[str] = set()
+    first_hit_exact = False
+    first_hit_url = ''
+    first_hit_title = ''
+
+    for idx, (href, raw_title) in enumerate(plain_slice):
+        domain = ng.extract_result_domain(href)
+        if ng.is_social_profile_domain(domain):
+            continue
+        first_hit_url = str(href or '')
+        first_hit_title = str(raw_title or '')
+        first_hit_exact = _full_token_in_url(name, first_hit_url)
+        if idx == 0:
+            break
+
+    for href, raw_title in quoted_slice + plain_slice:
+        domain = ng.extract_result_domain(href)
+        if ng.is_social_profile_domain(domain):
+            continue
+        title = re.sub(r'<[^>]+>', ' ', str(raw_title or ''))
+        title_lc = title.lower()
+        title_norm = ng.normalize_alpha(title)
+        domain_norm = ng.domain_label(domain)
+        title_exact = title_norm == name or bool(re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title_lc))
+        domain_exact = domain_norm == name
+        url_exact = _full_token_in_url(name, str(href or ''))
+        if title_exact or domain_exact or url_exact:
+            exact_domains.add(domain or title_lc[:80] or f'row_{len(exact_domains) + 1}')
+        if domain and domain not in seen_domains and len(sample_domains) < 8:
+            sample_domains.append(domain)
+            seen_domains.add(domain)
+
+    for href, raw_title in plain_slice:
+        domain = ng.extract_result_domain(href)
+        if ng.is_social_profile_domain(domain):
+            continue
+        title = re.sub(r'<[^>]+>', ' ', str(raw_title or ''))
+        title_lc = title.lower()
+        tokens = set(re.findall(r'[a-z]{4,}', title_lc))
+        near_found = False
+        for token in tokens:
+            if token == name:
+                continue
+            ratio = ng.similarity_with_prefix_boost(token, name)
+            if ratio >= 0.88 and abs(len(token) - len(name)) <= 2:
+                near_found = True
+                break
+        if not near_found:
+            domain_norm = ng.domain_label(domain)
+            if domain_norm and domain_norm != name:
+                ratio = ng.similarity_with_prefix_boost(domain_norm, name)
+                if ratio >= 0.90 and abs(len(domain_norm) - len(name)) <= 3:
+                    near_found = True
+        if near_found:
+            near_hits += 1
+
+    return {
+        'exact_hits': int(len(exact_domains)),
+        'near_hits': int(near_hits),
+        'result_count': int(len(quoted_matches) + len(plain_matches)),
+        'sample_domains': ';'.join(sample_domains),
+        'ok': True,
+        'source': source,
+        'provider': provider,
+        'first_hit_exact': bool(first_hit_exact),
+        'first_hit_url': first_hit_url,
+        'first_hit_title': first_hit_title,
+    }
+
+
+def tm_registry_global_signal(name: str, args: argparse.Namespace) -> dict[str, object]:
+    top_n = max(1, int(getattr(args, 'tm_registry_top', 12)))
+    sources = {
+        'dpma': 'register.dpma.de',
+        'swissreg': 'swissreg.ch',
+        'tmview': 'tmdn.org/tmview',
+        'euipo': 'euipo.europa.eu',
+        'wipo_branddb': 'wipo.int/branddb',
+    }
+    registry: dict[str, dict[str, object]] = {}
+    exact_total = 0
+    near_total = 0
+    result_total = 0
+    ok_count = 0
+
+    for label, site_query in sources.items():
+        exact_hits, near_hits, result_count, sample_domains, ok, source = ng.probe_registry_signal(
+            name,
+            site_query=site_query,
+            top_n=top_n,
+        )
+        registry[label] = {
+            'site_query': site_query,
+            'exact_hits': int(exact_hits),
+            'near_hits': int(near_hits),
+            'result_count': int(result_count),
+            'sample_domains': sample_domains,
+            'ok': bool(ok),
+            'source': source,
+        }
+        if ok:
+            ok_count += 1
+            exact_total += max(0, int(exact_hits))
+            near_total += max(0, int(near_hits))
+            result_total += max(0, int(result_count))
+
+    return {
+        'ok': ok_count > 0,
+        'source_count': len(sources),
+        'ok_source_count': ok_count,
+        'exact_hits_total': int(exact_total),
+        'near_hits_total': int(near_total),
+        'result_count_total': int(result_total),
+        'registry': registry,
+    }
+
+
 def cheap_trademark_similarity_signal(name: str) -> tuple[int, str]:
     best_score = 0
     best_mark = ''
@@ -1223,6 +1569,143 @@ def check_web(name: str, args: argparse.Namespace) -> dict:
     }
 
 
+def check_web_google_like(name: str, args: argparse.Namespace) -> dict:
+    normalized = normalized_or_fail(name)
+    if not bool(getattr(args, 'web_google_like_enabled', True)):
+        return {
+            'status': 'pass',
+            'hard_fail': False,
+            'score_delta': 0.0,
+            'reason': 'web_google_like_disabled',
+            'evidence': {'screen_enabled': False},
+        }
+    signal = web_google_like_signal(normalized, args)
+    evidence = {
+        'screen_enabled': True,
+        **signal,
+    }
+    ok = bool(signal.get('ok'))
+    if not ok or int(signal.get('result_count', -1)) < 0:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -2.0,
+            'reason': 'web_google_like_unknown',
+            'evidence': evidence,
+        }
+
+    exact_hits = max(0, int(signal.get('exact_hits', 0)))
+    near_hits = max(0, int(signal.get('near_hits', 0)))
+    first_hit_exact = bool(signal.get('first_hit_exact'))
+    first_hit_hard_fail = bool(getattr(args, 'web_google_first_hit_hard_fail', True))
+    exact_fail_threshold = max(1, int(getattr(args, 'web_google_exact_domain_fail_threshold', 1)))
+    near_fail_threshold = max(1, int(getattr(args, 'web_google_near_fail_threshold', 3)))
+    near_warn_threshold = max(1, int(getattr(args, 'web_google_near_warn_threshold', 1)))
+
+    if first_hit_hard_fail and first_hit_exact:
+        return {
+            'status': 'fail',
+            'hard_fail': True,
+            'score_delta': -24.0,
+            'reason': 'web_google_first_hit_exact',
+            'evidence': evidence,
+        }
+    if exact_hits >= exact_fail_threshold:
+        return {
+            'status': 'fail',
+            'hard_fail': True,
+            'score_delta': -20.0,
+            'reason': 'web_google_exact_collision',
+            'evidence': evidence,
+        }
+    if near_hits >= near_fail_threshold:
+        return {
+            'status': 'fail',
+            'hard_fail': False,
+            'score_delta': -10.0,
+            'reason': 'web_google_near_collision',
+            'evidence': evidence,
+        }
+    if near_hits >= near_warn_threshold:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -4.0,
+            'reason': 'web_google_near_warning',
+            'evidence': evidence,
+        }
+    return {
+        'status': 'pass',
+        'hard_fail': False,
+        'score_delta': 0.0,
+        'reason': '',
+        'evidence': evidence,
+    }
+
+
+def check_tm_registry_global(name: str, args: argparse.Namespace) -> dict:
+    normalized = normalized_or_fail(name)
+    if not bool(getattr(args, 'tm_registry_global_enabled', True)):
+        return {
+            'status': 'pass',
+            'hard_fail': False,
+            'score_delta': 0.0,
+            'reason': 'tm_registry_global_disabled',
+            'evidence': {'screen_enabled': False},
+        }
+    signal = tm_registry_global_signal(normalized, args)
+    evidence = {
+        'screen_enabled': True,
+        **signal,
+    }
+    if not bool(signal.get('ok')):
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -2.0,
+            'reason': 'tm_registry_global_unknown',
+            'evidence': evidence,
+        }
+
+    exact_hits = max(0, int(signal.get('exact_hits_total', 0)))
+    near_hits = max(0, int(signal.get('near_hits_total', 0)))
+    exact_fail_threshold = max(1, int(getattr(args, 'tm_registry_exact_fail_threshold', 1)))
+    near_fail_threshold = max(1, int(getattr(args, 'tm_registry_near_fail_threshold', 10)))
+    near_warn_threshold = max(1, int(getattr(args, 'tm_registry_near_warn_threshold', 4)))
+
+    if exact_hits >= exact_fail_threshold:
+        return {
+            'status': 'fail',
+            'hard_fail': True,
+            'score_delta': -18.0,
+            'reason': 'tm_registry_exact_collision',
+            'evidence': evidence,
+        }
+    if near_hits >= near_fail_threshold:
+        return {
+            'status': 'fail',
+            'hard_fail': False,
+            'score_delta': -10.0,
+            'reason': 'tm_registry_near_collision',
+            'evidence': evidence,
+        }
+    if near_hits >= near_warn_threshold:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -5.0,
+            'reason': 'tm_registry_near_warning',
+            'evidence': evidence,
+        }
+    return {
+        'status': 'pass',
+        'hard_fail': False,
+        'score_delta': 0.0,
+        'reason': '',
+        'evidence': evidence,
+    }
+
+
 def check_app_store(name: str, args: argparse.Namespace) -> dict:
     normalized = normalized_or_fail(name)
     countries = [c.strip().lower() for c in args.store_countries.split(',') if c.strip()]
@@ -1350,6 +1833,8 @@ CHECK_SPECS: dict[str, ValidationCheckSpec] = {
     'company_cheap': ValidationCheckSpec('company_cheap', 'cheap', check_company_cheap),
     'domain': ValidationCheckSpec('domain', 'expensive', check_domain),
     'web': ValidationCheckSpec('web', 'expensive', check_web),
+    'web_google_like': ValidationCheckSpec('web_google_like', 'expensive', check_web_google_like),
+    'tm_registry_global': ValidationCheckSpec('tm_registry_global', 'expensive', check_tm_registry_global),
     'app_store': ValidationCheckSpec('app_store', 'expensive', check_app_store),
     'package': ValidationCheckSpec('package', 'expensive', check_package),
     'social': ValidationCheckSpec('social', 'expensive', check_social),
