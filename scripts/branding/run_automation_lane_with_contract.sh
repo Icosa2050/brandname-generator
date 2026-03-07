@@ -28,6 +28,7 @@ WORKER_ID="${BRANDING_AUTOMATION_WORKER_ID:-$(hostname -s 2>/dev/null || echo wo
 WORKER_ID="${WORKER_ID//[^A-Za-z0-9_.-]/_}"
 ENV_BOOTSTRAP_MODE="${BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE:-none}"
 ENV_REQUIRE_DIRENV="${BRANDING_AUTOMATION_REQUIRE_DIRENV:-0}"
+ENV_DOTENV_FILE="${BRANDING_AUTOMATION_DOTENV_FILE:-.env}"
 ENV_LOADED_WITH_DIRENV=0
 
 usage() {
@@ -44,6 +45,7 @@ Environment:
   BRANDING_AUTOMATION_FUS_MAX_AGE_S  Max age for fusion artifacts in validation (default: 21600)
   BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE
                                    Env bootstrap mode: none|auto|direnv|dotenv (default: none)
+  BRANDING_AUTOMATION_DOTENV_FILE   Dotenv file path used in dotenv/auto fallback (default: .env)
 EOF
 }
 
@@ -76,7 +78,7 @@ prepare_environment() {
 }
 
 source_dotenv_file() {
-  local env_path=".env"
+  local env_path="$ENV_DOTENV_FILE"
   if [[ ! -f "$env_path" ]]; then
     echo "dotenv fallback requested but missing file: $env_path" >&2
     return 1

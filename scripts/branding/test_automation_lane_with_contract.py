@@ -52,11 +52,14 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
                 tmp, allow_rc=1, allow_stderr="direnv: error open allow hash: operation not permitted"
             )
             artifact_root = tmp / "artifacts"
+            dotenv_file = tmp / ".env.test"
+            dotenv_file.write_text("OPENROUTER_API_KEY=test-key\n", encoding="utf-8")
 
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "auto"
+            env["BRANDING_AUTOMATION_DOTENV_FILE"] = str(dotenv_file)
             env.pop("BRANDING_AUTOMATION_REQUIRE_DIRENV", None)
 
             proc = self._run_watch(env)
@@ -71,11 +74,14 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
                 tmp, allow_rc=1, allow_stderr="direnv should not be called in dotenv mode"
             )
             artifact_root = tmp / "artifacts"
+            dotenv_file = tmp / ".env.test"
+            dotenv_file.write_text("OPENROUTER_API_KEY=test-key\n", encoding="utf-8")
 
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "dotenv"
+            env["BRANDING_AUTOMATION_DOTENV_FILE"] = str(dotenv_file)
 
             proc = self._run_watch(env)
             self.assertNotEqual(proc.returncode, 0)
