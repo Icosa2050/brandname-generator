@@ -26,8 +26,9 @@ SHARD_ID="${BRANDING_AUTOMATION_SHARD_ID:-0}"
 ATTEMPT_ID="${BRANDING_AUTOMATION_ATTEMPT_ID:-1}"
 WORKER_ID="${BRANDING_AUTOMATION_WORKER_ID:-$(hostname -s 2>/dev/null || echo worker)}"
 WORKER_ID="${WORKER_ID//[^A-Za-z0-9_.-]/_}"
-ENV_BOOTSTRAP_MODE="${BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE:-auto}"
+ENV_BOOTSTRAP_MODE="${BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE:-none}"
 ENV_REQUIRE_DIRENV="${BRANDING_AUTOMATION_REQUIRE_DIRENV:-0}"
+ENV_DOTENV_FILE="${BRANDING_AUTOMATION_DOTENV_FILE:-.env}"
 ENV_LOADED_WITH_DIRENV=0
 
 usage() {
@@ -42,6 +43,9 @@ Environment:
   BRANDING_AUTOMATION_LOCK_WAIT_S    Lock wait timeout seconds (default: 7200)
   BRANDING_AUTOMATION_GEN_MAX_AGE_S  Max age for generation artifacts in fusion/validation (default: 21600)
   BRANDING_AUTOMATION_FUS_MAX_AGE_S  Max age for fusion artifacts in validation (default: 21600)
+  BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE
+                                   Env bootstrap mode: none|auto|direnv|dotenv (default: none)
+  BRANDING_AUTOMATION_DOTENV_FILE   Dotenv file path used in dotenv/auto fallback (default: .env)
 EOF
 }
 
@@ -74,7 +78,7 @@ prepare_environment() {
 }
 
 source_dotenv_file() {
-  local env_path=".env"
+  local env_path="$ENV_DOTENV_FILE"
   if [[ ! -f "$env_path" ]]; then
     echo "dotenv fallback requested but missing file: $env_path" >&2
     return 1
@@ -87,6 +91,10 @@ source_dotenv_file() {
 
 bootstrap_repo_env() {
   case "$ENV_BOOTSTRAP_MODE" in
+    none)
+      ENV_LOADED_WITH_DIRENV=0
+      return 0
+      ;;
     direnv)
       if ! command -v direnv >/dev/null 2>&1; then
         echo "missing required command: direnv (mode=direnv)" >&2
@@ -124,7 +132,7 @@ bootstrap_repo_env() {
       ENV_LOADED_WITH_DIRENV=0
       ;;
     *)
-      echo "invalid BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE: $ENV_BOOTSTRAP_MODE (expected auto|direnv|dotenv)" >&2
+      echo "invalid BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE: $ENV_BOOTSTRAP_MODE (expected auto|direnv|dotenv|none)" >&2
       return 1
       ;;
   esac
