@@ -22,6 +22,7 @@ VALIDATOR_CONCURRENCY=8
 VALIDATOR_MIN_CONCURRENCY=4
 VALIDATOR_MAX_CONCURRENCY=12
 VALIDATOR_TIMEOUT_S=6
+VALIDATOR_CHECKS="${OPENROUTER_VALIDATOR_CHECKS:-adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,app_store,package,social}"
 LLM_ROUNDS=1
 LLM_CANDIDATES_PER_ROUND=10
 LLM_TEMPERATURE="${OPENROUTER_LLM_TEMPERATURE:-0.8}"
@@ -52,6 +53,7 @@ USER_VALIDATOR_CONCURRENCY=""
 USER_VALIDATOR_MIN_CONCURRENCY=""
 USER_VALIDATOR_MAX_CONCURRENCY=""
 USER_VALIDATOR_TIMEOUT_S=""
+USER_VALIDATOR_CHECKS=""
 USER_PROMPT_TEMPLATE_FILE=""
 
 usage() {
@@ -81,6 +83,7 @@ Options:
   --validator-min-concurrency <n>    Validator adaptive min concurrency (default: 3 via profile=quality)
   --validator-max-concurrency <n>    Validator adaptive max concurrency (default: 8 via profile=quality)
   --validator-timeout-s <seconds>    Validator per-check timeout (default: 30 via profile=quality)
+  --validator-checks <csv>           Explicit validator checks list
   --llm-rounds <n>                   LLM rounds per run (default: 1)
   --llm-candidates-per-round <n>     LLM candidates requested per round (default: 10)
   --llm-temperature <float>          LLM sampling temperature (default: profile-specific)
@@ -252,6 +255,11 @@ while [[ $# -gt 0 ]]; do
       USER_VALIDATOR_TIMEOUT_S="$2"
       shift 2
       ;;
+    --validator-checks)
+      VALIDATOR_CHECKS="$2"
+      USER_VALIDATOR_CHECKS="$2"
+      shift 2
+      ;;
     --llm-rounds)
       LLM_ROUNDS="$2"
       USER_LLM_ROUNDS="$2"
@@ -387,6 +395,9 @@ fi
 if [[ -n "$USER_VALIDATOR_TIMEOUT_S" ]]; then
   VALIDATOR_TIMEOUT_S="$USER_VALIDATOR_TIMEOUT_S"
 fi
+if [[ -n "$USER_VALIDATOR_CHECKS" ]]; then
+  VALIDATOR_CHECKS="$USER_VALIDATOR_CHECKS"
+fi
 if [[ -n "$USER_PROMPT_TEMPLATE_FILE" ]]; then
   PROMPT_TEMPLATE_FILE="$USER_PROMPT_TEMPLATE_FILE"
 fi
@@ -456,6 +467,7 @@ CMD=(
   --validator-min-concurrency "$VALIDATOR_MIN_CONCURRENCY"
   --validator-max-concurrency "$VALIDATOR_MAX_CONCURRENCY"
   --validator-timeout-s "$VALIDATOR_TIMEOUT_S"
+  --validator-checks "$VALIDATOR_CHECKS"
   --llm-ideation-enabled
   --llm-provider openrouter_http
   --llm-models "$MODEL"
@@ -476,6 +488,18 @@ CMD=(
 
 if (( NO_EXTERNAL_CHECKS )); then
   CMD+=(--generator-no-external-checks)
+fi
+if [[ -n "${OPENROUTER_GOOGLE_CSE_API_KEY:-}" ]]; then
+  CMD+=(--web-google-cse-api-key "${OPENROUTER_GOOGLE_CSE_API_KEY}")
+fi
+if [[ -n "${OPENROUTER_GOOGLE_CSE_CX:-}" ]]; then
+  CMD+=(--web-google-cse-cx "${OPENROUTER_GOOGLE_CSE_CX}")
+fi
+if [[ -n "${OPENROUTER_GOOGLE_CSE_GL:-}" ]]; then
+  CMD+=(--web-google-gl "${OPENROUTER_GOOGLE_CSE_GL}")
+fi
+if [[ -n "${OPENROUTER_GOOGLE_CSE_HL:-}" ]]; then
+  CMD+=(--web-google-hl "${OPENROUTER_GOOGLE_CSE_HL}")
 fi
 if [[ -n "${PROMPT_TEMPLATE_FILE:-}" ]]; then
   CMD+=(--llm-prompt-template-file "$PROMPT_TEMPLATE_FILE")

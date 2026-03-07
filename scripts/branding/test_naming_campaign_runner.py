@@ -353,6 +353,8 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
         self.assertIn('tm_cheap', checks)
         self.assertIn('company_cheap', checks)
         self.assertIn('web', checks)
+        self.assertIn('web_google_like', checks)
+        self.assertIn('tm_registry_global', checks)
         self.assertEqual(len(checks), len(set(checks)))
 
     def test_load_prefixes_from_audit_csv_filters_by_risk_and_pronounceability(self) -> None:

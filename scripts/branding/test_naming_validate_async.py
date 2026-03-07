@@ -43,6 +43,21 @@ def _base_args() -> argparse.Namespace:
         web_top=8,
         web_exact_domain_fail_threshold=2,
         web_near_fail_threshold=2,
+        web_google_like_enabled=True,
+        web_google_top=10,
+        web_google_exact_domain_fail_threshold=1,
+        web_google_near_fail_threshold=3,
+        web_google_near_warn_threshold=1,
+        web_google_first_hit_hard_fail=True,
+        web_google_cse_api_key='',
+        web_google_cse_cx='',
+        web_google_gl='de',
+        web_google_hl='en',
+        tm_registry_global_enabled=True,
+        tm_registry_top=12,
+        tm_registry_exact_fail_threshold=1,
+        tm_registry_near_fail_threshold=10,
+        tm_registry_near_warn_threshold=4,
         social_unavailable_fail_threshold=3,
         strict_required_domains=False,
         scope='global',
@@ -85,6 +100,10 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 '2',
                 '--company-cheap-near-fail-threshold',
                 '4',
+                '--web-google-top',
+                '9',
+                '--tm-registry-top',
+                '14',
                 '--policy-version',
                 'policy_x',
             ],
@@ -93,6 +112,8 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(args.company_cheap_top, 11)
         self.assertEqual(args.company_cheap_exact_fail_threshold, 2)
         self.assertEqual(args.company_cheap_near_fail_threshold, 4)
+        self.assertEqual(args.web_google_top, 9)
+        self.assertEqual(args.tm_registry_top, 14)
         self.assertEqual(args.policy_version, 'policy_x')
 
     def test_policy_signature_is_stable(self) -> None:
@@ -699,6 +720,88 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(got['status'], 'warn')
         self.assertFalse(got['hard_fail'])
         self.assertEqual(got['reason'], 'company_near_warning')
+
+    def test_check_web_google_like_first_hit_exact_is_hard_fail(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.web_google_like_signal',
+            return_value={
+                'exact_hits': 1,
+                'near_hits': 0,
+                'result_count': 20,
+                'sample_domains': 'metronis-technologies.de',
+                'ok': True,
+                'source': 'google_cse',
+                'provider': 'google_cse',
+                'first_hit_exact': True,
+                'first_hit_url': 'https://www.metronis-technologies.de/',
+                'first_hit_title': 'Metronis Technologies',
+            },
+        ):
+            got = nva.check_web_google_like('metronis', args)
+        self.assertEqual(got['status'], 'fail')
+        self.assertTrue(got['hard_fail'])
+        self.assertEqual(got['reason'], 'web_google_first_hit_exact')
+
+    def test_check_web_google_like_near_warn(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.web_google_like_signal',
+            return_value={
+                'exact_hits': 0,
+                'near_hits': 1,
+                'result_count': 20,
+                'sample_domains': 'luci.ai;luci-vant.example',
+                'ok': True,
+                'source': 'google_cse',
+                'provider': 'google_cse',
+                'first_hit_exact': False,
+                'first_hit_url': 'https://luci.ai',
+                'first_hit_title': 'Luci AI',
+            },
+        ):
+            got = nva.check_web_google_like('lucivant', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertFalse(got['hard_fail'])
+        self.assertEqual(got['reason'], 'web_google_near_warning')
+
+    def test_check_tm_registry_global_exact_is_hard_fail(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.tm_registry_global_signal',
+            return_value={
+                'ok': True,
+                'source_count': 5,
+                'ok_source_count': 5,
+                'exact_hits_total': 2,
+                'near_hits_total': 5,
+                'result_count_total': 44,
+                'registry': {'tmview': {'exact_hits': 1}},
+            },
+        ):
+            got = nva.check_tm_registry_global('metronis', args)
+        self.assertEqual(got['status'], 'fail')
+        self.assertTrue(got['hard_fail'])
+        self.assertEqual(got['reason'], 'tm_registry_exact_collision')
+
+    def test_check_tm_registry_global_near_warn(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.tm_registry_global_signal',
+            return_value={
+                'ok': True,
+                'source_count': 5,
+                'ok_source_count': 4,
+                'exact_hits_total': 0,
+                'near_hits_total': 5,
+                'result_count_total': 36,
+                'registry': {'tmview': {'near_hits': 5}},
+            },
+        ):
+            got = nva.check_tm_registry_global('lucivant', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertFalse(got['hard_fail'])
+        self.assertEqual(got['reason'], 'tm_registry_near_warning')
 
     def test_tm_cheap_cache_signature_changes_when_blocklist_changes(self) -> None:
         args = _base_args()
