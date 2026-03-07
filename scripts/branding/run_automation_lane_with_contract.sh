@@ -36,7 +36,7 @@ usage() {
 Run branding automation lanes with local artifact contracts (no git sync dependency).
 
 Usage:
-  scripts/branding/run_automation_lane_with_contract.sh --lane <generation|fusion|validation|smoke|watch>
+  scripts/branding/run_automation_lane_with_contract.sh --lane <generation|fusion|validation|smoke>
 
 Environment:
   BRANDING_AUTOMATION_DATA_ROOT      Artifact root (default: <repo>/test_outputs/branding/automation-data)
@@ -574,49 +574,6 @@ PY
   echo "smoke_report=$report"
 }
 
-lane_watch() {
-  local gen_ptr="$STATE_DIR/latest_generation.json"
-  local fus_ptr="$STATE_DIR/latest_fusion.json"
-  echo "watch_timestamp=$(utc_now)"
-  echo "artifact_root=$ARTIFACT_ROOT"
-  local missing=0
-  for ptr in "$gen_ptr" "$fus_ptr"; do
-    if [[ ! -f "$ptr" ]]; then
-      echo "missing_pointer=$ptr"
-      missing=1
-      continue
-    fi
-    echo "pointer=$ptr"
-    cat "$ptr"
-    local manifest
-    manifest="$(json_get "$ptr" "manifest_path")" || manifest=""
-    if [[ -z "$manifest" || ! -f "$manifest" ]]; then
-      echo "missing_manifest_for_pointer=$ptr"
-      missing=1
-      continue
-    fi
-    local manifest_status completed_at
-    manifest_status="$(json_get "$manifest" "status")"
-    completed_at="$(json_get "$manifest" "completed_at")"
-    local age_s
-    age_s="$(python3 - "$completed_at" <<'PY'
-import datetime
-import sys
-dt = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
-now = datetime.datetime.now(datetime.timezone.utc)
-print(int((now - dt).total_seconds()))
-PY
-)"
-    echo "manifest=$manifest status=$manifest_status age_s=$age_s"
-    if [[ "$manifest_status" != "success" ]]; then
-      missing=1
-    fi
-  done
-  if [[ "$missing" -ne 0 ]]; then
-    return 1
-  fi
-}
-
 case "$lane" in
   generation)
     lane_generation
@@ -629,9 +586,6 @@ case "$lane" in
     ;;
   smoke)
     lane_smoke
-    ;;
-  watch)
-    lane_watch
     ;;
   *)
     echo "Invalid lane: $lane" >&2
