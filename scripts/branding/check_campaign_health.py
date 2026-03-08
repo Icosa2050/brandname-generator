@@ -94,6 +94,10 @@ def evaluate_health(*, progress_row: dict[str, Any], postrank_summary: dict[str,
         if strong_count < cfg.min_postrank_strong:
             violations.append(f'strong_count_below_threshold:{strong_count}<{cfg.min_postrank_strong}')
 
+    strong_per_new_shortlist = 0.0
+    if new_shortlist_count > 0:
+        strong_per_new_shortlist = round(float(strong_count) / float(new_shortlist_count), 4)
+
     healthy = len(violations) == 0
     return {
         'healthy': healthy,
@@ -104,6 +108,7 @@ def evaluate_health(*, progress_row: dict[str, Any], postrank_summary: dict[str,
             'iqr_total_score': iqr,
             'score_ceiling_share': ceiling_share,
             'strong_count': strong_count,
+            'strong_per_new_shortlist': strong_per_new_shortlist,
         },
     }
 

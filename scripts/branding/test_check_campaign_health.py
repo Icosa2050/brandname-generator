@@ -29,6 +29,7 @@ class CheckCampaignHealthTest(unittest.TestCase):
         result = cch.evaluate_health(progress_row=progress_row, postrank_summary=postrank_summary, cfg=cfg)
         self.assertTrue(result['healthy'])
         self.assertEqual(result['violations'], [])
+        self.assertAlmostEqual(result['metrics']['strong_per_new_shortlist'], 0.5)
 
     def test_evaluate_health_flags_missing_postrank(self) -> None:
         cfg = cch.HealthConfig(

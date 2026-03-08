@@ -28,6 +28,12 @@ class RerankShortlistDeterministicTest(unittest.TestCase):
         self.assertGreater(good.total_score, bad.total_score)
         self.assertIn('stretch:lazy_category_suffix', ';'.join(bad.reasons))
 
+    def test_score_name_penalizes_generic_compound(self) -> None:
+        good = rsd.score_name('velunor', source_shortlist_selected='True', source_recommendation='strong')
+        bad = rsd.score_name('smartpayflow', source_shortlist_selected='True', source_recommendation='strong')
+        self.assertGreater(good.total_score, bad.total_score)
+        self.assertIn('stretch:generic_compound', ';'.join(bad.reasons))
+
     def test_load_names_filters_shortlist_selected_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'run.csv'

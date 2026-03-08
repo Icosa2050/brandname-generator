@@ -50,6 +50,11 @@ GENERIC_STEMS = (
     'sync',
     'flow',
     'trust',
+    'smart',
+    'easy',
+    'clear',
+    'simple',
+    'direct',
 )
 VERTICAL_LOCK_STEMS = (
     'bill',
@@ -362,6 +367,7 @@ def score_distinctiveness(name: str, *, context: ScoreContext) -> tuple[float, l
 def score_stretch(name: str) -> tuple[float, list[str]]:
     reasons: list[str] = []
     vertical_hits = count_contains(name, VERTICAL_LOCK_STEMS)
+    generic_hits = count_contains(name, GENERIC_STEMS)
     length_component = closeness(float(len(name)), ideal=8.0, tolerance=5.0)
 
     if vertical_hits:
@@ -370,9 +376,12 @@ def score_stretch(name: str) -> tuple[float, list[str]]:
         reasons.append('stretch:category_suffix_pattern')
     if is_lazy_category_suffix(name):
         reasons.append('stretch:lazy_category_suffix')
+    if generic_hits >= 2:
+        reasons.append(f'stretch:generic_compound={generic_hits}')
 
     raw = 20.0 * length_component
     raw -= min(10.0, vertical_hits * 2.8)
+    raw -= min(8.0, generic_hits * 1.6)
     if any(reason == 'stretch:category_suffix_pattern' for reason in reasons):
         raw -= 2.5
     if any(reason == 'stretch:lazy_category_suffix' for reason in reasons):
@@ -427,10 +436,10 @@ def score_name(
     negative, negative_reasons = score_negative_checks(name)
 
     weighted_total = (
-        (sayability * 0.29)
-        + (spellability * 0.23)
-        + (distinctiveness * 0.24)
-        + (stretch * 0.16)
+        (sayability * 0.27)
+        + (spellability * 0.21)
+        + (distinctiveness * 0.30)
+        + (stretch * 0.14)
         + (negative * 0.08)
     )
     total_score = round(weighted_total * 5.0, 2)
