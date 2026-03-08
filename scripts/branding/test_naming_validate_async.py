@@ -34,6 +34,7 @@ def _base_args() -> argparse.Namespace:
         company_cheap_exact_fail_threshold=1,
         company_cheap_near_fail_threshold=2,
         company_cheap_near_warn_threshold=1,
+        company_house_api_key='',
         min_trust_proxy=50,
         warn_trust_proxy=62,
         max_spelling_risk=28,
@@ -58,6 +59,11 @@ def _base_args() -> argparse.Namespace:
         tm_registry_exact_fail_threshold=1,
         tm_registry_near_fail_threshold=10,
         tm_registry_near_warn_threshold=4,
+        tm_registry_unknown_hard_fail=False,
+        tm_registry_require_tmview_ok=False,
+        tmview_probe_enabled=False,
+        tmview_probe_timeout_ms=20000,
+        tmview_probe_settle_ms=2500,
         social_unavailable_fail_threshold=3,
         strict_required_domains=False,
         scope='global',
@@ -119,6 +125,9 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             with mock.patch('sys.argv', ['naming_validate_async.py']):
                 args = nva.parse_args()
         self.assertEqual(args.web_google_cse_api_key, 'key_from_env')
+        with mock.patch('sys.argv', ['naming_validate_async.py', '--tmview-probe-enabled']):
+            args = nva.parse_args()
+        self.assertTrue(args.tmview_probe_enabled)
 
     def test_policy_signature_is_stable(self) -> None:
         args = _base_args()
@@ -725,6 +734,66 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertFalse(got['hard_fail'])
         self.assertEqual(got['reason'], 'company_near_warning')
 
+    def test_check_company_cheap_company_house_active_exact_is_hard_fail(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.company_house_signal',
+            return_value={
+                'ok': True,
+                'reason': '',
+                'exact_hits': 1,
+                'exact_active_hits': 1,
+                'near_hits': 0,
+                'near_active_hits': 0,
+                'result_count': 2,
+                'sample_titles': ['CLARIVON CONSULTING LTD [active]'],
+            },
+        ):
+            got = nva.check_company_cheap('clarivon', args)
+        self.assertEqual(got['status'], 'fail')
+        self.assertTrue(got['hard_fail'])
+        self.assertEqual(got['reason'], 'company_house_exact_active')
+
+    def test_check_company_cheap_company_house_near_active_warns(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.company_house_signal',
+            return_value={
+                'ok': True,
+                'reason': '',
+                'exact_hits': 0,
+                'exact_active_hits': 0,
+                'near_hits': 1,
+                'near_active_hits': 1,
+                'result_count': 1,
+                'sample_titles': ['CLARIVON CONSULTING LTD [active]'],
+            },
+        ):
+            got = nva.check_company_cheap('clarivon', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertFalse(got['hard_fail'])
+        self.assertEqual(got['reason'], 'company_house_near_active')
+
+    def test_company_house_signal_live_shape_from_payload(self) -> None:
+        args = _base_args()
+        args.company_house_api_key = 'dummy'
+        payload = {
+            'items': [
+                {'title': 'CLARIVON LIMITED', 'company_status': 'dissolved'},
+                {'title': 'CLARIVON CONSULTING LTD', 'company_status': 'active'},
+            ]
+        }
+        body = json.dumps(payload).encode('utf-8')
+        mocked_resp = mock.MagicMock()
+        mocked_resp.__enter__.return_value = mocked_resp
+        mocked_resp.read.return_value = body
+        with mock.patch('naming_validate_async.ng.urlopen_no_proxy', return_value=mocked_resp):
+            got = nva.company_house_signal('clarivon', args, top_n=8)
+        self.assertTrue(got['ok'])
+        self.assertEqual(got['exact_hits'], 1)
+        self.assertEqual(got['near_hits'], 1)
+        self.assertEqual(got['near_active_hits'], 1)
+
     def test_check_web_google_like_first_hit_exact_is_hard_fail(self) -> None:
         args = _base_args()
         with mock.patch(
@@ -803,6 +872,20 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(int(signal.get('source_count', 0)), 5)
         self.assertGreaterEqual(int(signal.get('exact_hits_total', 0)), 1)
 
+    def test_tm_registry_global_signal_keeps_search_results_even_when_tmview_probe_enabled(self) -> None:
+        args = _base_args()
+        args.tmview_probe_enabled = True
+
+        with mock.patch(
+            'naming_validate_async.ng.fetch_search_matches',
+            return_value=([], True, 'ddg'),
+        ), mock.patch('naming_validate_async.EuipoProbe') as probe_cls:
+            signal = nva.tm_registry_global_signal('metroval', args)
+        self.assertTrue(bool(signal.get('ok')))
+        self.assertEqual(int(signal.get('exact_hits_total', 0)), 0)
+        self.assertEqual(int(((signal.get('registry') or {}).get('tmview') or {}).get('exact_hits', 0)), 0)
+        probe_cls.assert_not_called()
+
     def test_check_tm_registry_global_exact_is_hard_fail(self) -> None:
         args = _base_args()
         with mock.patch(
@@ -840,6 +923,89 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(got['status'], 'warn')
         self.assertFalse(got['hard_fail'])
         self.assertEqual(got['reason'], 'tm_registry_near_warning')
+
+    def test_check_tm_registry_global_unknown_warns_for_review(self) -> None:
+        args = _base_args()
+        args.tm_registry_unknown_hard_fail = True
+        with mock.patch(
+            'naming_validate_async.tm_registry_global_signal',
+            return_value={
+                'ok': False,
+                'source_count': 5,
+                'ok_source_count': 0,
+                'exact_hits_total': 0,
+                'near_hits_total': 0,
+                'result_count_total': 0,
+                'registry': {'tmview': {'ok': False}},
+            },
+        ):
+            got = nva.check_tm_registry_global('clarivon', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertFalse(got['hard_fail'])
+        self.assertEqual(got['reason'], 'tm_registry_global_review_required')
+        self.assertTrue(bool((got.get('evidence') or {}).get('review_required')))
+
+    def test_check_tm_registry_global_ignores_legacy_tmview_requirement(self) -> None:
+        args = _base_args()
+        args.tm_registry_require_tmview_ok = True
+        with mock.patch(
+            'naming_validate_async.tm_registry_global_signal',
+            return_value={
+                'ok': True,
+                'source_count': 5,
+                'ok_source_count': 4,
+                'exact_hits_total': 0,
+                'near_hits_total': 0,
+                'result_count_total': 12,
+                'registry': {'tmview': {'ok': False}},
+            },
+        ):
+            got = nva.check_tm_registry_global('clarivon', args)
+        self.assertEqual(got['status'], 'pass')
+        self.assertFalse(got['hard_fail'])
+
+    def test_check_tmview_probe_exact_collision_demotes_without_hard_fail(self) -> None:
+        args = _base_args()
+        args.tmview_probe_enabled = True
+        with mock.patch(
+            'naming_validate_async.tmview_probe_signal',
+            return_value={
+                'ok': True,
+                'source': 'tmview_playwright',
+                'reason': '',
+                'exact_hits': 2,
+                'near_hits': 0,
+                'result_count': 12,
+                'sample_text': 'METROVAL',
+                'error': '',
+            },
+        ):
+            got = nva.check_tmview_probe('metroval', args)
+        self.assertEqual(got['status'], 'fail')
+        self.assertFalse(got['hard_fail'])
+        self.assertEqual(got['reason'], 'tmview_probe_exact_collision')
+
+    def test_check_tmview_probe_unknown_warns_for_review(self) -> None:
+        args = _base_args()
+        args.tmview_probe_enabled = True
+        with mock.patch(
+            'naming_validate_async.tmview_probe_signal',
+            return_value={
+                'ok': False,
+                'source': 'tmview_playwright',
+                'reason': 'tmview_probe_error',
+                'exact_hits': -1,
+                'near_hits': -1,
+                'result_count': -1,
+                'sample_text': '',
+                'error': 'playwright_unavailable',
+            },
+        ):
+            got = nva.check_tmview_probe('clarivon', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertFalse(got['hard_fail'])
+        self.assertEqual(got['reason'], 'tmview_probe_review_required')
+        self.assertTrue(bool((got.get('evidence') or {}).get('review_required')))
 
     def test_tm_cheap_cache_signature_changes_when_blocklist_changes(self) -> None:
         args = _base_args()

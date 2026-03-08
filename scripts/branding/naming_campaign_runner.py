@@ -2079,6 +2079,34 @@ def parse_args() -> argparse.Namespace:
         help='Validator expensive finalist limit when tier includes expensive checks.',
     )
     parser.add_argument(
+        '--validator-tmview-probe-enabled',
+        dest='validator_tmview_probe_enabled',
+        action='store_true',
+        default=False,
+        help='Pass --tmview-probe-enabled to naming_validate_async.',
+    )
+    parser.add_argument(
+        '--validator-tm-registry-unknown-hard-fail',
+        dest='validator_tm_registry_unknown_hard_fail',
+        action='store_true',
+        default=False,
+        help='Deprecated compatibility flag for naming_validate_async.',
+    )
+    parser.add_argument(
+        '--validator-tm-registry-require-tmview-ok',
+        dest='validator_tm_registry_require_tmview_ok',
+        action='store_true',
+        default=False,
+        help='Deprecated compatibility flag for naming_validate_async.',
+    )
+    parser.add_argument(
+        '--validator-tm-registry-tmview-probe-enabled',
+        dest='validator_tmview_probe_enabled',
+        action='store_true',
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         '--prefix-audit-csv',
         default='',
         help='Optional prefix audit CSV used to inject low-risk pronounceable seeds.',
@@ -3076,6 +3104,12 @@ def main() -> int:
             validator_cmd.append(f'--cheap-trademark-blocklist-file={blocklist_file}')
         if str(args.validator_memory_db).strip():
             validator_cmd.append(f'--memory-db={str(args.validator_memory_db).strip()}')
+        if bool(args.validator_tmview_probe_enabled):
+            validator_cmd.append('--tmview-probe-enabled')
+        if bool(args.validator_tm_registry_unknown_hard_fail):
+            validator_cmd.append('--tm-registry-unknown-hard-fail')
+        if bool(args.validator_tm_registry_require_tmview_ok):
+            validator_cmd.append('--tm-registry-require-tmview-ok')
         code = run_cmd(
             validator_cmd,
             cwd=root,

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -31,6 +32,7 @@ from urllib import parse, request
 import name_generator as ng
 import naming_db as ndb
 import path_config as bpaths
+from euipo_esearch_probe import EuipoProbe
 
 
 @dataclass
@@ -323,6 +325,11 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help='Warn threshold for near company-like hits below fail threshold.',
     )
+    parser.add_argument(
+        '--company-house-api-key',
+        default=str(os.environ.get('COMPANIES_HOUSE_API_KEY', '')),
+        help='Companies House API key for /search/companies lookup (optional).',
+    )
     parser.add_argument('--min-trust-proxy', type=int, default=50)
     parser.add_argument('--warn-trust-proxy', type=int, default=62)
     parser.add_argument('--max-spelling-risk', type=int, default=28)
@@ -440,6 +447,59 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help='Warn when aggregated near registry hits reach this threshold.',
+    )
+    parser.add_argument(
+        '--tm-registry-unknown-hard-fail',
+        dest='tm_registry_unknown_hard_fail',
+        action='store_true',
+        default=False,
+        help='Deprecated compatibility flag. tm_registry_global unknown/unavailable responses now warn for review.',
+    )
+    parser.add_argument(
+        '--tm-registry-require-tmview-ok',
+        dest='tm_registry_require_tmview_ok',
+        action='store_true',
+        default=False,
+        help='Deprecated compatibility flag. TMview availability is now handled by tmview_probe.',
+    )
+    parser.add_argument(
+        '--tmview-probe-enabled',
+        dest='tmview_probe_enabled',
+        action='store_true',
+        default=False,
+        help='Run Playwright TMview probe on finalist-only tmview_probe checks.',
+    )
+    parser.add_argument(
+        '--tm-registry-tmview-probe-enabled',
+        dest='tmview_probe_enabled',
+        action='store_true',
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tmview-probe-timeout-ms',
+        dest='tmview_probe_timeout_ms',
+        type=int,
+        default=20000,
+        help='Timeout for TMview Playwright probe.',
+    )
+    parser.add_argument(
+        '--tm-registry-tmview-timeout-ms',
+        dest='tmview_probe_timeout_ms',
+        type=int,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tmview-probe-settle-ms',
+        dest='tmview_probe_settle_ms',
+        type=int,
+        default=2500,
+        help='Settle delay for TMview Playwright probe.',
+    )
+    parser.add_argument(
+        '--tm-registry-tmview-settle-ms',
+        dest='tmview_probe_settle_ms',
+        type=int,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument('--store-countries', default='de,ch,us')
     parser.add_argument('--social-unavailable-fail-threshold', type=int, default=3)
@@ -574,10 +634,11 @@ MEMORY_POLICY_FIELDS: tuple[str, ...] = (
     'tm_registry_exact_fail_threshold',
     'tm_registry_near_fail_threshold',
     'tm_registry_near_warn_threshold',
+    'tm_registry_unknown_hard_fail',
+    'tm_registry_require_tmview_ok',
     'social_unavailable_fail_threshold',
     'strict_required_domains',
 )
-
 
 def exclusion_memory_policy_signature(
     *,
@@ -1013,7 +1074,7 @@ def _google_cse_search(
     req = request.Request(url, headers={'User-Agent': 'brandname-generator-validator/1.0'})
     request_timeout = max(1.0, min(8.0, float(timeout_s)))
     try:
-        with request.urlopen(req, timeout=request_timeout) as resp:
+        with ng.urlopen_no_proxy(req, timeout=request_timeout) as resp:
             payload = json.loads(resp.read().decode('utf-8', errors='replace'))
     except Exception:
         return [], False, 'google_cse_error'
@@ -1250,6 +1311,60 @@ def tm_registry_global_signal(name: str, args: argparse.Namespace) -> dict[str, 
     }
 
 
+def tmview_probe_signal(name: str, args: argparse.Namespace) -> dict[str, object]:
+    normalized = ng.normalize_alpha(name)
+    if not normalized:
+        return {
+            'ok': False,
+            'source': 'tmview_playwright',
+            'reason': 'invalid_name',
+            'exact_hits': -1,
+            'near_hits': -1,
+            'result_count': -1,
+            'sample_text': '',
+            'error': 'invalid_name',
+        }
+    if not bool(getattr(args, 'tmview_probe_enabled', False)):
+        return {
+            'ok': False,
+            'source': 'tmview_playwright',
+            'reason': 'tmview_probe_disabled',
+            'exact_hits': -1,
+            'near_hits': -1,
+            'result_count': -1,
+            'sample_text': '',
+            'error': 'tmview_probe_disabled',
+        }
+    try:
+        with EuipoProbe(
+            timeout_ms=max(3000, int(getattr(args, 'tmview_probe_timeout_ms', 20000))),
+            settle_ms=max(0, int(getattr(args, 'tmview_probe_settle_ms', 2500))),
+            headless=True,
+        ) as probe:
+            probe_result = probe.probe_name(normalized)
+    except Exception as exc:
+        return {
+            'ok': False,
+            'source': 'tmview_playwright',
+            'reason': 'tmview_probe_error',
+            'exact_hits': -1,
+            'near_hits': -1,
+            'result_count': -1,
+            'sample_text': '',
+            'error': f'probe_error:{exc.__class__.__name__}',
+        }
+    return {
+        'ok': bool(getattr(probe_result, 'query_ok', False)),
+        'source': str(getattr(probe_result, 'source', '') or 'tmview_playwright'),
+        'reason': '',
+        'exact_hits': max(0, int(getattr(probe_result, 'exact_hits', 0))),
+        'near_hits': max(0, int(getattr(probe_result, 'near_hits', 0))),
+        'result_count': max(0, int(getattr(probe_result, 'result_count', 0))),
+        'sample_text': str(getattr(probe_result, 'sample_text', '') or ''),
+        'error': str(getattr(probe_result, 'error', '') or ''),
+    }
+
+
 def cheap_trademark_similarity_signal(name: str) -> tuple[int, str]:
     best_score = 0
     best_mark = ''
@@ -1414,6 +1529,7 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
         }
     top_n = max(1, int(getattr(args, 'company_cheap_top', 8)))
     exact_hits, near_hits, result_count, sample_domains, ok, source = company_collision_signal(normalized, top_n=top_n)
+    ch_signal = company_house_signal(normalized, args, top_n=top_n)
     evidence = {
         'screen_enabled': True,
         'exact_hits': int(exact_hits),
@@ -1422,7 +1538,47 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
         'sample_domains': sample_domains,
         'source': source,
         'top_n': int(top_n),
+        'company_house': ch_signal,
     }
+    ch_ok = bool(ch_signal.get('ok'))
+    ch_exact_active = max(0, int(ch_signal.get('exact_active_hits', 0)))
+    ch_exact_any = max(0, int(ch_signal.get('exact_hits', 0)))
+    ch_near_active = max(0, int(ch_signal.get('near_active_hits', 0)))
+    ch_near_any = max(0, int(ch_signal.get('near_hits', 0)))
+
+    if ch_ok and ch_exact_active > 0:
+        return {
+            'status': 'fail',
+            'hard_fail': True,
+            'score_delta': -18.0,
+            'reason': 'company_house_exact_active',
+            'evidence': evidence,
+        }
+    if ch_ok and ch_near_active > 0:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -8.0,
+            'reason': 'company_house_near_active',
+            'evidence': evidence,
+        }
+    if ch_ok and ch_exact_any > 0:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -6.0,
+            'reason': 'company_house_exact_non_active',
+            'evidence': evidence,
+        }
+    if ch_ok and ch_near_any > 0:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -4.0,
+            'reason': 'company_house_near_non_active',
+            'evidence': evidence,
+        }
+
     if not ok or result_count < 0:
         return {
             'status': 'warn',
@@ -1464,6 +1620,99 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
         'score_delta': 0.0,
         'reason': '',
         'evidence': evidence,
+    }
+
+
+def company_house_signal(name: str, args: argparse.Namespace, *, top_n: int) -> dict[str, object]:
+    api_key = str(getattr(args, 'company_house_api_key', '') or '').strip()
+    if not api_key:
+        return {
+            'ok': False,
+            'reason': 'company_house_unconfigured',
+            'exact_hits': -1,
+            'exact_active_hits': -1,
+            'near_hits': -1,
+            'near_active_hits': -1,
+            'result_count': -1,
+            'sample_titles': [],
+        }
+
+    params = {
+        'q': name,
+        'items_per_page': str(max(1, min(20, int(top_n)))),
+    }
+    url = 'https://api.company-information.service.gov.uk/search/companies?' + parse.urlencode(params)
+    token = base64.b64encode(f'{api_key}:'.encode('utf-8')).decode('ascii')
+    req = request.Request(
+        url,
+        headers={
+            'Authorization': f'Basic {token}',
+            'User-Agent': 'brandname-generator-validator/1.0',
+            'Accept': 'application/json',
+        },
+    )
+    try:
+        with ng.urlopen_no_proxy(req, timeout=8.0) as resp:
+            payload = json.loads(resp.read().decode('utf-8', errors='replace'))
+    except Exception:
+        return {
+            'ok': False,
+            'reason': 'company_house_error',
+            'exact_hits': -1,
+            'exact_active_hits': -1,
+            'near_hits': -1,
+            'near_active_hits': -1,
+            'result_count': -1,
+            'sample_titles': [],
+        }
+
+    items = payload.get('items', []) if isinstance(payload, dict) else []
+    exact_hits = 0
+    exact_active_hits = 0
+    near_hits = 0
+    near_active_hits = 0
+    sample_titles: list[str] = []
+    for item in items[: max(1, min(20, int(top_n)))]:
+        if not isinstance(item, dict):
+            continue
+        title_raw = str(item.get('title') or '').strip()
+        if not title_raw:
+            continue
+        title = ng.normalize_alpha(title_raw)
+        title_lc = title_raw.lower()
+        if not title:
+            continue
+        status = str(item.get('company_status') or '').strip().lower()
+        is_active = status == 'active'
+        title_has_token = bool(re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title_lc))
+        legal_suffix_only = bool(
+            re.fullmatch(
+                rf'{re.escape(name)}(?:limited|ltd|llp|plc|gmbh|ag|sa|sarl|inc|corp|company)+',
+                title,
+            )
+        )
+        if title == name or legal_suffix_only:
+            exact_hits += 1
+            if is_active:
+                exact_active_hits += 1
+        else:
+            ratio = ng.similarity_with_prefix_boost(title, name)
+            if title_has_token or (ratio >= 0.90 and abs(len(title) - len(name)) <= 2):
+                near_hits += 1
+                if is_active:
+                    near_active_hits += 1
+        if len(sample_titles) < 5:
+            sample_titles.append(f'{title_raw} [{status or "unknown"}]')
+
+    return {
+        'ok': True,
+        'reason': '',
+        'exact_hits': int(exact_hits),
+        'exact_active_hits': int(exact_active_hits),
+        'near_hits': int(near_hits),
+        'near_active_hits': int(near_active_hits),
+        'result_count': int(len(items)),
+        'sample_titles': sample_titles,
     }
 
 
@@ -1700,8 +1949,12 @@ def check_tm_registry_global(name: str, args: argparse.Namespace) -> dict:
             'status': 'warn',
             'hard_fail': False,
             'score_delta': -2.0,
-            'reason': 'tm_registry_global_unknown',
-            'evidence': evidence,
+            'reason': 'tm_registry_global_review_required',
+            'evidence': {
+                **evidence,
+                'review_required': True,
+                'review_reason': 'registry_sources_unavailable',
+            },
         }
 
     exact_hits = max(0, int(signal.get('exact_hits_total', 0)))
@@ -1733,6 +1986,68 @@ def check_tm_registry_global(name: str, args: argparse.Namespace) -> dict:
             'score_delta': -5.0,
             'reason': 'tm_registry_near_warning',
             'evidence': evidence,
+        }
+    return {
+        'status': 'pass',
+        'hard_fail': False,
+        'score_delta': 0.0,
+        'reason': '',
+        'evidence': evidence,
+    }
+
+
+def check_tmview_probe(name: str, args: argparse.Namespace) -> dict:
+    normalized = normalized_or_fail(name)
+    if not bool(getattr(args, 'tmview_probe_enabled', False)):
+        return {
+            'status': 'pass',
+            'hard_fail': False,
+            'score_delta': 0.0,
+            'reason': 'tmview_probe_disabled',
+            'evidence': {'screen_enabled': False},
+        }
+    signal = tmview_probe_signal(normalized, args)
+    evidence = {
+        'screen_enabled': True,
+        **signal,
+    }
+    if not bool(signal.get('ok')):
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -2.0,
+            'reason': 'tmview_probe_review_required',
+            'evidence': {
+                **evidence,
+                'review_required': True,
+                'review_reason': 'tmview_probe_unavailable',
+            },
+        }
+
+    exact_hits = max(0, int(signal.get('exact_hits', 0)))
+    near_hits = max(0, int(signal.get('near_hits', 0)))
+    exact_fail_threshold = max(1, int(getattr(args, 'tm_registry_exact_fail_threshold', 1)))
+    near_warn_threshold = max(1, int(getattr(args, 'tm_registry_near_warn_threshold', 4)))
+
+    if exact_hits >= exact_fail_threshold:
+        return {
+            'status': 'fail',
+            'hard_fail': False,
+            'score_delta': -9.0,
+            'reason': 'tmview_probe_exact_collision',
+            'evidence': evidence,
+        }
+    if near_hits >= near_warn_threshold:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -4.0,
+            'reason': 'tmview_probe_near_review',
+            'evidence': {
+                **evidence,
+                'review_required': True,
+                'review_reason': 'tmview_probe_near_hit',
+            },
         }
     return {
         'status': 'pass',
@@ -1872,6 +2187,7 @@ CHECK_SPECS: dict[str, ValidationCheckSpec] = {
     'web': ValidationCheckSpec('web', 'expensive', check_web),
     'web_google_like': ValidationCheckSpec('web_google_like', 'expensive', check_web_google_like),
     'tm_registry_global': ValidationCheckSpec('tm_registry_global', 'expensive', check_tm_registry_global),
+    'tmview_probe': ValidationCheckSpec('tmview_probe', 'expensive', check_tmview_probe),
     'app_store': ValidationCheckSpec('app_store', 'expensive', check_app_store),
     'package': ValidationCheckSpec('package', 'expensive', check_package),
     'social': ValidationCheckSpec('social', 'expensive', check_social),
@@ -1909,6 +2225,13 @@ CACHE_SIGNATURE_FIELDS: dict[str, tuple[str, ...]] = {
         'company_cheap_exact_fail_threshold',
         'company_cheap_near_fail_threshold',
         'company_cheap_near_warn_threshold',
+    ),
+    'tmview_probe': (
+        'tmview_probe_enabled',
+        'tmview_probe_timeout_ms',
+        'tmview_probe_settle_ms',
+        'tm_registry_exact_fail_threshold',
+        'tm_registry_near_warn_threshold',
     ),
 }
 

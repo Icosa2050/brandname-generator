@@ -1,5 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
+# Avoid noisy "nice(5) failed: operation not permitted" when this script backgrounds lanes.
+unsetopt bgnice 2>/dev/null || true
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
