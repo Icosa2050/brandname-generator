@@ -78,8 +78,12 @@ json_path = sys.argv[1]
 key_path = sys.argv[2]
 keys = [k for k in key_path.split('.') if k]
 
-with open(json_path, 'r', encoding='utf-8') as fh:
-    value = json.load(fh)
+try:
+    with open(json_path, 'r', encoding='utf-8') as fh:
+        value = json.load(fh)
+except (OSError, json.JSONDecodeError) as exc:
+    print(f'Failed to read JSON from {json_path}: {exc}', file=sys.stderr)
+    raise SystemExit(1)
 
 for key in keys:
     if not isinstance(value, dict) or key not in value:

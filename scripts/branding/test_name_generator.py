@@ -24,6 +24,60 @@ class _PassthroughFilter:
 
 
 class NameGeneratorTest(unittest.TestCase):
+    def test_fetch_search_matches_serpapi_unconfigured_without_key(self) -> None:
+        with mock.patch.dict('os.environ', {}, clear=True):
+            rows, ok, source = ng.fetch_search_matches_serpapi('verodomo')
+        self.assertEqual(rows, [])
+        self.assertFalse(ok)
+        self.assertEqual(source, 'serpapi_unconfigured')
+
+    def test_fetch_search_matches_serpapi_returns_error_on_transport_failure(self) -> None:
+        with (
+            mock.patch.dict('os.environ', {'SERPAPI_KEY': 'test-key'}, clear=True),
+            mock.patch('name_generator.urlopen_no_proxy', side_effect=RuntimeError('boom')),
+        ):
+            rows, ok, source = ng.fetch_search_matches_serpapi('verodomo')
+        self.assertEqual(rows, [])
+        self.assertFalse(ok)
+        self.assertEqual(source, 'serpapi_error')
+
+    def test_fetch_search_matches_serpapi_parses_success_payload(self) -> None:
+        class _Response:
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+
+            def read(self) -> bytes:
+                return self._body
+
+            def __enter__(self) -> _Response:
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        payload = {
+            'organic_results': [
+                {'link': 'https://example.com/brand', 'title': 'Brand Home'},
+                {'link': 'https://example.org/about', 'title': 'About Brand'},
+                {'title': 'missing link'},
+            ]
+        }
+        body = json.dumps(payload).encode('utf-8')
+        with (
+            mock.patch.dict('os.environ', {'SERPAPI_KEY': 'test-key'}, clear=True),
+            mock.patch('name_generator.urlopen_no_proxy', return_value=_Response(body)),
+        ):
+            rows, ok, source = ng.fetch_search_matches_serpapi('verodomo')
+        self.assertTrue(ok)
+        self.assertEqual(source, 'serpapi')
+        self.assertEqual(
+            rows,
+            [
+                ('https://example.com/brand', 'Brand Home'),
+                ('https://example.org/about', 'About Brand'),
+            ],
+        )
+
     def test_load_failed_history_names_detects_rejected_and_validator_hard_fail(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / 'history.db'

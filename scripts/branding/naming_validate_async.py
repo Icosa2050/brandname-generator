@@ -2225,6 +2225,7 @@ CACHE_SIGNATURE_FIELDS: dict[str, tuple[str, ...]] = {
         'company_cheap_exact_fail_threshold',
         'company_cheap_near_fail_threshold',
         'company_cheap_near_warn_threshold',
+        'company_house_enabled',
     ),
     'tmview_probe': (
         'tmview_probe_enabled',
@@ -3107,6 +3108,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
+    args.company_house_enabled = bool(str(getattr(args, 'company_house_api_key', '') or '').strip())
     return asyncio.run(orchestrate(args))
 
 

@@ -1812,9 +1812,18 @@ def trademark_search_urls(name: str) -> tuple[str, str, str]:
     return dpma, swissreg, tmview
 
 
+_USE_SYSTEM_PROXY = str(os.environ.get('NAME_GENERATOR_USE_SYSTEM_PROXY', '')).strip().lower() in {
+    '1',
+    'true',
+    'yes',
+}
+_NO_PROXY_OPENER = request.build_opener(request.ProxyHandler({}))
+
+
 def urlopen_no_proxy(req: request.Request, *, timeout: float):
-    opener = request.build_opener(request.ProxyHandler({}))
-    return opener.open(req, timeout=timeout)
+    if _USE_SYSTEM_PROXY:
+        return request.urlopen(req, timeout=timeout)
+    return _NO_PROXY_OPENER.open(req, timeout=timeout)
 
 
 def fetch_json(url: str, timeout: float = 8.0, retries: int = 2) -> dict | None:
