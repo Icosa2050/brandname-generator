@@ -36,6 +36,9 @@ POST_RANK=1
 POST_RANK_TOP_N="${OPENROUTER_POST_RANK_TOP_N:-40}"
 POST_RANK_INCLUDE_NON_SHORTLIST=0
 HEALTH_CHECK=1
+HEALTH_MIN_NEW_SHORTLIST="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST:-}"
+HEALTH_MIN_NEW_SHORTLIST_QUALITY="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST_QUALITY:-6}"
+HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY:-10}"
 HTTP_REFERER="${OPENROUTER_HTTP_REFERER:-https://github.com/Icosa2050/brandname-generator}"
 X_TITLE="${OPENROUTER_X_TITLE:-brand-name-generator}"
 EXTRA_ARGS=()
@@ -97,6 +100,11 @@ Options:
   --post-rank-all                    Score all names, not only shortlist-selected ones
   --health-check                     Run post-run health checks (default: on)
   --no-health-check                  Skip post-run health checks
+  --health-min-new-shortlist <n>     Override minimum new shortlist names for health check
+  --health-min-new-shortlist-quality <n>
+                                     Quality-profile minimum new shortlist names (default: 6)
+  --health-min-new-shortlist-remote-quality <n>
+                                     Remote-quality minimum new shortlist names (default: 10)
   --http-referer <url>               OpenRouter HTTP-Referer header
   --x-title <text>                   OpenRouter X-Title header
   --with-external-checks             Keep generator external checks enabled
@@ -318,6 +326,18 @@ while [[ $# -gt 0 ]]; do
     --no-health-check)
       HEALTH_CHECK=0
       shift
+      ;;
+    --health-min-new-shortlist)
+      HEALTH_MIN_NEW_SHORTLIST="$2"
+      shift 2
+      ;;
+    --health-min-new-shortlist-quality)
+      HEALTH_MIN_NEW_SHORTLIST_QUALITY="$2"
+      shift 2
+      ;;
+    --health-min-new-shortlist-remote-quality)
+      HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY="$2"
+      shift 2
       ;;
     --http-referer)
       HTTP_REFERER="$2"
@@ -544,9 +564,24 @@ if (( RUN_RC == 0 && POST_RANK )); then
 fi
 
 if (( RUN_RC == 0 && POST_RANK && HEALTH_CHECK )); then
+  HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE="$HEALTH_MIN_NEW_SHORTLIST"
+  if [[ -z "$HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE" ]]; then
+    case "$PROFILE" in
+      "quality")
+        HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE="$HEALTH_MIN_NEW_SHORTLIST_QUALITY"
+        ;;
+      "remote_quality")
+        HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE="$HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY"
+        ;;
+      *)
+        HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE="10"
+        ;;
+    esac
+  fi
   HEALTH_CMD=(
     python3 "$ROOT_DIR/scripts/branding/check_campaign_health.py"
     --out-dir "$OUT_DIR"
+    --min-new-shortlist "$HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE"
   )
   echo "running health-check out_dir=$OUT_DIR"
   printf '$ '
