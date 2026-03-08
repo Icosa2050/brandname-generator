@@ -232,7 +232,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--timeout-s', type=float, default=8.0, help='Per-check timeout seconds.')
     parser.add_argument(
         '--checks',
-        default='adversarial,psych,descriptive,tm_cheap,company_cheap,web_google_like,tm_registry_global',
+        default='adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,tmview_probe,app_store,package,social',
         help='Comma-separated check types to execute.',
     )
     parser.add_argument(
@@ -466,7 +466,7 @@ def parse_args() -> argparse.Namespace:
         '--tmview-probe-enabled',
         dest='tmview_probe_enabled',
         action='store_true',
-        default=False,
+        default=True,
         help='Run Playwright TMview probe on finalist-only tmview_probe checks.',
     )
     parser.add_argument(
@@ -1469,11 +1469,11 @@ def check_trademark_cheap(name: str, args: argparse.Namespace) -> dict:
     normalized = ng.normalize_alpha(name)
     if not getattr(args, 'cheap_trademark_screen', True):
         return {
-            'status': 'pass',
+            'status': 'warn',
             'hard_fail': False,
-            'score_delta': 0.0,
+            'score_delta': -2.0,
             'reason': 'cheap_trademark_screen_disabled',
-            'evidence': {'screen_enabled': False},
+            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
         }
 
     similarity_score, closest_mark = cheap_trademark_similarity_signal(normalized)
@@ -1521,11 +1521,11 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
     normalized = ng.normalize_alpha(name)
     if not getattr(args, 'company_cheap_screen', True):
         return {
-            'status': 'pass',
+            'status': 'warn',
             'hard_fail': False,
-            'score_delta': 0.0,
+            'score_delta': -2.0,
             'reason': 'company_cheap_screen_disabled',
-            'evidence': {'screen_enabled': False},
+            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
         }
     top_n = max(1, int(getattr(args, 'company_cheap_top', 8)))
     exact_hits, near_hits, result_count, sample_domains, ok, source = company_collision_signal(normalized, top_n=top_n)
@@ -1613,6 +1613,18 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
             'score_delta': -4.0,
             'reason': 'company_near_warning',
             'evidence': evidence,
+        }
+    if not ch_ok:
+        return {
+            'status': 'warn',
+            'hard_fail': False,
+            'score_delta': -2.0,
+            'reason': 'company_house_review_required',
+            'evidence': {
+                **evidence,
+                'review_required': True,
+                'review_reason': str(ch_signal.get('reason') or 'company_house_unavailable'),
+            },
         }
     return {
         'status': 'pass',
@@ -1859,11 +1871,11 @@ def check_web_google_like(name: str, args: argparse.Namespace) -> dict:
     normalized = normalized_or_fail(name)
     if not bool(getattr(args, 'web_google_like_enabled', True)):
         return {
-            'status': 'pass',
+            'status': 'warn',
             'hard_fail': False,
-            'score_delta': 0.0,
+            'score_delta': -2.0,
             'reason': 'web_google_like_disabled',
-            'evidence': {'screen_enabled': False},
+            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
         }
     signal = web_google_like_signal(normalized, args)
     evidence = {
@@ -1933,11 +1945,11 @@ def check_tm_registry_global(name: str, args: argparse.Namespace) -> dict:
     normalized = normalized_or_fail(name)
     if not bool(getattr(args, 'tm_registry_global_enabled', True)):
         return {
-            'status': 'pass',
+            'status': 'warn',
             'hard_fail': False,
-            'score_delta': 0.0,
+            'score_delta': -2.0,
             'reason': 'tm_registry_global_disabled',
-            'evidence': {'screen_enabled': False},
+            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
         }
     signal = tm_registry_global_signal(normalized, args)
     evidence = {
@@ -2000,11 +2012,11 @@ def check_tmview_probe(name: str, args: argparse.Namespace) -> dict:
     normalized = normalized_or_fail(name)
     if not bool(getattr(args, 'tmview_probe_enabled', False)):
         return {
-            'status': 'pass',
+            'status': 'warn',
             'hard_fail': False,
-            'score_delta': 0.0,
+            'score_delta': -2.0,
             'reason': 'tmview_probe_disabled',
-            'evidence': {'screen_enabled': False},
+            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
         }
     signal = tmview_probe_signal(normalized, args)
     evidence = {

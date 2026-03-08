@@ -128,6 +128,10 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         with mock.patch('sys.argv', ['naming_validate_async.py', '--tmview-probe-enabled']):
             args = nva.parse_args()
         self.assertTrue(args.tmview_probe_enabled)
+        with mock.patch('sys.argv', ['naming_validate_async.py']):
+            args = nva.parse_args()
+        self.assertTrue(args.tmview_probe_enabled)
+        self.assertIn('tmview_probe', str(args.checks))
 
     def test_policy_signature_is_stable(self) -> None:
         args = _base_args()
@@ -945,6 +949,14 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(got['reason'], 'tm_registry_global_review_required')
         self.assertTrue(bool((got.get('evidence') or {}).get('review_required')))
 
+    def test_check_tm_registry_global_disabled_warns_for_review(self) -> None:
+        args = _base_args()
+        args.tm_registry_global_enabled = False
+        got = nva.check_tm_registry_global('clarivon', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertEqual(got['reason'], 'tm_registry_global_disabled')
+        self.assertTrue(bool((got.get('evidence') or {}).get('review_required')))
+
     def test_check_tm_registry_global_ignores_legacy_tmview_requirement(self) -> None:
         args = _base_args()
         args.tm_registry_require_tmview_ok = True
@@ -1005,6 +1017,33 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertEqual(got['status'], 'warn')
         self.assertFalse(got['hard_fail'])
         self.assertEqual(got['reason'], 'tmview_probe_review_required')
+        self.assertTrue(bool((got.get('evidence') or {}).get('review_required')))
+
+    def test_check_tmview_probe_disabled_warns_for_review(self) -> None:
+        args = _base_args()
+        args.tmview_probe_enabled = False
+        got = nva.check_tmview_probe('clarivon', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertEqual(got['reason'], 'tmview_probe_disabled')
+        self.assertTrue(bool((got.get('evidence') or {}).get('review_required')))
+
+    def test_check_web_google_like_disabled_warns_for_review(self) -> None:
+        args = _base_args()
+        args.web_google_like_enabled = False
+        got = nva.check_web_google_like('clarivon', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertEqual(got['reason'], 'web_google_like_disabled')
+        self.assertTrue(bool((got.get('evidence') or {}).get('review_required')))
+
+    def test_check_company_cheap_unconfigured_company_house_warns(self) -> None:
+        args = _base_args()
+        with mock.patch(
+            'naming_validate_async.company_collision_signal',
+            return_value=(0, 0, 1, '', True, 'ddg'),
+        ):
+            got = nva.check_company_cheap('clarivon', args)
+        self.assertEqual(got['status'], 'warn')
+        self.assertEqual(got['reason'], 'company_house_review_required')
         self.assertTrue(bool((got.get('evidence') or {}).get('review_required')))
 
     def test_tm_cheap_cache_signature_changes_when_blocklist_changes(self) -> None:

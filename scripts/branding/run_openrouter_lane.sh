@@ -23,7 +23,7 @@ VALIDATOR_MIN_CONCURRENCY=4
 VALIDATOR_MAX_CONCURRENCY=12
 VALIDATOR_TIMEOUT_S=6
 VALIDATOR_CHECKS="${OPENROUTER_VALIDATOR_CHECKS:-}"
-TMVIEW_PROBE_ENABLED="${OPENROUTER_TMVIEW_PROBE_ENABLED:-${OPENROUTER_TM_REGISTRY_TMVIEW_PROBE_ENABLED:-0}}"
+TMVIEW_PROBE_ENABLED="${OPENROUTER_TMVIEW_PROBE_ENABLED:-${OPENROUTER_TM_REGISTRY_TMVIEW_PROBE_ENABLED:-1}}"
 LLM_ROUNDS=1
 LLM_CANDIDATES_PER_ROUND=10
 LLM_TEMPERATURE="${OPENROUTER_LLM_TEMPERATURE:-0.8}"
@@ -494,10 +494,7 @@ if (( LANE >= SHARD_COUNT )); then
 fi
 
 if [[ -z "$VALIDATOR_CHECKS" ]]; then
-  VALIDATOR_CHECKS="adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,app_store,package,social"
-  if [[ "$TMVIEW_PROBE_ENABLED" == "1" ]]; then
-    VALIDATOR_CHECKS="${VALIDATOR_CHECKS},tmview_probe"
-  fi
+  VALIDATOR_CHECKS="adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,tmview_probe,app_store,package,social"
 fi
 
 CMD=(
