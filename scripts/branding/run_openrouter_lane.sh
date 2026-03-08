@@ -22,7 +22,8 @@ VALIDATOR_CONCURRENCY=8
 VALIDATOR_MIN_CONCURRENCY=4
 VALIDATOR_MAX_CONCURRENCY=12
 VALIDATOR_TIMEOUT_S=6
-VALIDATOR_CHECKS="${OPENROUTER_VALIDATOR_CHECKS:-adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,app_store,package,social}"
+VALIDATOR_CHECKS="${OPENROUTER_VALIDATOR_CHECKS:-}"
+TMVIEW_PROBE_ENABLED="${OPENROUTER_TMVIEW_PROBE_ENABLED:-${OPENROUTER_TM_REGISTRY_TMVIEW_PROBE_ENABLED:-1}}"
 LLM_ROUNDS=1
 LLM_CANDIDATES_PER_ROUND=10
 LLM_TEMPERATURE="${OPENROUTER_LLM_TEMPERATURE:-0.8}"
@@ -87,6 +88,10 @@ Options:
   --validator-max-concurrency <n>    Validator adaptive max concurrency (default: 8 via profile=quality)
   --validator-timeout-s <seconds>    Validator per-check timeout (default: 30 via profile=quality)
   --validator-checks <csv>           Explicit validator checks list
+  --no-tmview-probe                  Disable finalist-only Playwright TMview probe
+  --tm-registry-unknown-warn         Deprecated no-op (unknown registry states already warn)
+  --tm-registry-no-require-tmview    Deprecated no-op (tmview handled by tmview_probe)
+  --tm-registry-no-tmview-probe      Alias for --no-tmview-probe
   --llm-rounds <n>                   LLM rounds per run (default: 1)
   --llm-candidates-per-round <n>     LLM candidates requested per round (default: 10)
   --llm-temperature <float>          LLM sampling temperature (default: profile-specific)
@@ -267,6 +272,20 @@ while [[ $# -gt 0 ]]; do
       VALIDATOR_CHECKS="$2"
       USER_VALIDATOR_CHECKS="$2"
       shift 2
+      ;;
+    --tm-registry-unknown-warn)
+      shift
+      ;;
+    --tm-registry-no-tmview-probe)
+      TMVIEW_PROBE_ENABLED=0
+      shift
+      ;;
+    --no-tmview-probe)
+      TMVIEW_PROBE_ENABLED=0
+      shift
+      ;;
+    --tm-registry-no-require-tmview)
+      shift
       ;;
     --llm-rounds)
       LLM_ROUNDS="$2"
@@ -474,6 +493,10 @@ if (( LANE >= SHARD_COUNT )); then
   exit 2
 fi
 
+if [[ -z "$VALIDATOR_CHECKS" ]]; then
+  VALIDATOR_CHECKS="adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,tmview_probe,app_store,package,social"
+fi
+
 CMD=(
   python3 "$ROOT_DIR/scripts/branding/naming_campaign_runner.py"
   --max-runs "$MAX_RUNS"
@@ -505,6 +528,10 @@ CMD=(
   --shard-count "$SHARD_COUNT"
   --out-dir "$OUT_DIR"
 )
+
+if [[ "$TMVIEW_PROBE_ENABLED" == "1" ]]; then
+  CMD+=(--validator-tmview-probe-enabled)
+fi
 
 if (( NO_EXTERNAL_CHECKS )); then
   CMD+=(--generator-no-external-checks)

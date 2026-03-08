@@ -20,6 +20,7 @@ import datetime as dt
 import html
 import itertools
 import json
+import os
 import re
 import sqlite3
 import time
@@ -1811,11 +1812,25 @@ def trademark_search_urls(name: str) -> tuple[str, str, str]:
     return dpma, swissreg, tmview
 
 
+_USE_SYSTEM_PROXY = str(os.environ.get('NAME_GENERATOR_USE_SYSTEM_PROXY', '')).strip().lower() in {
+    '1',
+    'true',
+    'yes',
+}
+_NO_PROXY_OPENER = request.build_opener(request.ProxyHandler({}))
+
+
+def urlopen_no_proxy(req: request.Request, *, timeout: float):
+    if _USE_SYSTEM_PROXY:
+        return request.urlopen(req, timeout=timeout)
+    return _NO_PROXY_OPENER.open(req, timeout=timeout)
+
+
 def fetch_json(url: str, timeout: float = 8.0, retries: int = 2) -> dict | None:
     req = request.Request(url, headers={'User-Agent': USER_AGENT})
     for i in range(retries + 1):
         try:
-            with request.urlopen(req, timeout=timeout) as resp:
+            with urlopen_no_proxy(req, timeout=timeout) as resp:
                 data = resp.read().decode('utf-8', errors='replace')
                 return json.loads(data)
         except Exception:
@@ -1829,7 +1844,7 @@ def fetch_text(url: str, timeout: float = 8.0, retries: int = 2) -> str | None:
     req = request.Request(url, headers={'User-Agent': USER_AGENT})
     for i in range(retries + 1):
         try:
-            with request.urlopen(req, timeout=timeout) as resp:
+            with urlopen_no_proxy(req, timeout=timeout) as resp:
                 return resp.read().decode('utf-8', errors='replace')
         except Exception:
             if i == retries:
@@ -1842,7 +1857,7 @@ def fetch_status(url: str, timeout: float = 8.0, retries: int = 1, method: str =
     req = request.Request(url, headers={'User-Agent': USER_AGENT}, method=method)
     for i in range(retries + 1):
         try:
-            with request.urlopen(req, timeout=timeout) as resp:
+            with urlopen_no_proxy(req, timeout=timeout) as resp:
                 _ = resp.read(64)
                 return int(resp.status)
         except error.HTTPError as e:
@@ -1948,7 +1963,7 @@ def rdap_available(name: str, tld: str) -> str:
     }
     req = request.Request(endpoints[tld], headers={'User-Agent': USER_AGENT})
     try:
-        with request.urlopen(req, timeout=8.0) as resp:
+        with urlopen_no_proxy(req, timeout=8.0) as resp:
             _ = resp.read(64)
             if resp.status == 200:
                 return 'no'
@@ -1970,7 +1985,7 @@ def rdap_available(name: str, tld: str) -> str:
 def rdap_available_fqdn(fqdn: str) -> str:
     req = request.Request(f'https://rdap.org/domain/{fqdn}', headers={'User-Agent': USER_AGENT})
     try:
-        with request.urlopen(req, timeout=8.0) as resp:
+        with urlopen_no_proxy(req, timeout=8.0) as resp:
             _ = resp.read(64)
             if resp.status == 200:
                 return 'no'
@@ -2065,7 +2080,53 @@ def parse_bing_results(page: str) -> list[tuple[str, str]]:
     )
 
 
+def parse_serpapi_results(payload: dict) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for item in payload.get('organic_results', []) or []:
+        if not isinstance(item, dict):
+            continue
+        link = str(item.get('link') or '').strip()
+        title = str(item.get('title') or '').strip()
+        if not link:
+            continue
+        rows.append((link, title))
+    return rows
+
+
+def fetch_search_matches_serpapi(query: str) -> tuple[list[tuple[str, str]], bool, str]:
+    api_key = str(
+        os.environ.get('SERPAPI_KEY', '')
+        or os.environ.get('SERP_API_KEY', '')
+        or ''
+    ).strip()
+    if not api_key:
+        return [], False, 'serpapi_unconfigured'
+    engine = str(os.environ.get('SERPAPI_ENGINE', 'google') or 'google').strip().lower()
+    gl = str(os.environ.get('SERPAPI_GL', 'de') or 'de').strip().lower()
+    hl = str(os.environ.get('SERPAPI_HL', 'en') or 'en').strip().lower()
+    params = {
+        'engine': engine,
+        'q': query,
+        'api_key': api_key,
+        'num': '10',
+        'gl': gl,
+        'hl': hl,
+    }
+    url = 'https://serpapi.com/search.json?' + parse.urlencode(params)
+    req = request.Request(url, headers={'User-Agent': 'brandname-generator-validator/1.0'})
+    try:
+        with urlopen_no_proxy(req, timeout=8.0) as resp:
+            payload = json.loads(resp.read().decode('utf-8', errors='replace'))
+    except Exception:
+        return [], False, 'serpapi_error'
+    rows = parse_serpapi_results(payload if isinstance(payload, dict) else {})
+    return rows, True, 'serpapi'
+
+
 def fetch_search_matches(query: str) -> tuple[list[tuple[str, str]], bool, str]:
+    serp_rows, serp_ok, serp_source = fetch_search_matches_serpapi(query)
+    if serp_ok:
+        return serp_rows, True, serp_source
     source = 'ddg'
     url = 'https://duckduckgo.com/html/?' + parse.urlencode({'q': query})
     page = fetch_text(url, timeout=6.0, retries=1)
