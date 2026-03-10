@@ -469,6 +469,31 @@ def latest_run_csv(out_dir: Path) -> Path:
     return run_files[-1]
 
 
+def validated_survivors_csv(out_dir: Path) -> Path:
+    return out_dir / 'postrank' / 'validated_survivors.csv'
+
+
+def resolve_input_csv(
+    *,
+    out_dir: Path,
+    explicit_input_csv: str,
+    prefer_validated_survivors: bool,
+) -> tuple[Path, str]:
+    if explicit_input_csv:
+        return Path(explicit_input_csv).expanduser().resolve(), 'explicit_input_csv'
+    if prefer_validated_survivors:
+        survivors_csv = validated_survivors_csv(out_dir)
+        if survivors_csv.exists():
+            return survivors_csv, 'validated_survivors'
+    return latest_run_csv(out_dir), 'latest_run_csv'
+
+
+def infer_base_out_dir(input_csv: Path) -> Path:
+    if input_csv.parent.name in {'runs', 'postrank'}:
+        return input_csv.parent.parent
+    return input_csv.parent
+
+
 def should_keep_row(row: dict[str, str], include_non_shortlist: bool) -> bool:
     if include_non_shortlist:
         return True
@@ -542,6 +567,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Deterministically rerank shortlist names with DE/EN pronounceability rubric.')
     parser.add_argument('--out-dir', default='', help='Campaign output dir (used to locate latest run csv).')
     parser.add_argument('--input-csv', default='', help='Explicit run csv path (overrides --out-dir lookup).')
+    parser.add_argument(
+        '--no-prefer-validated-survivors',
+        dest='prefer_validated_survivors',
+        action='store_false',
+        default=True,
+        help='Do not automatically use postrank/validated_survivors.csv when it exists.',
+    )
     parser.add_argument('--output-csv', default='', help='Output ranked csv path.')
     parser.add_argument('--output-json', default='', help='Output summary json path.')
     parser.add_argument('--top-n', type=int, default=40, help='Top N names to keep in output.')
@@ -551,20 +583,57 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.input_csv:
-        input_csv = Path(args.input_csv).expanduser().resolve()
-    else:
-        out_dir_raw = str(args.out_dir or '').strip()
-        if not out_dir_raw:
-            raise SystemExit('Provide --input-csv or --out-dir.')
-        input_csv = latest_run_csv(Path(out_dir_raw).expanduser().resolve())
+    out_dir_raw = str(args.out_dir or '').strip()
+    if not out_dir_raw and not args.input_csv:
+        raise SystemExit('Provide --input-csv or --out-dir.')
+    out_dir = Path(out_dir_raw).expanduser().resolve() if out_dir_raw else infer_base_out_dir(Path(args.input_csv).expanduser().resolve())
+    base_out_dir = out_dir
+    output_csv = (
+        Path(args.output_csv).expanduser().resolve()
+        if args.output_csv
+        else base_out_dir / 'postrank' / 'deterministic_rubric_rank.csv'
+    )
+    output_json = (
+        Path(args.output_json).expanduser().resolve()
+        if args.output_json
+        else base_out_dir / 'postrank' / 'deterministic_rubric_summary.json'
+    )
+    input_csv, input_mode = resolve_input_csv(
+        out_dir=out_dir,
+        explicit_input_csv=str(args.input_csv or '').strip(),
+        prefer_validated_survivors=bool(args.prefer_validated_survivors),
+    )
 
     if not input_csv.exists():
         raise SystemExit(f'input_csv_not_found:{input_csv}')
 
     rows = load_names(input_csv, include_non_shortlist=bool(args.include_non_shortlist))
     if not rows:
-        raise SystemExit(f'no_names_to_score:{input_csv}')
+        write_ranked_csv(output_csv, [])
+        summary = {
+            'input_csv': str(input_csv),
+            'input_mode': input_mode,
+            'output_csv': str(output_csv),
+            'top_n': 0,
+            'name_count_scored': 0,
+            'mean_total_score': 0.0,
+            'median_total_score': 0.0,
+            'min_total_score': 0.0,
+            'max_total_score': 0.0,
+            'iqr_total_score': 0.0,
+            'score_ceiling_share': 0.0,
+            'discrimination_warning': False,
+            'recommendation_counts': {
+                label: 0
+                for label in ('strong', 'consider', 'maybe', 'drop')
+            },
+            'top_names': [],
+            'empty_input': True,
+        }
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+        print(f'postrank_empty input={input_csv} output_csv={output_csv} output_json={output_json}')
+        return 0
 
     score_context = build_score_context([name for name, _sel, _rec in rows])
     scored = [
@@ -597,18 +666,6 @@ def main() -> int:
     top_n = max(1, int(args.top_n))
     scored = scored[:top_n]
 
-    base_out_dir = input_csv.parents[1] if input_csv.parent.name == 'runs' else input_csv.parent
-    output_csv = (
-        Path(args.output_csv).expanduser().resolve()
-        if args.output_csv
-        else base_out_dir / 'postrank' / 'deterministic_rubric_rank.csv'
-    )
-    output_json = (
-        Path(args.output_json).expanduser().resolve()
-        if args.output_json
-        else base_out_dir / 'postrank' / 'deterministic_rubric_summary.json'
-    )
-
     write_ranked_csv(output_csv, scored)
 
     p25 = percentile(all_score_values, 25.0)
@@ -618,6 +675,7 @@ def main() -> int:
 
     summary = {
         'input_csv': str(input_csv),
+        'input_mode': input_mode,
         'output_csv': str(output_csv),
         'top_n': len(scored),
         'name_count_scored': len(rows),

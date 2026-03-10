@@ -28,11 +28,55 @@ class EuipoProbeResult:
     near_hits: int
     result_count: int
     sample_text: str
-    error: str
+    error: str = ''
+    exact_sample_text: str = ''
+    active_exact_hits: int = 0
+    inactive_exact_hits: int = 0
+    unknown_exact_hits: int = 0
 
 
 def normalize_alpha(raw: str) -> str:
     return ''.join(ch for ch in str(raw or '').lower() if ch.isalpha())
+
+
+ACTIVE_STATUS_PATTERNS = (
+    'registered',
+    'filed',
+    'published',
+    'pending',
+    'accepted',
+    'opposed',
+    'under examination',
+)
+
+INACTIVE_STATUS_PATTERNS = (
+    'expired',
+    'ended',
+    'cancelled',
+    'canceled',
+    'withdrawn',
+    'refused',
+    'invalidated',
+    'revoked',
+    'abandoned',
+    'rejected',
+    'surrendered',
+    'ceased',
+    'dead',
+)
+
+
+def classify_tm_status(raw: str) -> str:
+    plain = re.sub(r'\s+', ' ', str(raw or '').strip().lower())
+    if not plain:
+        return 'unknown'
+    for token in INACTIVE_STATUS_PATTERNS:
+        if re.search(rf'(^|[^a-z]){re.escape(token)}([^a-z]|$)', plain):
+            return 'inactive'
+    for token in ACTIVE_STATUS_PATTERNS:
+        if re.search(rf'(^|[^a-z]){re.escape(token)}([^a-z]|$)', plain):
+            return 'active'
+    return 'unknown'
 
 
 def build_euipo_url(name: str) -> str:
@@ -62,6 +106,82 @@ def _title_exact_or_near(name: str, text: str) -> tuple[bool, bool]:
     return False, False
 
 
+BODY_RESULT_CONTEXT_TOKENS = (
+    'office of origin',
+    'trade marks:',
+    'goods and services',
+    'applicant name',
+    'application number',
+    'view this trade mark in the office of origin',
+    'trade mark office',
+)
+
+
+def _has_body_result_context(text: str) -> bool:
+    plain = str(text or '').lower()
+    return any(token in plain for token in BODY_RESULT_CONTEXT_TOKENS)
+
+
+def _body_result_segments(body_text: str) -> list[str]:
+    plain = re.sub(r'[ \t]+', ' ', str(body_text or '').replace('\r', '').replace('\n', ' | '))
+    segments: list[str] = []
+    for raw in plain.split(' | - | ')[1:]:
+        segment = raw.strip(' |')
+        if not segment:
+            continue
+        if not _has_body_result_context(segment):
+            continue
+        segments.append(segment)
+    return segments
+
+
+def _segment_title(segment: str) -> str:
+    for token in str(segment or '').split('|'):
+        plain = re.sub(r'\s+', ' ', token).strip()
+        if plain:
+            return plain
+    return ''
+
+
+def _probe_from_body_segments(name: str, body_text: str) -> tuple[int, int, list[str], list[str], int, int, int]:
+    exact_hits = 0
+    near_hits = 0
+    samples: list[str] = []
+    exact_samples: list[str] = []
+    active_exact_hits = 0
+    inactive_exact_hits = 0
+    unknown_exact_hits = 0
+
+    for segment in _body_result_segments(body_text):
+        title = _segment_title(segment)
+        is_exact, is_near = _title_exact_or_near(name, title)
+        if is_exact:
+            exact_hits += 1
+            status = classify_tm_status(segment)
+            if status == 'active':
+                active_exact_hits += 1
+            elif status == 'inactive':
+                inactive_exact_hits += 1
+            else:
+                unknown_exact_hits += 1
+            if len(exact_samples) < 3:
+                exact_samples.append(segment[:180])
+        elif is_near:
+            near_hits += 1
+        if len(samples) < 2 and (is_exact or is_near):
+            samples.append(segment[:180])
+
+    return (
+        exact_hits,
+        near_hits,
+        samples,
+        exact_samples,
+        active_exact_hits,
+        inactive_exact_hits,
+        unknown_exact_hits,
+    )
+
+
 class EuipoProbe:
     def __init__(
         self,
@@ -75,7 +195,7 @@ class EuipoProbe:
         self.headless = bool(headless)
         self._playwright = None
         self._browser = None
-        self._page = None
+        self._context = None
         self._import_error = ''
 
     def __enter__(self) -> EuipoProbe:
@@ -90,11 +210,10 @@ class EuipoProbe:
                 headless=self.headless,
                 args=['--disable-blink-features=AutomationControlled'],
             )
-            context = self._browser.new_context(
+            self._context = self._browser.new_context(
                 java_script_enabled=True,
             )
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-            self._page = context.new_page()
+            self._context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         except Exception as exc:  # pragma: no cover - env-dependent
             self._import_error = f'playwright_launch_error:{exc.__class__.__name__}'
         return self
@@ -112,7 +231,7 @@ class EuipoProbe:
             pass
 
     def available(self) -> bool:
-        return bool(self._page is not None and not self._import_error)
+        return bool(self._context is not None and not self._import_error)
 
     def probe_name(self, name: str) -> EuipoProbeResult:
         normalized = normalize_alpha(name)
@@ -142,15 +261,17 @@ class EuipoProbe:
                 error=self._import_error or 'playwright_unavailable',
             )
 
+        page = None
         try:
-            assert self._page is not None
-            self._page.goto(url, wait_until='domcontentloaded', timeout=self.timeout_ms)
+            assert self._context is not None
+            page = self._context.new_page()
+            page.goto(url, wait_until='domcontentloaded', timeout=self.timeout_ms)
             if self.settle_ms > 0:
-                self._page.wait_for_timeout(self.settle_ms)
+                page.wait_for_timeout(self.settle_ms)
             # TMview hash routes do not always auto-run the query. Force an
             # explicit search interaction to align with UI behavior.
             try:
-                search_input = self._page.locator(
+                search_input = page.locator(
                     'input[type="text"], input[type="search"], input[placeholder*="Trade" i], input[placeholder*="mark" i]'
                 )
                 if search_input.count() > 0:
@@ -158,17 +279,127 @@ class EuipoProbe:
                     box.click(timeout=1500)
                     box.fill(normalized)
                     box.press('Enter')
-                btn = self._page.get_by_role('button', name=re.compile('search', re.IGNORECASE))
+                btn = page.get_by_role('button', name=re.compile('search', re.IGNORECASE))
                 if btn.count() > 0:
                     btn.first.click(timeout=1500)
             except Exception:
                 pass
 
             # Trigger lazy rendering if needed.
-            self._page.mouse.wheel(0, 1200)
-            self._page.wait_for_timeout(max(1200, min(3000, self.settle_ms)))
+            page.mouse.wheel(0, 1200)
+            page.wait_for_timeout(max(1200, min(3000, self.settle_ms)))
 
-            body_text = self._page.inner_text('body')
+            body_text = page.inner_text('body')
+            # Authoritative negative signal.
+            if re.search(r'No\s+rows\s+found', body_text, flags=re.IGNORECASE):
+                result_count = 0
+            else:
+                result_count = -1
+            text_patterns = [
+                r'Show\s+all\s+(\d[\d., ]{0,12})\s+results',
+                r'(\d[\d., ]{0,12})\s+results',
+            ]
+            for pattern in text_patterns:
+                if result_count >= 0:
+                    break
+                match = re.search(pattern, body_text, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                token = re.sub(r'[^0-9]', '', match.group(1))
+                if not token:
+                    continue
+                try:
+                    result_count = int(token)
+                except ValueError:
+                    result_count = 0
+            if result_count < 0 and re.search(r'No\s+rows\s+found', body_text, flags=re.IGNORECASE):
+                result_count = 0
+            if result_count < 0:
+                result_count = 0
+
+            # Collect candidate result-like rows from broad selectors.
+            rows: list[str] = []
+            try:
+                extracted = page.evaluate(
+                    """() => {
+                      const selectors = [
+                        'table tbody tr',
+                        'div[role="row"]',
+                        'li',
+                        'article',
+                        '.result',
+                        '.results',
+                        '.search-result'
+                      ];
+                      const out = [];
+                      for (const sel of selectors) {
+                        for (const el of document.querySelectorAll(sel)) {
+                          const txt = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                          if (!txt) continue;
+                          if (txt.length < 6) continue;
+                          out.push(txt);
+                          if (out.length >= 400) return out;
+                        }
+                      }
+                      return out;
+                    }"""
+                )
+                if isinstance(extracted, list):
+                    rows = [str(item) for item in extracted]
+            except Exception:
+                rows = []
+
+            exact_hits = 0
+            near_hits = 0
+            samples: list[str] = []
+            exact_samples: list[str] = []
+            active_exact_hits = 0
+            inactive_exact_hits = 0
+            unknown_exact_hits = 0
+            for row in rows:
+                is_exact, is_near = _title_exact_or_near(normalized, row)
+                if is_exact:
+                    exact_hits += 1
+                    status = classify_tm_status(row)
+                    if status == 'active':
+                        active_exact_hits += 1
+                    elif status == 'inactive':
+                        inactive_exact_hits += 1
+                    else:
+                        unknown_exact_hits += 1
+                    if len(exact_samples) < 3:
+                        exact_samples.append(row[:180])
+                elif is_near:
+                    near_hits += 1
+                if len(samples) < 2 and (is_exact or is_near):
+                    samples.append(row[:180])
+
+            if exact_hits == 0 and near_hits == 0 and result_count > 0:
+                (
+                    exact_hits,
+                    near_hits,
+                    samples,
+                    exact_samples,
+                    active_exact_hits,
+                    inactive_exact_hits,
+                    unknown_exact_hits,
+                ) = _probe_from_body_segments(normalized, body_text)
+
+            return EuipoProbeResult(
+                name=normalized,
+                url=url,
+                query_ok=True,
+                source='tmview_playwright',
+                exact_hits=exact_hits,
+                near_hits=near_hits,
+                result_count=result_count,
+                sample_text=' || '.join(samples),
+                exact_sample_text=' || '.join(exact_samples),
+                active_exact_hits=active_exact_hits,
+                inactive_exact_hits=inactive_exact_hits,
+                unknown_exact_hits=unknown_exact_hits,
+                error='',
+            )
         except Exception as exc:  # pragma: no cover - env-dependent
             return EuipoProbeResult(
                 name=normalized,
@@ -181,97 +412,12 @@ class EuipoProbe:
                 sample_text='',
                 error=f'page_error:{exc.__class__.__name__}',
             )
-
-        # Authoritative negative signal.
-        if re.search(r'No\s+rows\s+found', body_text, flags=re.IGNORECASE):
-            result_count = 0
-        else:
-            result_count = -1
-        text_patterns = [
-            r'Show\s+all\s+(\d[\d., ]{0,12})\s+results',
-            r'(\d[\d., ]{0,12})\s+results',
-        ]
-        for pattern in text_patterns:
-            if result_count >= 0:
-                break
-            match = re.search(pattern, body_text, flags=re.IGNORECASE)
-            if not match:
-                continue
-            token = re.sub(r'[^0-9]', '', match.group(1))
-            if not token:
-                continue
+        finally:
             try:
-                result_count = int(token)
-            except ValueError:
-                result_count = 0
-        if result_count < 0 and re.search(r'No\s+rows\s+found', body_text, flags=re.IGNORECASE):
-            result_count = 0
-        if result_count < 0:
-            result_count = 0
-
-        # Collect candidate result-like rows from broad selectors.
-        rows: list[str] = []
-        try:
-            extracted = self._page.evaluate(
-                """() => {
-                  const selectors = [
-                    'table tbody tr',
-                    'div[role="row"]',
-                    'li',
-                    'article',
-                    '.result',
-                    '.results',
-                    '.search-result'
-                  ];
-                  const out = [];
-                  for (const sel of selectors) {
-                    for (const el of document.querySelectorAll(sel)) {
-                      const txt = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-                      if (!txt) continue;
-                      if (txt.length < 6) continue;
-                      out.push(txt);
-                      if (out.length >= 400) return out;
-                    }
-                  }
-                  return out;
-                }"""
-            )
-            if isinstance(extracted, list):
-                rows = [str(item) for item in extracted]
-        except Exception:
-            rows = []
-
-        exact_hits = 0
-        near_hits = 0
-        samples: list[str] = []
-        for row in rows:
-            is_exact, is_near = _title_exact_or_near(normalized, row)
-            if is_exact:
-                exact_hits += 1
-            elif is_near:
-                near_hits += 1
-            if len(samples) < 2 and (is_exact or is_near):
-                samples.append(row[:180])
-
-        # Fallback signal from full body.
-        if exact_hits == 0:
-            body_norm = normalize_alpha(body_text)
-            if normalized and normalized in body_norm:
-                # Avoid hard "exact" unless result_count suggests actual result rows.
-                if result_count > 0:
-                    exact_hits = 1
-
-        return EuipoProbeResult(
-            name=normalized,
-            url=url,
-            query_ok=True,
-            source='tmview_playwright',
-            exact_hits=exact_hits,
-            near_hits=near_hits,
-            result_count=result_count,
-            sample_text=' || '.join(samples),
-            error='',
-        )
+                if page is not None:
+                    page.close()
+            except Exception:
+                pass
 
 
 def parse_names(raw: str) -> list[str]:

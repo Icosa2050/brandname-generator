@@ -218,6 +218,11 @@ class NamingCampaignRunnerShardSchedulingTest(unittest.TestCase):
             # Rows 1 and 2 count; rows 3 and 4 declare mismatching shard metadata.
             self.assertEqual(got, 2)
 
+    def test_default_collision_first_validator_checks_exclude_tmview_probe(self) -> None:
+        self.assertNotIn('tmview_probe', ncr.DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS)
+        checks = ncr.ensure_collision_first_validator_checks('')
+        self.assertNotIn('tmview_probe', checks.split(','))
+
     def test_build_hybrid_provider_round_schedule_respects_targets(self) -> None:
         schedule = ncr.build_hybrid_provider_round_schedule(
             total_rounds=4,

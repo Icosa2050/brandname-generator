@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import csv
 import datetime as dt
 import hashlib
 import json
@@ -32,7 +33,6 @@ from urllib import parse, request
 import name_generator as ng
 import naming_db as ndb
 import path_config as bpaths
-from euipo_esearch_probe import EuipoProbe
 
 
 @dataclass
@@ -204,6 +204,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--candidate-limit', type=int, default=100, help='Max candidates to validate in this run.')
     parser.add_argument(
+        '--candidate-source',
+        choices=['state', 'shortlist_selected'],
+        default='state',
+        help='Candidate source mode. "state" loads by candidate state, "shortlist_selected" loads shortlisted candidates.',
+    )
+    parser.add_argument(
+        '--shortlist-source-run-id',
+        type=int,
+        default=0,
+        help='When candidate-source=shortlist_selected, explicit shortlist run id to validate (default: latest shortlist run).',
+    )
+    parser.add_argument(
         '--expensive-finalist-limit',
         type=int,
         default=30,
@@ -232,7 +244,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--timeout-s', type=float, default=8.0, help='Per-check timeout seconds.')
     parser.add_argument(
         '--checks',
-        default='adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,tmview_probe,app_store,package,social',
+        default='adversarial,psych,descriptive,tm_cheap,company_cheap,web_google_like,tm_registry_global',
         help='Comma-separated check types to execute.',
     )
     parser.add_argument(
@@ -324,11 +336,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help='Warn threshold for near company-like hits below fail threshold.',
-    )
-    parser.add_argument(
-        '--company-house-api-key',
-        default=str(os.environ.get('COMPANIES_HOUSE_API_KEY', '')),
-        help='Companies House API key for /search/companies lookup (optional).',
     )
     parser.add_argument('--min-trust-proxy', type=int, default=50)
     parser.add_argument('--warn-trust-proxy', type=int, default=62)
@@ -448,62 +455,72 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help='Warn when aggregated near registry hits reach this threshold.',
     )
+    parser.add_argument('--store-countries', default='de,ch,us')
+    parser.add_argument('--social-unavailable-fail-threshold', type=int, default=3)
+    parser.add_argument(
+        '--required-domain-tlds',
+        default='',
+        help='Override required domain TLDs as csv (for example: com,de,ch).',
+    )
+    parser.add_argument('--strict-required-domains', action='store_true')
+    # Deprecated compatibility flags kept as no-ops so older wrappers do not
+    # hard-fail argument parsing.
     parser.add_argument(
         '--tm-registry-unknown-hard-fail',
         dest='tm_registry_unknown_hard_fail',
         action='store_true',
         default=False,
-        help='Deprecated compatibility flag. tm_registry_global unknown/unavailable responses now warn for review.',
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--tm-registry-require-tmview-ok',
         dest='tm_registry_require_tmview_ok',
         action='store_true',
         default=False,
-        help='Deprecated compatibility flag. TMview availability is now handled by tmview_probe.',
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--tmview-probe-enabled',
         dest='tmview_probe_enabled',
         action='store_true',
-        default=True,
-        help='Run Playwright TMview probe on finalist-only tmview_probe checks.',
+        default=False,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--tm-registry-tmview-probe-enabled',
         dest='tmview_probe_enabled',
         action='store_true',
+        default=False,
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--tmview-probe-timeout-ms',
         dest='tmview_probe_timeout_ms',
         type=int,
-        default=20000,
-        help='Timeout for TMview Playwright probe.',
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--tm-registry-tmview-timeout-ms',
         dest='tmview_probe_timeout_ms',
         type=int,
+        default=None,
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--tmview-probe-settle-ms',
         dest='tmview_probe_settle_ms',
         type=int,
-        default=2500,
-        help='Settle delay for TMview Playwright probe.',
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--tm-registry-tmview-settle-ms',
         dest='tmview_probe_settle_ms',
         type=int,
+        default=None,
         help=argparse.SUPPRESS,
     )
-    parser.add_argument('--store-countries', default='de,ch,us')
-    parser.add_argument('--social-unavailable-fail-threshold', type=int, default=3)
-    parser.add_argument('--strict-required-domains', action='store_true')
     parser.add_argument('--progress', dest='progress', action='store_true', default=True)
     parser.add_argument('--no-progress', dest='progress', action='store_false')
     parser.add_argument(
@@ -577,7 +594,12 @@ def parse_args() -> argparse.Namespace:
         dest='stage_events',
         action='store_false',
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    _, invalid_required_tlds = parse_required_domain_tlds(getattr(args, 'required_domain_tlds', ''))
+    if invalid_required_tlds:
+        invalid_csv = ','.join(invalid_required_tlds)
+        parser.error(f'Unsupported required domain TLDs: {invalid_csv}')
+    return args
 
 
 def parse_csv_set(raw: str) -> list[str]:
@@ -634,11 +656,11 @@ MEMORY_POLICY_FIELDS: tuple[str, ...] = (
     'tm_registry_exact_fail_threshold',
     'tm_registry_near_fail_threshold',
     'tm_registry_near_warn_threshold',
-    'tm_registry_unknown_hard_fail',
-    'tm_registry_require_tmview_ok',
     'social_unavailable_fail_threshold',
+    'required_domain_tlds',
     'strict_required_domains',
 )
+
 
 def exclusion_memory_policy_signature(
     *,
@@ -657,6 +679,9 @@ def exclusion_memory_policy_signature(
         'blocklist_fingerprint': CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT,
     }
     for field in MEMORY_POLICY_FIELDS:
+        if field == 'required_domain_tlds':
+            payload[field] = resolve_required_domain_tlds(args)
+            continue
         payload[field] = getattr(args, field, None)
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]
@@ -888,6 +913,58 @@ def load_candidates(conn: sqlite3.Connection, states: list[str], limit: int) -> 
     ]
 
 
+def resolve_shortlist_run_id(conn: sqlite3.Connection, preferred_run_id: int = 0) -> int:
+    if int(preferred_run_id) > 0:
+        return int(preferred_run_id)
+    row = conn.execute(
+        """
+        SELECT sd.run_id
+        FROM shortlist_decisions sd
+        WHERE sd.selected = 1
+        ORDER BY sd.run_id DESC, COALESCE(sd.shortlist_rank, 999999), sd.candidate_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return 0
+    return int(row[0])
+
+
+def load_shortlist_candidates(conn: sqlite3.Connection, shortlist_run_id: int, limit: int) -> list[CandidateRow]:
+    if int(shortlist_run_id) <= 0:
+        return []
+    rows = conn.execute(
+        """
+        SELECT
+          c.id,
+          c.name_display,
+          c.state,
+          COALESCE(cs.total_score, c.current_score, c.score_total, 0.0) AS current_score,
+          COALESCE(cs.recommendation, c.current_recommendation, '') AS current_recommendation
+        FROM shortlist_decisions sd
+        JOIN candidates c ON c.id = sd.candidate_id
+        LEFT JOIN candidate_scores cs
+          ON cs.candidate_id = sd.candidate_id
+         AND cs.run_id = sd.run_id
+        WHERE sd.run_id = ?
+          AND sd.selected = 1
+        ORDER BY COALESCE(sd.shortlist_rank, 999999), LOWER(c.name_display), c.id
+        LIMIT ?
+        """,
+        (int(shortlist_run_id), max(1, int(limit))),
+    ).fetchall()
+    return [
+        CandidateRow(
+            candidate_id=int(row[0]),
+            name_display=str(row[1]),
+            state=str(row[2]),
+            current_score=float(row[3] or 0.0),
+            current_recommendation=str(row[4] or ''),
+        )
+        for row in rows
+    ]
+
+
 BASE_CHEAP_TRADEMARK_BLOCKLIST = sorted(
     set(
         list(ng.PROTECTED_MARKS)
@@ -935,6 +1012,29 @@ COMPANY_ENTITY_HINTS: tuple[str, ...] = (
     'official',
 )
 
+COMPANY_LEGAL_SUFFIX_TOKENS: set[str] = {
+    'ab',
+    'ag',
+    'bv',
+    'co',
+    'company',
+    'corp',
+    'corporation',
+    'gmbh',
+    'holding',
+    'inc',
+    'incorporated',
+    'kg',
+    'limited',
+    'llc',
+    'ltd',
+    'oy',
+    'plc',
+    'sarl',
+    'sa',
+    'ug',
+}
+
 
 def _update_cheap_trademark_blocklist_fingerprint() -> None:
     global CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT
@@ -975,6 +1075,78 @@ def _looks_company_result(title_lc: str, domain: str) -> bool:
     if token in {'linkedin', 'wikipedia', 'facebook', 'instagram', 'x', 'twitter'}:
         return False
     return True
+
+
+def _normalize_company_entity_name(text: str) -> str:
+    tokens = re.findall(r'[a-z0-9]+', str(text or '').lower())
+    filtered = [token for token in tokens if token not in COMPANY_LEGAL_SUFFIX_TOKENS]
+    return ng.normalize_alpha(' '.join(filtered))
+
+
+def company_house_company_signal(name: str, args: argparse.Namespace) -> dict[str, object]:
+    api_key = str(os.getenv('COMPANIES_HOUSE_API_KEY') or '').strip()
+    if not api_key:
+        return {
+            'ok': False,
+            'source': 'companies_house_unconfigured',
+            'exact_active_hits': 0,
+            'near_active_hits': 0,
+            'result_count': 0,
+            'sample_titles': [],
+        }
+    params = {
+        'q': str(name or ''),
+        'items_per_page': '20',
+    }
+    url = 'https://api.company-information.service.gov.uk/search/companies?' + parse.urlencode(params)
+    req = request.Request(url, headers={'User-Agent': 'brandname-generator-validator/1.0'})
+    token = base64.b64encode(f'{api_key}:'.encode('utf-8')).decode('ascii')
+    req.add_header('Authorization', f'Basic {token}')
+    timeout_s = max(1.0, min(10.0, float(getattr(args, 'timeout_s', 8.0))))
+    try:
+        with ng.open_url(req, timeout=timeout_s) as resp:
+            payload = json.loads(resp.read().decode('utf-8', errors='replace'))
+    except Exception:
+        return {
+            'ok': False,
+            'source': 'companies_house_error',
+            'exact_active_hits': 0,
+            'near_active_hits': 0,
+            'result_count': -1,
+            'sample_titles': [],
+        }
+
+    items = payload.get('items', []) or []
+    exact_active_hits = 0
+    near_active_hits = 0
+    sample_titles: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get('title') or '').strip()
+        if title and len(sample_titles) < 6:
+            sample_titles.append(title)
+        if str(item.get('company_status') or '').strip().lower() != 'active':
+            continue
+        normalized_title = _normalize_company_entity_name(title)
+        if not normalized_title:
+            continue
+        if normalized_title == name:
+            exact_active_hits += 1
+            continue
+        ratio = ng.similarity_with_prefix_boost(normalized_title, name)
+        starts_or_contains = normalized_title.startswith(name) or name in normalized_title
+        if starts_or_contains or (ratio >= 0.90 and abs(len(normalized_title) - len(name)) <= max(4, len(name))):
+            near_active_hits += 1
+
+    return {
+        'ok': True,
+        'source': 'companies_house',
+        'exact_active_hits': int(exact_active_hits),
+        'near_active_hits': int(near_active_hits),
+        'result_count': int(len(items)),
+        'sample_titles': sample_titles,
+    }
 
 
 def company_collision_signal(name: str, top_n: int) -> tuple[int, int, int, str, bool, str]:
@@ -1074,7 +1246,7 @@ def _google_cse_search(
     req = request.Request(url, headers={'User-Agent': 'brandname-generator-validator/1.0'})
     request_timeout = max(1.0, min(8.0, float(timeout_s)))
     try:
-        with ng.urlopen_no_proxy(req, timeout=request_timeout) as resp:
+        with ng.open_url(req, timeout=request_timeout) as resp:
             payload = json.loads(resp.read().decode('utf-8', errors='replace'))
     except Exception:
         return [], False, 'google_cse_error'
@@ -1249,7 +1421,7 @@ def tm_registry_global_signal(name: str, args: argparse.Namespace) -> dict[str, 
 
     def _probe_registry(site_query: str) -> tuple[int, int, int, str, bool, str]:
         query = f'site:{site_query} "{name}"'
-        matches, ok, source = ng.fetch_search_matches(query)
+        matches, ok, source = ng.fetch_search_matches(query, timeout=3.0, retries=0)
         if not ok:
             return -1, -1, -1, '', False, ''
         exact_hits = 0
@@ -1308,60 +1480,6 @@ def tm_registry_global_signal(name: str, args: argparse.Namespace) -> dict[str, 
         'near_hits_total': int(near_total),
         'result_count_total': int(result_total),
         'registry': registry,
-    }
-
-
-def tmview_probe_signal(name: str, args: argparse.Namespace) -> dict[str, object]:
-    normalized = ng.normalize_alpha(name)
-    if not normalized:
-        return {
-            'ok': False,
-            'source': 'tmview_playwright',
-            'reason': 'invalid_name',
-            'exact_hits': -1,
-            'near_hits': -1,
-            'result_count': -1,
-            'sample_text': '',
-            'error': 'invalid_name',
-        }
-    if not bool(getattr(args, 'tmview_probe_enabled', False)):
-        return {
-            'ok': False,
-            'source': 'tmview_playwright',
-            'reason': 'tmview_probe_disabled',
-            'exact_hits': -1,
-            'near_hits': -1,
-            'result_count': -1,
-            'sample_text': '',
-            'error': 'tmview_probe_disabled',
-        }
-    try:
-        with EuipoProbe(
-            timeout_ms=max(3000, int(getattr(args, 'tmview_probe_timeout_ms', 20000))),
-            settle_ms=max(0, int(getattr(args, 'tmview_probe_settle_ms', 2500))),
-            headless=True,
-        ) as probe:
-            probe_result = probe.probe_name(normalized)
-    except Exception as exc:
-        return {
-            'ok': False,
-            'source': 'tmview_playwright',
-            'reason': 'tmview_probe_error',
-            'exact_hits': -1,
-            'near_hits': -1,
-            'result_count': -1,
-            'sample_text': '',
-            'error': f'probe_error:{exc.__class__.__name__}',
-        }
-    return {
-        'ok': bool(getattr(probe_result, 'query_ok', False)),
-        'source': str(getattr(probe_result, 'source', '') or 'tmview_playwright'),
-        'reason': '',
-        'exact_hits': max(0, int(getattr(probe_result, 'exact_hits', 0))),
-        'near_hits': max(0, int(getattr(probe_result, 'near_hits', 0))),
-        'result_count': max(0, int(getattr(probe_result, 'result_count', 0))),
-        'sample_text': str(getattr(probe_result, 'sample_text', '') or ''),
-        'error': str(getattr(probe_result, 'error', '') or ''),
     }
 
 
@@ -1469,11 +1587,11 @@ def check_trademark_cheap(name: str, args: argparse.Namespace) -> dict:
     normalized = ng.normalize_alpha(name)
     if not getattr(args, 'cheap_trademark_screen', True):
         return {
-            'status': 'warn',
+            'status': 'pass',
             'hard_fail': False,
-            'score_delta': -2.0,
+            'score_delta': 0.0,
             'reason': 'cheap_trademark_screen_disabled',
-            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
+            'evidence': {'screen_enabled': False},
         }
 
     similarity_score, closest_mark = cheap_trademark_similarity_signal(normalized)
@@ -1521,15 +1639,15 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
     normalized = ng.normalize_alpha(name)
     if not getattr(args, 'company_cheap_screen', True):
         return {
-            'status': 'warn',
+            'status': 'pass',
             'hard_fail': False,
-            'score_delta': -2.0,
+            'score_delta': 0.0,
             'reason': 'company_cheap_screen_disabled',
-            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
+            'evidence': {'screen_enabled': False},
         }
+    company_house_signal = company_house_company_signal(normalized, args)
     top_n = max(1, int(getattr(args, 'company_cheap_top', 8)))
     exact_hits, near_hits, result_count, sample_domains, ok, source = company_collision_signal(normalized, top_n=top_n)
-    ch_signal = company_house_signal(normalized, args, top_n=top_n)
     evidence = {
         'screen_enabled': True,
         'exact_hits': int(exact_hits),
@@ -1538,48 +1656,47 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
         'sample_domains': sample_domains,
         'source': source,
         'top_n': int(top_n),
-        'company_house': ch_signal,
+        'company_house': company_house_signal,
     }
-    ch_ok = bool(ch_signal.get('ok'))
-    ch_exact_active = max(0, int(ch_signal.get('exact_active_hits', 0)))
-    ch_exact_any = max(0, int(ch_signal.get('exact_hits', 0)))
-    ch_near_active = max(0, int(ch_signal.get('near_active_hits', 0)))
-    ch_near_any = max(0, int(ch_signal.get('near_hits', 0)))
-
-    if ch_ok and ch_exact_active > 0:
+    exact_fail_threshold = max(1, int(getattr(args, 'company_cheap_exact_fail_threshold', 1)))
+    near_fail_threshold = max(1, int(getattr(args, 'company_cheap_near_fail_threshold', 2)))
+    near_warn_threshold = max(1, int(getattr(args, 'company_cheap_near_warn_threshold', 1)))
+    ch_ok = bool(company_house_signal.get('ok'))
+    ch_exact_hits = max(0, int(company_house_signal.get('exact_active_hits', 0)))
+    ch_near_hits = max(0, int(company_house_signal.get('near_active_hits', 0)))
+    if ch_exact_hits >= exact_fail_threshold:
         return {
             'status': 'fail',
             'hard_fail': True,
-            'score_delta': -18.0,
+            'score_delta': -14.0,
             'reason': 'company_house_exact_active',
             'evidence': evidence,
         }
-    if ch_ok and ch_near_active > 0:
+    if ch_near_hits >= near_fail_threshold:
         return {
-            'status': 'warn',
-            'hard_fail': False,
-            'score_delta': -8.0,
+            'status': 'fail',
+            'hard_fail': True,
+            'score_delta': -10.0,
             'reason': 'company_house_near_active',
             'evidence': evidence,
         }
-    if ch_ok and ch_exact_any > 0:
-        return {
-            'status': 'warn',
-            'hard_fail': False,
-            'score_delta': -6.0,
-            'reason': 'company_house_exact_non_active',
-            'evidence': evidence,
-        }
-    if ch_ok and ch_near_any > 0:
+    if ch_near_hits >= near_warn_threshold:
         return {
             'status': 'warn',
             'hard_fail': False,
             'score_delta': -4.0,
-            'reason': 'company_house_near_non_active',
+            'reason': 'company_house_near_active',
             'evidence': evidence,
         }
-
     if not ok or result_count < 0:
+        if ch_ok:
+            return {
+                'status': 'pass',
+                'hard_fail': False,
+                'score_delta': 0.0,
+                'reason': '',
+                'evidence': evidence,
+            }
         return {
             'status': 'warn',
             'hard_fail': False,
@@ -1587,9 +1704,6 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
             'reason': 'company_cheap_check_unknown',
             'evidence': evidence,
         }
-    exact_fail_threshold = max(1, int(getattr(args, 'company_cheap_exact_fail_threshold', 1)))
-    near_fail_threshold = max(1, int(getattr(args, 'company_cheap_near_fail_threshold', 2)))
-    near_warn_threshold = max(1, int(getattr(args, 'company_cheap_near_warn_threshold', 1)))
     if exact_hits >= exact_fail_threshold:
         return {
             'status': 'fail',
@@ -1614,117 +1728,12 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
             'reason': 'company_near_warning',
             'evidence': evidence,
         }
-    if not ch_ok:
-        return {
-            'status': 'warn',
-            'hard_fail': False,
-            'score_delta': -2.0,
-            'reason': 'company_house_review_required',
-            'evidence': {
-                **evidence,
-                'review_required': True,
-                'review_reason': str(ch_signal.get('reason') or 'company_house_unavailable'),
-            },
-        }
     return {
         'status': 'pass',
         'hard_fail': False,
         'score_delta': 0.0,
         'reason': '',
         'evidence': evidence,
-    }
-
-
-def company_house_signal(name: str, args: argparse.Namespace, *, top_n: int) -> dict[str, object]:
-    api_key = str(getattr(args, 'company_house_api_key', '') or '').strip()
-    if not api_key:
-        return {
-            'ok': False,
-            'reason': 'company_house_unconfigured',
-            'exact_hits': -1,
-            'exact_active_hits': -1,
-            'near_hits': -1,
-            'near_active_hits': -1,
-            'result_count': -1,
-            'sample_titles': [],
-        }
-
-    params = {
-        'q': name,
-        'items_per_page': str(max(1, min(20, int(top_n)))),
-    }
-    url = 'https://api.company-information.service.gov.uk/search/companies?' + parse.urlencode(params)
-    token = base64.b64encode(f'{api_key}:'.encode('utf-8')).decode('ascii')
-    req = request.Request(
-        url,
-        headers={
-            'Authorization': f'Basic {token}',
-            'User-Agent': 'brandname-generator-validator/1.0',
-            'Accept': 'application/json',
-        },
-    )
-    try:
-        with ng.urlopen_no_proxy(req, timeout=8.0) as resp:
-            payload = json.loads(resp.read().decode('utf-8', errors='replace'))
-    except Exception:
-        return {
-            'ok': False,
-            'reason': 'company_house_error',
-            'exact_hits': -1,
-            'exact_active_hits': -1,
-            'near_hits': -1,
-            'near_active_hits': -1,
-            'result_count': -1,
-            'sample_titles': [],
-        }
-
-    items = payload.get('items', []) if isinstance(payload, dict) else []
-    exact_hits = 0
-    exact_active_hits = 0
-    near_hits = 0
-    near_active_hits = 0
-    sample_titles: list[str] = []
-    for item in items[: max(1, min(20, int(top_n)))]:
-        if not isinstance(item, dict):
-            continue
-        title_raw = str(item.get('title') or '').strip()
-        if not title_raw:
-            continue
-        title = ng.normalize_alpha(title_raw)
-        title_lc = title_raw.lower()
-        if not title:
-            continue
-        status = str(item.get('company_status') or '').strip().lower()
-        is_active = status == 'active'
-        title_has_token = bool(re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title_lc))
-        legal_suffix_only = bool(
-            re.fullmatch(
-                rf'{re.escape(name)}(?:limited|ltd|llp|plc|gmbh|ag|sa|sarl|inc|corp|company)+',
-                title,
-            )
-        )
-        if title == name or legal_suffix_only:
-            exact_hits += 1
-            if is_active:
-                exact_active_hits += 1
-        else:
-            ratio = ng.similarity_with_prefix_boost(title, name)
-            if title_has_token or (ratio >= 0.90 and abs(len(title) - len(name)) <= 2):
-                near_hits += 1
-                if is_active:
-                    near_active_hits += 1
-        if len(sample_titles) < 5:
-            sample_titles.append(f'{title_raw} [{status or "unknown"}]')
-
-    return {
-        'ok': True,
-        'reason': '',
-        'exact_hits': int(exact_hits),
-        'exact_active_hits': int(exact_active_hits),
-        'near_hits': int(near_hits),
-        'near_active_hits': int(near_active_hits),
-        'result_count': int(len(items)),
-        'sample_titles': sample_titles,
     }
 
 
@@ -1735,12 +1744,41 @@ def normalized_or_fail(name: str) -> str:
     return normalized
 
 
+def parse_required_domain_tlds(raw: object) -> tuple[list[str], list[str]]:
+    text = str(raw or '').strip()
+    if not text:
+        return [], []
+    allowed = {'com', 'de', 'ch'}
+    resolved: list[str] = []
+    invalid: list[str] = []
+    for token in parse_csv_set(text.lower()):
+        if token not in allowed:
+            invalid.append(token)
+            continue
+        if token not in resolved:
+            resolved.append(token)
+    return resolved, invalid
+
+
+def resolve_required_domain_tlds(args: argparse.Namespace) -> list[str]:
+    raw = str(getattr(args, 'required_domain_tlds', '') or '').strip()
+    if not raw:
+        return ng.required_tlds(args.scope)
+    resolved, invalid = parse_required_domain_tlds(raw)
+    if invalid:
+        invalid_csv = ','.join(invalid)
+        raise ValueError(f'Unsupported required domain TLDs: {invalid_csv}')
+    if resolved:
+        return resolved
+    return ng.required_tlds(args.scope)
+
+
 def check_domain(name: str, args: argparse.Namespace) -> dict:
     normalized = normalized_or_fail(name)
     com = ng.rdap_available(normalized, 'com')
     de = ng.rdap_available(normalized, 'de')
     ch = ng.rdap_available(normalized, 'ch')
-    required = ng.required_tlds(args.scope)
+    required = resolve_required_domain_tlds(args)
     availability = {'com': com, 'de': de, 'ch': ch}
 
     missing = [tld for tld in required if availability.get(tld) == 'no']
@@ -1871,11 +1909,11 @@ def check_web_google_like(name: str, args: argparse.Namespace) -> dict:
     normalized = normalized_or_fail(name)
     if not bool(getattr(args, 'web_google_like_enabled', True)):
         return {
-            'status': 'warn',
+            'status': 'pass',
             'hard_fail': False,
-            'score_delta': -2.0,
+            'score_delta': 0.0,
             'reason': 'web_google_like_disabled',
-            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
+            'evidence': {'screen_enabled': False},
         }
     signal = web_google_like_signal(normalized, args)
     evidence = {
@@ -1945,11 +1983,11 @@ def check_tm_registry_global(name: str, args: argparse.Namespace) -> dict:
     normalized = normalized_or_fail(name)
     if not bool(getattr(args, 'tm_registry_global_enabled', True)):
         return {
-            'status': 'warn',
+            'status': 'pass',
             'hard_fail': False,
-            'score_delta': -2.0,
+            'score_delta': 0.0,
             'reason': 'tm_registry_global_disabled',
-            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
+            'evidence': {'screen_enabled': False},
         }
     signal = tm_registry_global_signal(normalized, args)
     evidence = {
@@ -1961,12 +1999,8 @@ def check_tm_registry_global(name: str, args: argparse.Namespace) -> dict:
             'status': 'warn',
             'hard_fail': False,
             'score_delta': -2.0,
-            'reason': 'tm_registry_global_review_required',
-            'evidence': {
-                **evidence,
-                'review_required': True,
-                'review_reason': 'registry_sources_unavailable',
-            },
+            'reason': 'tm_registry_global_unknown',
+            'evidence': evidence,
         }
 
     exact_hits = max(0, int(signal.get('exact_hits_total', 0)))
@@ -1998,68 +2032,6 @@ def check_tm_registry_global(name: str, args: argparse.Namespace) -> dict:
             'score_delta': -5.0,
             'reason': 'tm_registry_near_warning',
             'evidence': evidence,
-        }
-    return {
-        'status': 'pass',
-        'hard_fail': False,
-        'score_delta': 0.0,
-        'reason': '',
-        'evidence': evidence,
-    }
-
-
-def check_tmview_probe(name: str, args: argparse.Namespace) -> dict:
-    normalized = normalized_or_fail(name)
-    if not bool(getattr(args, 'tmview_probe_enabled', False)):
-        return {
-            'status': 'warn',
-            'hard_fail': False,
-            'score_delta': -2.0,
-            'reason': 'tmview_probe_disabled',
-            'evidence': {'screen_enabled': False, 'review_required': True, 'review_reason': 'check_disabled'},
-        }
-    signal = tmview_probe_signal(normalized, args)
-    evidence = {
-        'screen_enabled': True,
-        **signal,
-    }
-    if not bool(signal.get('ok')):
-        return {
-            'status': 'warn',
-            'hard_fail': False,
-            'score_delta': -2.0,
-            'reason': 'tmview_probe_review_required',
-            'evidence': {
-                **evidence,
-                'review_required': True,
-                'review_reason': 'tmview_probe_unavailable',
-            },
-        }
-
-    exact_hits = max(0, int(signal.get('exact_hits', 0)))
-    near_hits = max(0, int(signal.get('near_hits', 0)))
-    exact_fail_threshold = max(1, int(getattr(args, 'tm_registry_exact_fail_threshold', 1)))
-    near_warn_threshold = max(1, int(getattr(args, 'tm_registry_near_warn_threshold', 4)))
-
-    if exact_hits >= exact_fail_threshold:
-        return {
-            'status': 'fail',
-            'hard_fail': False,
-            'score_delta': -9.0,
-            'reason': 'tmview_probe_exact_collision',
-            'evidence': evidence,
-        }
-    if near_hits >= near_warn_threshold:
-        return {
-            'status': 'warn',
-            'hard_fail': False,
-            'score_delta': -4.0,
-            'reason': 'tmview_probe_near_review',
-            'evidence': {
-                **evidence,
-                'review_required': True,
-                'review_reason': 'tmview_probe_near_hit',
-            },
         }
     return {
         'status': 'pass',
@@ -2199,13 +2171,32 @@ CHECK_SPECS: dict[str, ValidationCheckSpec] = {
     'web': ValidationCheckSpec('web', 'expensive', check_web),
     'web_google_like': ValidationCheckSpec('web_google_like', 'expensive', check_web_google_like),
     'tm_registry_global': ValidationCheckSpec('tm_registry_global', 'expensive', check_tm_registry_global),
-    'tmview_probe': ValidationCheckSpec('tmview_probe', 'expensive', check_tmview_probe),
     'app_store': ValidationCheckSpec('app_store', 'expensive', check_app_store),
     'package': ValidationCheckSpec('package', 'expensive', check_package),
     'social': ValidationCheckSpec('social', 'expensive', check_social),
 }
 
 CHECK_RUNNERS: dict[str, ValidationRunner] = {check_type: spec.runner for check_type, spec in CHECK_SPECS.items()}
+
+PUBLISH_REVIEW_CHECKS = {
+    'tm_cheap',
+    'company_cheap',
+    'domain',
+    'web',
+    'web_google_like',
+    'tm_registry_global',
+    'tmview_probe',
+    'app_store',
+    'package',
+    'social',
+}
+
+DEFAULT_PUBLISH_REQUIRED_CHECKS = {
+    'company_cheap',
+    'domain',
+    'web_google_like',
+    'tm_registry_global',
+}
 
 
 def select_checks(args: argparse.Namespace) -> tuple[list[str], ValidationFeatureFlags]:
@@ -2226,6 +2217,310 @@ def select_checks(args: argparse.Namespace) -> tuple[list[str], ValidationFeatur
     return filtered, flags
 
 
+def _stringify_reason(check_type: str, status: str, reason: str) -> str:
+    parts = [str(check_type or '').strip(), str(status or '').strip()]
+    reason_text = str(reason or '').strip()
+    if reason_text:
+        parts.append(reason_text)
+    return ':'.join(part for part in parts if part)
+
+
+def _run_config_dict(raw: object) -> dict[str, object]:
+    if isinstance(raw, dict):
+        return raw
+    text = str(raw or '').strip()
+    if not text:
+        return {}
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _config_checks(config: dict[str, object]) -> set[str]:
+    raw = config.get('checks')
+    if isinstance(raw, list):
+        return {str(item or '').strip() for item in raw if str(item or '').strip()}
+    if isinstance(raw, str):
+        return set(parse_csv_set(raw))
+    return set()
+
+
+def resolve_publish_policy(conn: sqlite3.Connection, *, validation_run_id: int) -> dict[str, object]:
+    row = conn.execute(
+        """
+        SELECT scope, gate_mode, config_json
+        FROM naming_runs
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (validation_run_id,),
+    ).fetchone()
+    if not row:
+        return {
+            'scope': '',
+            'gate_mode': '',
+            'required_checks': sorted(DEFAULT_PUBLISH_REQUIRED_CHECKS),
+            'policy_signature': '',
+        }
+    scope = str(row[0] or '').strip()
+    gate_mode = str(row[1] or '').strip()
+    config = _run_config_dict(row[2])
+    configured_checks = _config_checks(config)
+    required_checks = DEFAULT_PUBLISH_REQUIRED_CHECKS & configured_checks if configured_checks else set(DEFAULT_PUBLISH_REQUIRED_CHECKS)
+    if not required_checks:
+        required_checks = set(DEFAULT_PUBLISH_REQUIRED_CHECKS)
+    policy_signature = str(
+        config.get('memory_policy_signature')
+        or config.get('policy_signature')
+        or config.get('policy_version')
+        or ''
+    ).strip()
+    return {
+        'scope': scope,
+        'gate_mode': gate_mode,
+        'required_checks': sorted(required_checks),
+        'policy_signature': policy_signature,
+    }
+
+
+def _is_publish_result_trusted(
+    *,
+    check_type: str,
+    result_scope: str,
+    result_gate_mode: str,
+    result_config: dict[str, object],
+    publish_policy: dict[str, object],
+) -> tuple[bool, str]:
+    expected_scope = str(publish_policy.get('scope') or '').strip()
+    expected_gate_mode = str(publish_policy.get('gate_mode') or '').strip()
+    expected_signature = str(publish_policy.get('policy_signature') or '').strip()
+    if expected_scope and result_scope != expected_scope:
+        return False, 'scope_mismatch'
+    if expected_gate_mode and result_gate_mode != expected_gate_mode:
+        return False, 'gate_mismatch'
+    if expected_signature:
+        result_signature = str(
+            result_config.get('memory_policy_signature')
+            or result_config.get('policy_signature')
+            or result_config.get('policy_version')
+            or ''
+        ).strip()
+        if result_signature != expected_signature:
+            return False, 'policy_mismatch'
+    configured_checks = _config_checks(result_config)
+    if configured_checks and check_type not in configured_checks:
+        return False, 'check_not_configured'
+    return True, ''
+
+
+def resolve_publish_source_run_id(conn: sqlite3.Connection, *, validation_run_id: int) -> int:
+    row = conn.execute(
+        """
+        SELECT nr.id
+        FROM naming_runs nr
+        WHERE nr.id <= ?
+          AND EXISTS (
+            SELECT 1
+            FROM shortlist_decisions sd
+            WHERE sd.run_id = nr.id
+              AND sd.selected = 1
+          )
+        ORDER BY nr.id DESC
+        LIMIT 1
+        """,
+        (validation_run_id,),
+    ).fetchone()
+    if row:
+        return int(row[0])
+    return int(validation_run_id)
+
+
+def export_validation_publish_artifacts(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    out_dir: Path,
+) -> dict[str, object]:
+    publish_policy = resolve_publish_policy(conn, validation_run_id=run_id)
+    source_run_id = resolve_publish_source_run_id(conn, validation_run_id=run_id)
+    shortlist_rows = conn.execute(
+        """
+        SELECT
+          c.id,
+          c.name_display,
+          COALESCE(cs.total_score, c.current_score, c.score_total, 0.0) AS total_score,
+          COALESCE(cs.recommendation, c.current_recommendation, '') AS recommendation,
+          COALESCE(sd.shortlist_rank, 0) AS shortlist_rank,
+          COALESCE(sd.bucket_key, '') AS shortlist_bucket,
+          COALESCE(sd.reason, '') AS shortlist_reason
+        FROM shortlist_decisions sd
+        JOIN candidates c ON c.id = sd.candidate_id
+        LEFT JOIN candidate_scores cs
+          ON cs.candidate_id = sd.candidate_id
+         AND cs.run_id = sd.run_id
+        WHERE sd.run_id = ? AND sd.selected = 1
+        ORDER BY COALESCE(sd.shortlist_rank, 999999), LOWER(c.name_display), c.id
+        """,
+        (source_run_id,),
+    ).fetchall()
+    shortlist_candidate_ids = [int(row[0]) for row in shortlist_rows]
+    results_by_candidate: dict[int, list[tuple[str, str, str]]] = {}
+    run_policy_cache: dict[int, tuple[str, str, dict[str, object]]] = {}
+    for candidate_id in shortlist_candidate_ids:
+        historical_rows = conn.execute(
+            """
+            SELECT vr.run_id, vr.check_type, vr.status, vr.reason, nr.scope, nr.gate_mode, nr.config_json
+            FROM validation_results vr
+            JOIN naming_runs nr ON nr.id = vr.run_id
+            WHERE vr.candidate_id = ?
+              AND vr.run_id <= ?
+              AND vr.id = (
+                SELECT vr2.id
+                FROM validation_results vr2
+                WHERE vr2.candidate_id = vr.candidate_id
+                  AND vr2.check_type = vr.check_type
+                  AND vr2.run_id <= ?
+                ORDER BY vr2.run_id DESC, vr2.id DESC
+                LIMIT 1
+              )
+            ORDER BY vr.id ASC
+            """,
+            (candidate_id, run_id, run_id),
+        ).fetchall()
+        candidate_results: list[tuple[str, str, str]] = []
+        for result_run_id, check_type, status, reason, result_scope, result_gate_mode, result_config_json in historical_rows:
+            result_run_id_int = int(result_run_id)
+            if result_run_id_int not in run_policy_cache:
+                run_policy_cache[result_run_id_int] = (
+                    str(result_scope or '').strip(),
+                    str(result_gate_mode or '').strip(),
+                    _run_config_dict(result_config_json),
+                )
+            cached_scope, cached_gate_mode, cached_config = run_policy_cache[result_run_id_int]
+            trusted, trust_reason = _is_publish_result_trusted(
+                check_type=str(check_type or '').strip(),
+                result_scope=cached_scope,
+                result_gate_mode=cached_gate_mode,
+                result_config=cached_config,
+                publish_policy=publish_policy,
+            )
+            if trusted:
+                candidate_results.append(
+                    (str(check_type or '').strip(), str(status or '').strip().lower(), str(reason or '').strip())
+                )
+            else:
+                check_name = str(check_type or '').strip()
+                if check_name not in publish_policy['required_checks'] and check_name != 'tmview_probe':
+                    continue
+                candidate_results.append(
+                    (check_name, 'warn', f'untrusted_history_{trust_reason}')
+                )
+        results_by_candidate[candidate_id] = candidate_results
+
+    headers = [
+        'name',
+        'shortlist_selected',
+        'recommendation',
+        'total_score',
+        'shortlist_rank',
+        'shortlist_bucket',
+        'shortlist_reason',
+        'publish_bucket',
+        'blocker_reasons',
+        'review_reasons',
+    ]
+    survivors: list[dict[str, str]] = []
+    review_queue: list[dict[str, str]] = []
+    rejected: list[dict[str, str]] = []
+    missing_validation_count = 0
+    missing_required_check_count = 0
+
+    for candidate_id, name_display, total_score, recommendation, shortlist_rank, shortlist_bucket, shortlist_reason in shortlist_rows:
+        blocker_reasons: list[str] = []
+        review_reasons: list[str] = []
+        candidate_results = results_by_candidate.get(int(candidate_id), [])
+        seen_checks: set[str] = set()
+        for check_type, status, reason in candidate_results:
+            trusted_result = not str(reason or '').startswith('untrusted_history_')
+            if trusted_result:
+                seen_checks.add(check_type)
+            reason_text = _stringify_reason(check_type, status, reason)
+            if status in {'fail', 'error'}:
+                blocker_reasons.append(reason_text)
+                continue
+            if status == 'warn' and check_type in PUBLISH_REVIEW_CHECKS:
+                review_reasons.append(reason_text)
+        if not candidate_results:
+            missing_validation_count += 1
+            review_reasons.append('validation:none')
+        missing_required_checks = sorted(check for check in publish_policy['required_checks'] if check not in seen_checks)
+        if missing_required_checks:
+            missing_required_check_count += 1
+            review_reasons.extend(f'{check_type}:missing' for check_type in missing_required_checks)
+
+        row = {
+            'name': str(name_display or '').strip(),
+            'shortlist_selected': 'True',
+            'recommendation': str(recommendation or '').strip(),
+            'total_score': f'{float(total_score or 0.0):.2f}',
+            'shortlist_rank': str(int(shortlist_rank or 0)),
+            'shortlist_bucket': str(shortlist_bucket or '').strip(),
+            'shortlist_reason': str(shortlist_reason or '').strip(),
+            'publish_bucket': '',
+            'blocker_reasons': ';'.join(blocker_reasons),
+            'review_reasons': ';'.join(review_reasons),
+        }
+        if blocker_reasons:
+            row['publish_bucket'] = 'rejected'
+            rejected.append(row)
+        elif review_reasons:
+            row['publish_bucket'] = 'review'
+            review_queue.append(row)
+        else:
+            row['publish_bucket'] = 'survivor'
+            survivors.append(row)
+
+    postrank_dir = out_dir / 'postrank'
+    postrank_dir.mkdir(parents=True, exist_ok=True)
+    survivors_csv = postrank_dir / 'validated_survivors.csv'
+    review_csv = postrank_dir / 'validated_review_queue.csv'
+    rejected_csv = postrank_dir / 'validated_rejected.csv'
+    summary_json = postrank_dir / 'validated_publish_summary.json'
+
+    def _write_csv(path: Path, items: list[dict[str, str]]) -> None:
+        with path.open('w', encoding='utf-8', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(items)
+
+    _write_csv(survivors_csv, survivors)
+    _write_csv(review_csv, review_queue)
+    _write_csv(rejected_csv, rejected)
+
+    summary = {
+        'run_id': int(run_id),
+        'source_run_id': int(source_run_id),
+        'shortlist_selected_count': len(shortlist_rows),
+        'survivor_count': len(survivors),
+        'review_count': len(review_queue),
+        'rejected_count': len(rejected),
+        'missing_validation_count': int(missing_validation_count),
+        'missing_required_check_count': int(missing_required_check_count),
+        'required_checks': list(publish_policy['required_checks']),
+        'policy_signature': str(publish_policy.get('policy_signature') or ''),
+        'survivors_csv': str(survivors_csv),
+        'review_csv': str(review_csv),
+        'rejected_csv': str(rejected_csv),
+        'top_survivor_names': [str(row.get('name') or '') for row in survivors[:20]],
+        'top_review_names': [str(row.get('name') or '') for row in review_queue[:20]],
+        'top_rejected_names': [str(row.get('name') or '') for row in rejected[:20]],
+    }
+    summary_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    return summary
+
+
 CACHE_SIGNATURE_FIELDS: dict[str, tuple[str, ...]] = {
     'adversarial': ('adversarial_fail_threshold', 'adversarial_warn_threshold'),
     'psych': ('min_trust_proxy', 'warn_trust_proxy', 'max_spelling_risk', 'warn_spelling_risk'),
@@ -2237,14 +2532,6 @@ CACHE_SIGNATURE_FIELDS: dict[str, tuple[str, ...]] = {
         'company_cheap_exact_fail_threshold',
         'company_cheap_near_fail_threshold',
         'company_cheap_near_warn_threshold',
-        'company_house_enabled',
-    ),
-    'tmview_probe': (
-        'tmview_probe_enabled',
-        'tmview_probe_timeout_ms',
-        'tmview_probe_settle_ms',
-        'tm_registry_exact_fail_threshold',
-        'tm_registry_near_warn_threshold',
     ),
 }
 
@@ -2257,6 +2544,9 @@ def cheap_check_cache_signature(check_type: str, args: argparse.Namespace) -> st
     if check_type == 'tm_cheap':
         payload['blocklist_size'] = len(CHEAP_TRADEMARK_BLOCKLIST)
         payload['blocklist_fingerprint'] = CHEAP_TRADEMARK_BLOCKLIST_FINGERPRINT
+    if check_type == 'company_cheap':
+        payload['logic_version'] = 'company_cheap_v2'
+        payload['companies_house_enabled'] = bool(str(os.getenv('COMPANIES_HOUSE_API_KEY') or '').strip())
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:12]
 
@@ -2695,12 +2985,25 @@ async def orchestrate(args: argparse.Namespace) -> int:
         ndb.ensure_schema(conn, busy_timeout_ms=sqlite_busy_timeout_ms, wal=True)
         memory_conn: sqlite3.Connection | None = None
         memory_prefilter_count = 0
+        candidate_source = str(getattr(args, 'candidate_source', 'state') or 'state').strip().lower()
+        shortlist_source_run_id = 0
+        if candidate_source == 'shortlist_selected':
+            shortlist_source_run_id = resolve_shortlist_run_id(
+                conn,
+                preferred_run_id=int(getattr(args, 'shortlist_source_run_id', 0) or 0),
+            )
+            if shortlist_source_run_id <= 0:
+                print('No shortlist run found for candidate-source=shortlist_selected.')
+                return 0
         if memory_db_path is not None:
             memory_db_path.parent.mkdir(parents=True, exist_ok=True)
             memory_conn = ndb.open_connection(memory_db_path, busy_timeout_ms=sqlite_busy_timeout_ms, wal=True)
             ensure_exclusion_memory_schema(memory_conn)
         while True:
-            candidates = load_candidates(conn, states, args.candidate_limit)
+            if candidate_source == 'shortlist_selected':
+                candidates = load_shortlist_candidates(conn, shortlist_source_run_id, args.candidate_limit)
+            else:
+                candidates = load_candidates(conn, states, args.candidate_limit)
             if not candidates:
                 if memory_conn is not None and memory_prefilter_count > 0:
                     emit_stage_event(
@@ -2715,7 +3018,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 if memory_conn is not None:
                     memory_conn.close()
                 return 0
-            if memory_conn is None:
+            if memory_conn is None or candidate_source != 'state':
                 break
             excluded_names = load_memory_excluded_names(
                 memory_conn,
@@ -2788,6 +3091,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
             args.stage_events,
             'candidate_load',
             candidate_count=len(candidates),
+            candidate_source=candidate_source,
+            shortlist_source_run_id=int(shortlist_source_run_id),
             checks=checks,
             cheap_checks=cheap_checks,
             expensive_checks=expensive_checks,
@@ -2811,6 +3116,8 @@ async def orchestrate(args: argparse.Namespace) -> int:
             config={
                 'checks': checks,
                 'candidate_limit': args.candidate_limit,
+                'candidate_source': candidate_source,
+                'shortlist_source_run_id': int(shortlist_source_run_id),
                 'concurrency': initial_concurrency,
                 'min_concurrency': min_concurrency,
                 'max_concurrency': max_concurrency,
@@ -2993,6 +3300,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
             expensive_checks=expensive_checks,
         )
         cache_summary = summarize_cache_usage(conn, run_id)
+        publish_artifacts = export_validation_publish_artifacts(conn, run_id=run_id, out_dir=db_path.parent)
         memory_exclusions_upserted = 0
         memory_hard_fail_count = 0
         if memory_conn is not None:
@@ -3031,6 +3339,16 @@ async def orchestrate(args: argparse.Namespace) -> int:
             checks=expensive_checks,
             finalist_count=len(expensive_finalists),
         )
+        emit_stage_event(
+            args.stage_events,
+            'publish_artifacts',
+            survivor_count=int(publish_artifacts.get('survivor_count', 0)),
+            review_count=int(publish_artifacts.get('review_count', 0)),
+            rejected_count=int(publish_artifacts.get('rejected_count', 0)),
+            survivors_csv=str(publish_artifacts.get('survivors_csv') or ''),
+            review_csv=str(publish_artifacts.get('review_csv') or ''),
+            rejected_csv=str(publish_artifacts.get('rejected_csv') or ''),
+        )
         lock_metrics = db_lock.snapshot()
         adaptive_summary = {
             'initial': int(initial_concurrency),
@@ -3059,6 +3377,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
             concurrency_final=adaptive_summary['final'],
             concurrency_adjustment_count=adaptive_summary['adjustment_count'],
             demoted_validation_count=demoted_validation_count,
+            publish_artifacts=publish_artifacts,
             **lock_metrics,
         )
         conn.execute(
@@ -3081,6 +3400,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                         'memory_exclusions_upserted': memory_exclusions_upserted,
                         'adaptive_concurrency': adaptive_summary,
                         'demoted_validation_count': demoted_validation_count,
+                        'publish_artifacts': publish_artifacts,
                         **lock_metrics,
                     },
                     ensure_ascii=False,
@@ -3110,6 +3430,7 @@ async def orchestrate(args: argparse.Namespace) -> int:
                 'memory_exclusions_upserted': memory_exclusions_upserted,
                 'adaptive_concurrency': adaptive_summary,
                 'demoted_validation_count': demoted_validation_count,
+                'publish_artifacts': publish_artifacts,
                 **lock_metrics,
             },
             ensure_ascii=False,
@@ -3120,7 +3441,6 @@ async def orchestrate(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
-    args.company_house_enabled = bool(str(getattr(args, 'company_house_api_key', '') or '').strip())
     return asyncio.run(orchestrate(args))
 
 

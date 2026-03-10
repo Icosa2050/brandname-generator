@@ -272,14 +272,14 @@ def main() -> int:
     remote_out_dir = Path(args.remote_quality_out_dir).expanduser().resolve()
     quality_csv = quality_out_dir / 'postrank' / str(args.input_rank_name)
     remote_csv = remote_out_dir / 'postrank' / str(args.input_rank_name)
+    if not quality_csv.exists():
+        print(f'fusion_error missing_quality_csv={quality_csv}')
+        return 2
+    if not remote_csv.exists():
+        print(f'fusion_error missing_remote_csv={remote_csv}')
+        return 2
     quality_rows = load_rank_rows(quality_csv)
     remote_rows = load_rank_rows(remote_csv)
-    if not quality_rows:
-        print(f'fusion_error missing_or_empty_quality_csv={quality_csv}')
-        return 2
-    if not remote_rows:
-        print(f'fusion_error missing_or_empty_remote_csv={remote_csv}')
-        return 2
 
     derived_quality_weight = derive_weight_from_out_dir(quality_out_dir, quality_rows)
     derived_remote_weight = derive_weight_from_out_dir(remote_out_dir, remote_rows)
