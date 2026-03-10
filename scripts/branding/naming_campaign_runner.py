@@ -51,7 +51,6 @@ DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS = [
     'web',
     'web_google_like',
     'tm_registry_global',
-    'tmview_probe',
     'app_store',
     'package',
     'social',
