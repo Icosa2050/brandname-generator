@@ -1,7 +1,5 @@
 #!/usr/bin/env zsh
 set -euo pipefail
-# Avoid noisy "nice(5) failed: operation not permitted" when this script backgrounds lanes.
-unsetopt bgnice 2>/dev/null || true
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -32,6 +30,10 @@ ENV_BOOTSTRAP_MODE="${BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE:-none}"
 ENV_REQUIRE_DIRENV="${BRANDING_AUTOMATION_REQUIRE_DIRENV:-0}"
 ENV_DOTENV_FILE="${BRANDING_AUTOMATION_DOTENV_FILE:-.env}"
 ENV_LOADED_WITH_DIRENV=0
+HEALTH_MIN_NEW_SHORTLIST_QUALITY="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST_QUALITY:-6}"
+HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY:-10}"
+HEALTH_MIN_POSTRANK_STRONG_QUALITY="${OPENROUTER_HEALTH_MIN_POSTRANK_STRONG_QUALITY:-4}"
+HEALTH_MIN_POSTRANK_STRONG_REMOTE_QUALITY="${OPENROUTER_HEALTH_MIN_POSTRANK_STRONG_REMOTE_QUALITY:-6}"
 
 usage() {
   cat <<'EOF'
@@ -146,6 +148,27 @@ run_in_repo_env() {
     return $?
   fi
   "$@"
+}
+
+run_profile_health_check() {
+  local profile="$1"
+  local out_dir="$2"
+  local min_new="10"
+  local min_strong="6"
+  case "$profile" in
+    quality)
+      min_new="$HEALTH_MIN_NEW_SHORTLIST_QUALITY"
+      min_strong="$HEALTH_MIN_POSTRANK_STRONG_QUALITY"
+      ;;
+    remote_quality)
+      min_new="$HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY"
+      min_strong="$HEALTH_MIN_POSTRANK_STRONG_REMOTE_QUALITY"
+      ;;
+  esac
+  run_in_repo_env python3 scripts/branding/check_campaign_health.py \
+    --out-dir "$out_dir" \
+    --min-new-shortlist "$min_new" \
+    --min-postrank-strong "$min_strong"
 }
 
 prepare_environment
@@ -473,8 +496,8 @@ PY
   fi
 
   local q_health_rc=0 r_health_rc=0 q_report_rc=0 r_report_rc=0 fused_integrity_rc=0
-  run_in_repo_env python3 scripts/branding/check_campaign_health.py --out-dir "$GEN_QUALITY_OUT" || q_health_rc=$?
-  run_in_repo_env python3 scripts/branding/check_campaign_health.py --out-dir "$GEN_REMOTE_OUT" || r_health_rc=$?
+  run_profile_health_check quality "$GEN_QUALITY_OUT" || q_health_rc=$?
+  run_profile_health_check remote_quality "$GEN_REMOTE_OUT" || r_health_rc=$?
   run_in_repo_env zsh scripts/branding/report_campaign_progress.sh --out-dir "$GEN_QUALITY_OUT" --top-n 20 || q_report_rc=$?
   run_in_repo_env zsh scripts/branding/report_campaign_progress.sh --out-dir "$GEN_REMOTE_OUT" --top-n 20 || r_report_rc=$?
   python3 - "$fused_out_dir/postrank/fused_quality_remote_rank.csv" "$fused_out_dir/postrank/fused_quality_remote_summary.json" <<'PY' || fused_integrity_rc=$?

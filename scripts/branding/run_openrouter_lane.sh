@@ -22,8 +22,7 @@ VALIDATOR_CONCURRENCY=8
 VALIDATOR_MIN_CONCURRENCY=4
 VALIDATOR_MAX_CONCURRENCY=12
 VALIDATOR_TIMEOUT_S=6
-VALIDATOR_CHECKS="${OPENROUTER_VALIDATOR_CHECKS:-}"
-TMVIEW_PROBE_ENABLED="${OPENROUTER_TMVIEW_PROBE_ENABLED:-${OPENROUTER_TM_REGISTRY_TMVIEW_PROBE_ENABLED:-1}}"
+VALIDATOR_CHECKS="${OPENROUTER_VALIDATOR_CHECKS:-adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,app_store,package,social}"
 LLM_ROUNDS=1
 LLM_CANDIDATES_PER_ROUND=10
 LLM_TEMPERATURE="${OPENROUTER_LLM_TEMPERATURE:-0.8}"
@@ -36,10 +35,18 @@ NO_EXTERNAL_CHECKS=1
 POST_RANK=1
 POST_RANK_TOP_N="${OPENROUTER_POST_RANK_TOP_N:-40}"
 POST_RANK_INCLUDE_NON_SHORTLIST=0
+PUBLISH_COVERAGE=1
+PUBLISH_COVERAGE_LIMIT="${OPENROUTER_PUBLISH_COVERAGE_LIMIT:-60}"
+PUBLISH_COVERAGE_CHECKS="${OPENROUTER_PUBLISH_COVERAGE_CHECKS:-company_cheap,domain,web_google_like,tm_registry_global}"
+PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS="${OPENROUTER_PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS:-}"
+PUBLISH_NO_SURVIVORS_FAIL=1
 HEALTH_CHECK=1
 HEALTH_MIN_NEW_SHORTLIST="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST:-}"
 HEALTH_MIN_NEW_SHORTLIST_QUALITY="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST_QUALITY:-6}"
 HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY:-10}"
+HEALTH_MIN_POSTRANK_STRONG="${OPENROUTER_HEALTH_MIN_POSTRANK_STRONG:-}"
+HEALTH_MIN_POSTRANK_STRONG_QUALITY="${OPENROUTER_HEALTH_MIN_POSTRANK_STRONG_QUALITY:-4}"
+HEALTH_MIN_POSTRANK_STRONG_REMOTE_QUALITY="${OPENROUTER_HEALTH_MIN_POSTRANK_STRONG_REMOTE_QUALITY:-6}"
 HTTP_REFERER="${OPENROUTER_HTTP_REFERER:-https://github.com/Icosa2050/brandname-generator}"
 X_TITLE="${OPENROUTER_X_TITLE:-brand-name-generator}"
 EXTRA_ARGS=()
@@ -88,10 +95,6 @@ Options:
   --validator-max-concurrency <n>    Validator adaptive max concurrency (default: 8 via profile=quality)
   --validator-timeout-s <seconds>    Validator per-check timeout (default: 30 via profile=quality)
   --validator-checks <csv>           Explicit validator checks list
-  --no-tmview-probe                  Disable finalist-only Playwright TMview probe
-  --tm-registry-unknown-warn         Deprecated no-op (unknown registry states already warn)
-  --tm-registry-no-require-tmview    Deprecated no-op (tmview handled by tmview_probe)
-  --tm-registry-no-tmview-probe      Alias for --no-tmview-probe
   --llm-rounds <n>                   LLM rounds per run (default: 1)
   --llm-candidates-per-round <n>     LLM candidates requested per round (default: 10)
   --llm-temperature <float>          LLM sampling temperature (default: profile-specific)
@@ -103,6 +106,14 @@ Options:
   --no-post-rank                     Skip deterministic post-ranker
   --post-rank-top-n <n>              Names kept by post-ranker (default: 40)
   --post-rank-all                    Score all names, not only shortlist-selected ones
+  --publish-coverage                 Run dedicated publish-coverage pass on shortlisted names (default: on)
+  --no-publish-coverage              Skip dedicated publish-coverage pass
+  --publish-coverage-limit <n>       Max shortlisted names checked for publish coverage (default: 60)
+  --publish-coverage-checks <csv>    Checks used for publish coverage (default: company_cheap,domain,web_google_like,tm_registry_global)
+  --publish-coverage-required-domain-tlds <csv>
+                                    Required domain TLDs for publish coverage (default: scope-derived)
+  --publish-no-survivors-fail        Fail lane when publish survivor count is zero (default: on)
+  --publish-no-survivors-warn        Warn instead of failing when publish survivor count is zero
   --health-check                     Run post-run health checks (default: on)
   --no-health-check                  Skip post-run health checks
   --health-min-new-shortlist <n>     Override minimum new shortlist names for health check
@@ -110,6 +121,11 @@ Options:
                                      Quality-profile minimum new shortlist names (default: 6)
   --health-min-new-shortlist-remote-quality <n>
                                      Remote-quality minimum new shortlist names (default: 10)
+  --health-min-postrank-strong <n>   Override minimum strong post-rank names for health check
+  --health-min-postrank-strong-quality <n>
+                                     Quality-profile minimum strong post-rank names (default: 4)
+  --health-min-postrank-strong-remote-quality <n>
+                                     Remote-quality minimum strong post-rank names (default: 6)
   --http-referer <url>               OpenRouter HTTP-Referer header
   --x-title <text>                   OpenRouter X-Title header
   --with-external-checks             Keep generator external checks enabled
@@ -273,20 +289,6 @@ while [[ $# -gt 0 ]]; do
       USER_VALIDATOR_CHECKS="$2"
       shift 2
       ;;
-    --tm-registry-unknown-warn)
-      shift
-      ;;
-    --tm-registry-no-tmview-probe)
-      TMVIEW_PROBE_ENABLED=0
-      shift
-      ;;
-    --no-tmview-probe)
-      TMVIEW_PROBE_ENABLED=0
-      shift
-      ;;
-    --tm-registry-no-require-tmview)
-      shift
-      ;;
     --llm-rounds)
       LLM_ROUNDS="$2"
       USER_LLM_ROUNDS="$2"
@@ -338,6 +340,34 @@ while [[ $# -gt 0 ]]; do
       POST_RANK_INCLUDE_NON_SHORTLIST=1
       shift
       ;;
+    --publish-coverage)
+      PUBLISH_COVERAGE=1
+      shift
+      ;;
+    --no-publish-coverage)
+      PUBLISH_COVERAGE=0
+      shift
+      ;;
+    --publish-coverage-limit)
+      PUBLISH_COVERAGE_LIMIT="$2"
+      shift 2
+      ;;
+    --publish-coverage-checks)
+      PUBLISH_COVERAGE_CHECKS="$2"
+      shift 2
+      ;;
+    --publish-coverage-required-domain-tlds)
+      PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS="$2"
+      shift 2
+      ;;
+    --publish-no-survivors-fail)
+      PUBLISH_NO_SURVIVORS_FAIL=1
+      shift
+      ;;
+    --publish-no-survivors-warn)
+      PUBLISH_NO_SURVIVORS_FAIL=0
+      shift
+      ;;
     --health-check)
       HEALTH_CHECK=1
       shift
@@ -356,6 +386,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --health-min-new-shortlist-remote-quality)
       HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY="$2"
+      shift 2
+      ;;
+    --health-min-postrank-strong)
+      HEALTH_MIN_POSTRANK_STRONG="$2"
+      shift 2
+      ;;
+    --health-min-postrank-strong-quality)
+      HEALTH_MIN_POSTRANK_STRONG_QUALITY="$2"
+      shift 2
+      ;;
+    --health-min-postrank-strong-remote-quality)
+      HEALTH_MIN_POSTRANK_STRONG_REMOTE_QUALITY="$2"
       shift 2
       ;;
     --http-referer)
@@ -468,6 +510,10 @@ if ! [[ "$POST_RANK_TOP_N" =~ '^[1-9][0-9]*$' ]]; then
   echo "--post-rank-top-n must be >= 1." >&2
   exit 2
 fi
+if ! [[ "$PUBLISH_COVERAGE_LIMIT" =~ '^[1-9][0-9]*$' ]]; then
+  echo "--publish-coverage-limit must be >= 1." >&2
+  exit 2
+fi
 if ! [[ "$LLM_MAX_CALL_LATENCY_MS" =~ '^[1-9][0-9]*$' ]]; then
   echo "--llm-max-call-latency-ms must be a positive integer." >&2
   exit 2
@@ -491,10 +537,6 @@ fi
 if (( LANE >= SHARD_COUNT )); then
   echo "--lane must be smaller than --shard-count." >&2
   exit 2
-fi
-
-if [[ -z "$VALIDATOR_CHECKS" ]]; then
-  VALIDATOR_CHECKS="adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,tmview_probe,app_store,package,social"
 fi
 
 CMD=(
@@ -528,10 +570,6 @@ CMD=(
   --shard-count "$SHARD_COUNT"
   --out-dir "$OUT_DIR"
 )
-
-if [[ "$TMVIEW_PROBE_ENABLED" == "1" ]]; then
-  CMD+=(--validator-tmview-probe-enabled)
-fi
 
 if (( NO_EXTERNAL_CHECKS )); then
   CMD+=(--generator-no-external-checks)
@@ -568,6 +606,134 @@ else
   set -e
 fi
 
+if (( RUN_RC == 0 && PUBLISH_COVERAGE )); then
+  COVERAGE_DB="$OUT_DIR/naming_campaign.db"
+  if [[ ! -f "$COVERAGE_DB" ]]; then
+    echo "publish_coverage_warn reason=db_not_found path=$COVERAGE_DB"
+    RUN_RC=4
+  else
+    COVERAGE_CONTEXT="$(
+      python3 - "$COVERAGE_DB" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path)
+try:
+    row = conn.execute(
+        """
+        SELECT scope, gate_mode, config_json
+        FROM naming_runs
+        WHERE variation_profile = 'validator_async'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+finally:
+    conn.close()
+
+payload = {
+    "scope": "eu",
+    "gate": "strict",
+    "policy_version": "collision_first_v1",
+    "class_profile": "9,42",
+    "market_scope": "eu,ch",
+}
+if row:
+    payload["scope"] = str(row[0] or payload["scope"]).strip() or payload["scope"]
+    payload["gate"] = str(row[1] or payload["gate"]).strip() or payload["gate"]
+    try:
+        config = json.loads(row[2] or "{}")
+    except json.JSONDecodeError:
+        config = {}
+    if isinstance(config, dict):
+        payload["policy_version"] = str(config.get("policy_version") or payload["policy_version"]).strip() or payload["policy_version"]
+        payload["class_profile"] = str(config.get("class_profile") or payload["class_profile"]).strip() or payload["class_profile"]
+        payload["market_scope"] = str(config.get("market_scope") or payload["market_scope"]).strip() or payload["market_scope"]
+print(json.dumps(payload, ensure_ascii=True))
+PY
+    )"
+    COVERAGE_SCOPE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["scope"])' "$COVERAGE_CONTEXT")"
+    COVERAGE_GATE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["gate"])' "$COVERAGE_CONTEXT")"
+    COVERAGE_POLICY_VERSION="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["policy_version"])' "$COVERAGE_CONTEXT")"
+    COVERAGE_CLASS_PROFILE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["class_profile"])' "$COVERAGE_CONTEXT")"
+    COVERAGE_MARKET_SCOPE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["market_scope"])' "$COVERAGE_CONTEXT")"
+    COVERAGE_CMD=(
+      python3 "$ROOT_DIR/scripts/branding/naming_validate_async.py"
+      --db "$COVERAGE_DB"
+      --pipeline-version=v3
+      --enable-v3
+      --candidate-source shortlist_selected
+      --candidate-limit "$PUBLISH_COVERAGE_LIMIT"
+      --shortlist-source-run-id 0
+      --state-filter new,checked
+      --scope "$COVERAGE_SCOPE"
+      --gate "$COVERAGE_GATE"
+      --expensive-finalist-limit "$PUBLISH_COVERAGE_LIMIT"
+      --checks "$PUBLISH_COVERAGE_CHECKS"
+      --policy-version "$COVERAGE_POLICY_VERSION"
+      --class-profile "$COVERAGE_CLASS_PROFILE"
+      --market-scope "$COVERAGE_MARKET_SCOPE"
+      --validation-tier all
+      --concurrency "$VALIDATOR_CONCURRENCY"
+      --min-concurrency "$VALIDATOR_MIN_CONCURRENCY"
+      --max-concurrency "$VALIDATOR_MAX_CONCURRENCY"
+      --timeout-s "$VALIDATOR_TIMEOUT_S"
+    )
+    if [[ -n "$PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS" ]]; then
+      COVERAGE_CMD+=(--required-domain-tlds "$PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS")
+      echo "running publish-coverage out_dir=$OUT_DIR limit=$PUBLISH_COVERAGE_LIMIT checks=$PUBLISH_COVERAGE_CHECKS required_domains=$PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS"
+    else
+      echo "running publish-coverage out_dir=$OUT_DIR limit=$PUBLISH_COVERAGE_LIMIT checks=$PUBLISH_COVERAGE_CHECKS required_domains=scope-derived"
+    fi
+    printf '$ '
+    printf '%q ' "${COVERAGE_CMD[@]}"
+    echo
+    if command -v direnv >/dev/null 2>&1; then
+      set +e
+      direnv exec . "${COVERAGE_CMD[@]}"
+      COVERAGE_RC=$?
+      set -e
+    else
+      set +e
+      "${COVERAGE_CMD[@]}"
+      COVERAGE_RC=$?
+      set -e
+    fi
+    if (( COVERAGE_RC != 0 )); then
+      echo "publish_coverage_warn reason=validator_failed code=$COVERAGE_RC"
+      RUN_RC="$COVERAGE_RC"
+    else
+      COVERAGE_SUMMARY="$OUT_DIR/postrank/validated_publish_summary.json"
+      if [[ ! -f "$COVERAGE_SUMMARY" ]]; then
+        echo "publish_coverage_warn reason=summary_missing path=$COVERAGE_SUMMARY"
+        RUN_RC=4
+      else
+        read -r SURVIVOR_COUNT REVIEW_COUNT REJECTED_COUNT < <(
+          python3 - "$COVERAGE_SUMMARY" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+print(
+    int(payload.get("survivor_count", 0)),
+    int(payload.get("review_count", 0)),
+    int(payload.get("rejected_count", 0)),
+)
+PY
+        )
+        echo "publish_coverage_summary survivors=$SURVIVOR_COUNT review=$REVIEW_COUNT rejected=$REJECTED_COUNT summary=$COVERAGE_SUMMARY"
+        if (( SURVIVOR_COUNT == 0 && PUBLISH_NO_SURVIVORS_FAIL )); then
+          echo "publish_gate_fail reason=no_publish_survivors survivors=0 review=$REVIEW_COUNT rejected=$REJECTED_COUNT"
+          RUN_RC=4
+        fi
+      fi
+    fi
+  fi
+fi
+
 if (( RUN_RC == 0 && POST_RANK )); then
   POST_CMD=(
     python3 "$ROOT_DIR/scripts/branding/rerank_shortlist_deterministic.py"
@@ -592,6 +758,7 @@ fi
 
 if (( RUN_RC == 0 && POST_RANK && HEALTH_CHECK )); then
   HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE="$HEALTH_MIN_NEW_SHORTLIST"
+  HEALTH_MIN_POSTRANK_STRONG_EFFECTIVE="$HEALTH_MIN_POSTRANK_STRONG"
   if [[ -z "$HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE" ]]; then
     case "$PROFILE" in
       "quality")
@@ -605,10 +772,24 @@ if (( RUN_RC == 0 && POST_RANK && HEALTH_CHECK )); then
         ;;
     esac
   fi
+  if [[ -z "$HEALTH_MIN_POSTRANK_STRONG_EFFECTIVE" ]]; then
+    case "$PROFILE" in
+      "quality")
+        HEALTH_MIN_POSTRANK_STRONG_EFFECTIVE="$HEALTH_MIN_POSTRANK_STRONG_QUALITY"
+        ;;
+      "remote_quality")
+        HEALTH_MIN_POSTRANK_STRONG_EFFECTIVE="$HEALTH_MIN_POSTRANK_STRONG_REMOTE_QUALITY"
+        ;;
+      *)
+        HEALTH_MIN_POSTRANK_STRONG_EFFECTIVE="6"
+        ;;
+    esac
+  fi
   HEALTH_CMD=(
     python3 "$ROOT_DIR/scripts/branding/check_campaign_health.py"
     --out-dir "$OUT_DIR"
     --min-new-shortlist "$HEALTH_MIN_NEW_SHORTLIST_EFFECTIVE"
+    --min-postrank-strong "$HEALTH_MIN_POSTRANK_STRONG_EFFECTIVE"
   )
   echo "running health-check out_dir=$OUT_DIR"
   printf '$ '

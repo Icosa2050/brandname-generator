@@ -391,6 +391,7 @@ ARTIFACT_NGRAMS = (
 )
 
 USER_AGENT = 'kostula-name-generator/1.0'
+_NO_PROXY_OPENER = request.build_opener(request.ProxyHandler({}))
 
 # Social/profile hosts can contain arbitrary user handles and should not hard-fail
 # brand candidates as "exact web collisions" on their own.
@@ -1812,17 +1813,7 @@ def trademark_search_urls(name: str) -> tuple[str, str, str]:
     return dpma, swissreg, tmview
 
 
-_USE_SYSTEM_PROXY = str(os.environ.get('NAME_GENERATOR_USE_SYSTEM_PROXY', '')).strip().lower() in {
-    '1',
-    'true',
-    'yes',
-}
-_NO_PROXY_OPENER = request.build_opener(request.ProxyHandler({}))
-
-
-def urlopen_no_proxy(req: request.Request, *, timeout: float):
-    if _USE_SYSTEM_PROXY:
-        return request.urlopen(req, timeout=timeout)
+def open_url(req: request.Request, *, timeout: float):
     return _NO_PROXY_OPENER.open(req, timeout=timeout)
 
 
@@ -1830,7 +1821,7 @@ def fetch_json(url: str, timeout: float = 8.0, retries: int = 2) -> dict | None:
     req = request.Request(url, headers={'User-Agent': USER_AGENT})
     for i in range(retries + 1):
         try:
-            with urlopen_no_proxy(req, timeout=timeout) as resp:
+            with open_url(req, timeout=timeout) as resp:
                 data = resp.read().decode('utf-8', errors='replace')
                 return json.loads(data)
         except Exception:
@@ -1844,7 +1835,7 @@ def fetch_text(url: str, timeout: float = 8.0, retries: int = 2) -> str | None:
     req = request.Request(url, headers={'User-Agent': USER_AGENT})
     for i in range(retries + 1):
         try:
-            with urlopen_no_proxy(req, timeout=timeout) as resp:
+            with open_url(req, timeout=timeout) as resp:
                 return resp.read().decode('utf-8', errors='replace')
         except Exception:
             if i == retries:
@@ -1857,7 +1848,7 @@ def fetch_status(url: str, timeout: float = 8.0, retries: int = 1, method: str =
     req = request.Request(url, headers={'User-Agent': USER_AGENT}, method=method)
     for i in range(retries + 1):
         try:
-            with urlopen_no_proxy(req, timeout=timeout) as resp:
+            with open_url(req, timeout=timeout) as resp:
                 _ = resp.read(64)
                 return int(resp.status)
         except error.HTTPError as e:
@@ -1963,7 +1954,7 @@ def rdap_available(name: str, tld: str) -> str:
     }
     req = request.Request(endpoints[tld], headers={'User-Agent': USER_AGENT})
     try:
-        with urlopen_no_proxy(req, timeout=8.0) as resp:
+        with open_url(req, timeout=8.0) as resp:
             _ = resp.read(64)
             if resp.status == 200:
                 return 'no'
@@ -1985,7 +1976,7 @@ def rdap_available(name: str, tld: str) -> str:
 def rdap_available_fqdn(fqdn: str) -> str:
     req = request.Request(f'https://rdap.org/domain/{fqdn}', headers={'User-Agent': USER_AGENT})
     try:
-        with urlopen_no_proxy(req, timeout=8.0) as resp:
+        with open_url(req, timeout=8.0) as resp:
             _ = resp.read(64)
             if resp.status == 200:
                 return 'no'
@@ -2080,61 +2071,57 @@ def parse_bing_results(page: str) -> list[tuple[str, str]]:
     )
 
 
-def parse_serpapi_results(payload: dict) -> list[tuple[str, str]]:
+def _serpapi_api_key() -> str:
+    return str(os.getenv('SERP_API_KEY') or os.getenv('SERPAPI_KEY') or '').strip()
+
+
+def fetch_serpapi_matches(query: str, *, top_n: int = 10) -> tuple[list[tuple[str, str]], bool, str]:
+    api_key = _serpapi_api_key()
+    if not api_key:
+        return [], False, 'serpapi_unconfigured'
+    num = max(1, min(10, int(top_n)))
+    params = {
+        'engine': str(os.getenv('SERPAPI_ENGINE') or 'google').strip() or 'google',
+        'q': str(query or ''),
+        'api_key': api_key,
+        'num': str(num),
+    }
+    gl = str(os.getenv('SERPAPI_GL') or '').strip().lower()
+    hl = str(os.getenv('SERPAPI_HL') or '').strip().lower()
+    if gl:
+        params['gl'] = gl
+    if hl:
+        params['hl'] = hl
+    url = 'https://serpapi.com/search.json?' + parse.urlencode(params)
+    payload = fetch_json(url, timeout=8.0, retries=1)
+    if payload is None:
+        return [], False, 'serpapi_error'
     rows: list[tuple[str, str]] = []
     for item in payload.get('organic_results', []) or []:
         if not isinstance(item, dict):
             continue
-        link = str(item.get('link') or '').strip()
-        title = str(item.get('title') or '').strip()
+        link = str(item.get('link') or item.get('redirect_link') or '').strip()
+        title = str(item.get('title') or item.get('snippet') or '').strip()
         if not link:
             continue
         rows.append((link, title))
-    return rows
-
-
-def fetch_search_matches_serpapi(query: str) -> tuple[list[tuple[str, str]], bool, str]:
-    api_key = str(
-        os.environ.get('SERPAPI_KEY', '')
-        or os.environ.get('SERP_API_KEY', '')
-        or ''
-    ).strip()
-    if not api_key:
-        return [], False, 'serpapi_unconfigured'
-    engine = str(os.environ.get('SERPAPI_ENGINE', 'google') or 'google').strip().lower()
-    gl = str(os.environ.get('SERPAPI_GL', 'de') or 'de').strip().lower()
-    hl = str(os.environ.get('SERPAPI_HL', 'en') or 'en').strip().lower()
-    params = {
-        'engine': engine,
-        'q': query,
-        'api_key': api_key,
-        'num': '10',
-        'gl': gl,
-        'hl': hl,
-    }
-    url = 'https://serpapi.com/search.json?' + parse.urlencode(params)
-    req = request.Request(url, headers={'User-Agent': 'brandname-generator-validator/1.0'})
-    try:
-        with urlopen_no_proxy(req, timeout=8.0) as resp:
-            payload = json.loads(resp.read().decode('utf-8', errors='replace'))
-    except Exception:
-        return [], False, 'serpapi_error'
-    rows = parse_serpapi_results(payload if isinstance(payload, dict) else {})
+        if len(rows) >= num:
+            break
     return rows, True, 'serpapi'
 
 
-def fetch_search_matches(query: str) -> tuple[list[tuple[str, str]], bool, str]:
-    serp_rows, serp_ok, serp_source = fetch_search_matches_serpapi(query)
-    if serp_ok:
-        return serp_rows, True, serp_source
+def fetch_search_matches(query: str, *, timeout: float = 4.0, retries: int = 0) -> tuple[list[tuple[str, str]], bool, str]:
+    serpapi_rows, serpapi_ok, serpapi_source = fetch_serpapi_matches(query, top_n=10)
+    if serpapi_ok:
+        return serpapi_rows, True, serpapi_source
     source = 'ddg'
     url = 'https://duckduckgo.com/html/?' + parse.urlencode({'q': query})
-    page = fetch_text(url, timeout=6.0, retries=1)
+    page = fetch_text(url, timeout=timeout, retries=retries)
     if page is not None:
         return parse_ddg_results(page), True, source
     source = 'bing'
     url = 'https://www.bing.com/search?' + parse.urlencode({'q': query})
-    page = fetch_text(url, timeout=6.0, retries=1)
+    page = fetch_text(url, timeout=timeout, retries=retries)
     if page is None:
         return [], False, ''
     return parse_bing_results(page), True, source

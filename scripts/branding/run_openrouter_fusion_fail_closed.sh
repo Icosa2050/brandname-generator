@@ -7,6 +7,12 @@ cd "$ROOT_DIR"
 QUALITY_OUT_DIR="${BRANDING_AUTOMATION_QUALITY_OUT_DIR:-test_outputs/branding/automation_openrouter_quality_v4}"
 REMOTE_OUT_DIR="${BRANDING_AUTOMATION_REMOTE_OUT_DIR:-test_outputs/branding/automation_openrouter_remote_quality_v4}"
 FUSED_OUT_DIR="${BRANDING_AUTOMATION_FUSED_OUT_DIR:-test_outputs/branding/automation_openrouter_fused_v4}"
+FUSED_TMVIEW_FINAL_TOP_N="${OPENROUTER_FUSED_TMVIEW_FINAL_TOP_N:-20}"
+FUSED_TMVIEW_TIMEOUT_MS="${OPENROUTER_FUSED_TMVIEW_TIMEOUT_MS:-15000}"
+FUSED_TMVIEW_SETTLE_MS="${OPENROUTER_FUSED_TMVIEW_SETTLE_MS:-2500}"
+FUSED_TMVIEW_INACTIVE_EXACT_POLICY="${OPENROUTER_FUSED_TMVIEW_INACTIVE_EXACT_POLICY:-review}"
+FUSED_TMVIEW_HEADFUL="${OPENROUTER_FUSED_TMVIEW_HEADFUL:-0}"
+FUSED_TMVIEW_FAIL_ON_EMPTY="${OPENROUTER_FUSED_TMVIEW_FAIL_ON_EMPTY:-1}"
 
 if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "OPENROUTER_API_KEY is not set; refusing to run." >&2
@@ -92,3 +98,21 @@ python3 scripts/branding/fuse_postrank_profiles.py \
   --remote-quality-out-dir "$REMOTE_OUT_DIR" \
   --out-dir "$FUSED_OUT_DIR" \
   --top-n 40
+
+tmview_gate_args=(
+  python3
+  scripts/branding/finalize_fused_tmview_publish.py
+  --input-csv "$FUSED_OUT_DIR/postrank/fused_quality_remote_rank.csv"
+  --out-dir "$FUSED_OUT_DIR"
+  --top-n "$FUSED_TMVIEW_FINAL_TOP_N"
+  --timeout-ms "$FUSED_TMVIEW_TIMEOUT_MS"
+  --settle-ms "$FUSED_TMVIEW_SETTLE_MS"
+  --inactive-exact-policy "$FUSED_TMVIEW_INACTIVE_EXACT_POLICY"
+)
+if [[ "$FUSED_TMVIEW_HEADFUL" == "1" ]]; then
+  tmview_gate_args+=(--headful)
+fi
+if [[ "$FUSED_TMVIEW_FAIL_ON_EMPTY" == "1" ]]; then
+  tmview_gate_args+=(--fail-on-empty-publish)
+fi
+"${tmview_gate_args[@]}"

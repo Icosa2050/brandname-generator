@@ -113,6 +113,48 @@ class FusePostrankProfilesTest(unittest.TestCase):
             self.assertGreaterEqual(len(rows), 3)
             self.assertEqual(rows[0]['name'].lower(), 'stelarum')
 
+    def test_main_writes_empty_outputs_for_empty_rank_csvs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            quality_dir = root / 'quality'
+            remote_dir = root / 'remote_quality'
+            out_dir = root / 'fused'
+            for campaign_dir in [quality_dir, remote_dir]:
+                (campaign_dir / 'postrank').mkdir(parents=True, exist_ok=True)
+                (campaign_dir / 'postrank' / 'health_check.json').write_text(
+                    json.dumps({'metrics': {'strong_count': 0, 'new_shortlist_count': 0}}),
+                    encoding='utf-8',
+                )
+                with (campaign_dir / 'postrank' / 'deterministic_rubric_rank.csv').open(
+                    'w', encoding='utf-8', newline=''
+                ) as handle:
+                    writer = csv.DictWriter(handle, fieldnames=['name', 'total_score', 'recommendation'])
+                    writer.writeheader()
+
+            argv = [
+                'fuse_postrank_profiles.py',
+                '--quality-out-dir',
+                str(quality_dir),
+                '--remote-quality-out-dir',
+                str(remote_dir),
+                '--out-dir',
+                str(out_dir),
+                '--top-n',
+                '5',
+            ]
+            with mock.patch('sys.argv', argv):
+                rc = fpp.main()
+            self.assertEqual(rc, 0)
+
+            out_csv = out_dir / 'postrank' / 'fused_quality_remote_rank.csv'
+            out_json = out_dir / 'postrank' / 'fused_quality_remote_summary.json'
+            with out_csv.open('r', encoding='utf-8', newline='') as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows, [])
+            summary = json.loads(out_json.read_text(encoding='utf-8'))
+            self.assertEqual(summary['rows']['fused'], 0)
+            self.assertEqual(summary['top_names'], [])
+
 
 if __name__ == '__main__':
     unittest.main()
