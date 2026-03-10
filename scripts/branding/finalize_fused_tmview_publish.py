@@ -40,6 +40,26 @@ def write_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[str])
             writer.writerow({key: row.get(key, '') for key in fieldnames})
 
 
+def final_fieldnames(rows: list[dict[str, str]]) -> list[str]:
+    base_fields = list(rows[0].keys()) if rows else []
+    return base_fields + [
+        'final_publish_rank',
+        'tmview_bucket',
+        'tmview_reason',
+        'tmview_query_ok',
+        'tmview_exact_hits',
+        'tmview_near_hits',
+        'tmview_active_exact_hits',
+        'tmview_inactive_exact_hits',
+        'tmview_unknown_exact_hits',
+        'tmview_result_count',
+        'tmview_url',
+        'tmview_sample_text',
+        'tmview_exact_sample_text',
+        'tmview_error',
+    ]
+
+
 def classify_tmview_result(
     result: EuipoProbeResult,
     *,
@@ -167,11 +187,6 @@ def main() -> int:
         print(f'fused_tmview_gate_error missing_input={input_csv}')
         return 2
 
-    rows = load_rows(input_csv)
-    if not rows:
-        print(f'fused_tmview_gate_empty input={input_csv}')
-        return 3
-
     if str(args.out_dir or '').strip():
         out_dir = Path(args.out_dir).expanduser().resolve()
         postrank_dir = out_dir / 'postrank'
@@ -179,38 +194,30 @@ def main() -> int:
         postrank_dir = input_csv.parent
         out_dir = postrank_dir.parent
 
+    rows = load_rows(input_csv)
+
     selected = rows[: max(0, int(args.top_n))] if int(args.top_n) > 0 else list(rows)
     names = [str(row.get('name') or '').strip().lower() for row in selected if str(row.get('name') or '').strip()]
-    probes = probe_names(
-        names,
-        timeout_ms=max(3000, int(args.timeout_ms)),
-        settle_ms=max(0, int(args.settle_ms)),
-        headless=not bool(args.headful),
-    )
+    probes: dict[str, EuipoProbeResult] = {}
+    publish_rows: list[dict[str, object]] = []
+    review_rows: list[dict[str, object]] = []
+    rejected_rows: list[dict[str, object]] = []
+    if rows:
+        probes = probe_names(
+            names,
+            timeout_ms=max(3000, int(args.timeout_ms)),
+            settle_ms=max(0, int(args.settle_ms)),
+            headless=not bool(args.headful),
+        )
 
-    publish_rows, review_rows, rejected_rows = finalize_rows(
-        rows,
-        top_n=max(0, int(args.top_n)),
-        probes=probes,
-        inactive_exact_policy=str(args.inactive_exact_policy),
-    )
+        publish_rows, review_rows, rejected_rows = finalize_rows(
+            rows,
+            top_n=max(0, int(args.top_n)),
+            probes=probes,
+            inactive_exact_policy=str(args.inactive_exact_policy),
+        )
 
-    fieldnames = list(rows[0].keys()) + [
-        'final_publish_rank',
-        'tmview_bucket',
-        'tmview_reason',
-        'tmview_query_ok',
-        'tmview_exact_hits',
-        'tmview_near_hits',
-        'tmview_active_exact_hits',
-        'tmview_inactive_exact_hits',
-        'tmview_unknown_exact_hits',
-        'tmview_result_count',
-        'tmview_url',
-        'tmview_sample_text',
-        'tmview_exact_sample_text',
-        'tmview_error',
-    ]
+    fieldnames = final_fieldnames(rows)
 
     publish_csv = postrank_dir / 'fused_publish_final.csv'
     review_csv = postrank_dir / 'fused_review_queue.csv'
@@ -243,6 +250,13 @@ def main() -> int:
         'top_rejected_names': [str(row.get('name') or '') for row in rejected_rows[:20]],
     }
     summary_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+
+    if not rows:
+        print(f'fused_tmview_gate_empty input={input_csv} summary={summary_json}')
+        if bool(args.fail_on_empty_publish):
+            print('fused_tmview_gate_fail reason=no_publish_survivors_after_tmview')
+            return 4
+        return 0
 
     print(
         f'fused_tmview_gate_complete checked={len(selected)} publish={len(publish_rows)} '

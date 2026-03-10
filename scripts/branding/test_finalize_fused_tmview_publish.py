@@ -178,6 +178,75 @@ class FinalizeFusedTmviewPublishTest(unittest.TestCase):
             self.assertEqual(summary['publish_count'], 1)
             self.assertEqual(summary['review_count'], 1)
 
+    def test_main_empty_input_writes_empty_outputs_and_returns_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            postrank_dir = root / 'postrank'
+            postrank_dir.mkdir(parents=True, exist_ok=True)
+            input_csv = postrank_dir / 'fused_quality_remote_rank.csv'
+            input_csv.write_text('rank,name,fusion_score,recommendation\n', encoding='utf-8')
+
+            argv = [
+                'finalize_fused_tmview_publish.py',
+                '--input-csv',
+                str(input_csv),
+                '--out-dir',
+                str(root),
+                '--top-n',
+                '5',
+            ]
+            with mock.patch('sys.argv', argv), mock.patch.object(fftp, 'probe_names') as mock_probe_names:
+                rc = fftp.main()
+            self.assertEqual(rc, 0)
+            mock_probe_names.assert_not_called()
+
+            publish_csv = postrank_dir / 'fused_publish_final.csv'
+            review_csv = postrank_dir / 'fused_review_queue.csv'
+            rejected_csv = postrank_dir / 'fused_rejected.csv'
+            summary_json = postrank_dir / 'fused_tmview_gate_summary.json'
+            probe_json = postrank_dir / 'fused_tmview_probe.json'
+
+            self.assertTrue(publish_csv.exists())
+            self.assertTrue(review_csv.exists())
+            self.assertTrue(rejected_csv.exists())
+            self.assertTrue(summary_json.exists())
+            self.assertTrue(probe_json.exists())
+
+            with publish_csv.open('r', encoding='utf-8', newline='') as handle:
+                self.assertEqual(list(csv.DictReader(handle)), [])
+            with review_csv.open('r', encoding='utf-8', newline='') as handle:
+                self.assertEqual(list(csv.DictReader(handle)), [])
+            with rejected_csv.open('r', encoding='utf-8', newline='') as handle:
+                self.assertEqual(list(csv.DictReader(handle)), [])
+
+            summary = json.loads(summary_json.read_text(encoding='utf-8'))
+            probes = json.loads(probe_json.read_text(encoding='utf-8'))
+            self.assertEqual(summary['checked_count'], 0)
+            self.assertEqual(summary['publish_count'], 0)
+            self.assertEqual(summary['review_count'], 0)
+            self.assertEqual(summary['rejected_count'], 0)
+            self.assertEqual(probes, [])
+
+    def test_main_empty_input_can_fail_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            postrank_dir = root / 'postrank'
+            postrank_dir.mkdir(parents=True, exist_ok=True)
+            input_csv = postrank_dir / 'fused_quality_remote_rank.csv'
+            input_csv.write_text('rank,name,fusion_score,recommendation\n', encoding='utf-8')
+
+            argv = [
+                'finalize_fused_tmview_publish.py',
+                '--input-csv',
+                str(input_csv),
+                '--out-dir',
+                str(root),
+                '--fail-on-empty-publish',
+            ]
+            with mock.patch('sys.argv', argv):
+                rc = fftp.main()
+            self.assertEqual(rc, 4)
+
 
 if __name__ == '__main__':
     unittest.main()

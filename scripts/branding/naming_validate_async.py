@@ -463,6 +463,64 @@ def parse_args() -> argparse.Namespace:
         help='Override required domain TLDs as csv (for example: com,de,ch).',
     )
     parser.add_argument('--strict-required-domains', action='store_true')
+    # Deprecated compatibility flags kept as no-ops so older wrappers do not
+    # hard-fail argument parsing.
+    parser.add_argument(
+        '--tm-registry-unknown-hard-fail',
+        dest='tm_registry_unknown_hard_fail',
+        action='store_true',
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tm-registry-require-tmview-ok',
+        dest='tm_registry_require_tmview_ok',
+        action='store_true',
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tmview-probe-enabled',
+        dest='tmview_probe_enabled',
+        action='store_true',
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tm-registry-tmview-probe-enabled',
+        dest='tmview_probe_enabled',
+        action='store_true',
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tmview-probe-timeout-ms',
+        dest='tmview_probe_timeout_ms',
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tm-registry-tmview-timeout-ms',
+        dest='tmview_probe_timeout_ms',
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tmview-probe-settle-ms',
+        dest='tmview_probe_settle_ms',
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        '--tm-registry-tmview-settle-ms',
+        dest='tmview_probe_settle_ms',
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument('--progress', dest='progress', action='store_true', default=True)
     parser.add_argument('--no-progress', dest='progress', action='store_false')
     parser.add_argument(

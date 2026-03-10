@@ -121,6 +121,30 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             with mock.patch('sys.argv', ['naming_validate_async.py']):
                 args = nva.parse_args()
         self.assertEqual(args.web_google_cse_api_key, 'key_from_env')
+        with mock.patch(
+            'sys.argv',
+            [
+                'naming_validate_async.py',
+                '--tm-registry-unknown-hard-fail',
+                '--tm-registry-require-tmview-ok',
+                '--tmview-probe-enabled',
+                '--tm-registry-tmview-probe-enabled',
+                '--tmview-probe-timeout-ms',
+                '25000',
+                '--tm-registry-tmview-timeout-ms',
+                '26000',
+                '--tmview-probe-settle-ms',
+                '3000',
+                '--tm-registry-tmview-settle-ms',
+                '3100',
+            ],
+        ):
+            args = nva.parse_args()
+        self.assertTrue(args.tm_registry_unknown_hard_fail)
+        self.assertTrue(args.tm_registry_require_tmview_ok)
+        self.assertTrue(args.tmview_probe_enabled)
+        self.assertEqual(args.tmview_probe_timeout_ms, 26000)
+        self.assertEqual(args.tmview_probe_settle_ms, 3100)
         with mock.patch('sys.argv', ['naming_validate_async.py', '--required-domain-tlds', 'com,at']):
             with self.assertRaises(SystemExit) as ctx:
                 nva.parse_args()
