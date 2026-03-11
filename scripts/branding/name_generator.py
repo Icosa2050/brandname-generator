@@ -949,19 +949,19 @@ def lineage_atom_list(parts: Iterable[str]) -> list[str]:
 
 
 def primary_diversity_atom(parts: Iterable[str], *, fallback_name: str = '') -> str:
-    atoms = lineage_atom_list(parts)
+    atoms = list(parts)
     for atom in atoms:
         if len(atom) >= 4:
             return atom
-    if atoms:
-        return atoms[0]
+    for atom in atoms:
+        return atom
     return normalize_alpha(fallback_name)[:4]
 
 
 def seed_base_atom(parts: Iterable[str], *, fallback_name: str = '') -> str:
-    atoms = lineage_atom_list(parts)
-    if atoms:
-        return atoms[0]
+    atoms = list(parts)
+    for atom in atoms:
+        return atom
     return normalize_alpha(fallback_name)[:6]
 
 
@@ -2955,6 +2955,9 @@ def append_run_history(
         'shortlist_max_bucket': int(args.shortlist_max_bucket),
         'shortlist_max_prefix3': int(args.shortlist_max_prefix3),
         'shortlist_max_phonetic': int(args.shortlist_max_phonetic),
+        'max_per_primary_atom': int(args.max_per_primary_atom),
+        'shortlist_max_primary_atom': int(args.shortlist_max_primary_atom),
+        'shortlist_max_seed_base': int(args.shortlist_max_seed_base),
         'candidate_count': len(candidates),
         'shortlist_selected_count': shortlist_selected,
         'recommendation_counts': counts,
@@ -3025,6 +3028,9 @@ def persist_to_db(
                 'shortlist_max_bucket': int(args.shortlist_max_bucket),
                 'shortlist_max_prefix3': int(args.shortlist_max_prefix3),
                 'shortlist_max_phonetic': int(args.shortlist_max_phonetic),
+                'max_per_primary_atom': int(args.max_per_primary_atom),
+                'shortlist_max_primary_atom': int(args.shortlist_max_primary_atom),
+                'shortlist_max_seed_base': int(args.shortlist_max_seed_base),
                 'stage_events': bool(args.stage_events),
             },
             summary={

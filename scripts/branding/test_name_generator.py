@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +25,10 @@ class _PassthroughFilter:
 
 
 class NameGeneratorTest(unittest.TestCase):
+    def _default_args(self) -> Namespace:
+        with mock.patch.object(sys, 'argv', ['name_generator.py']):
+            return ng.parse_args()
+
     def test_load_failed_history_names_detects_rejected_and_validator_hard_fail(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / 'history.db'
@@ -430,6 +435,51 @@ class NameGeneratorTest(unittest.TestCase):
                     for row in reader
                 }
             self.assertNotIn('tenant', names)
+
+    def test_persist_to_db_records_atom_budget_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / 'naming.db'
+            args = self._default_args()
+            args.seeds = 'balance,clarity'
+            args.max_per_primary_atom = 5
+            args.shortlist_max_primary_atom = 1
+            args.shortlist_max_seed_base = 1
+
+            candidate = ng.Candidate(
+                name='solvara',
+                generator_family='coined',
+                lineage_atoms='solva;ra',
+                source_confidence=0.7,
+                quality_score=78,
+                challenge_risk=12,
+                total_score=88,
+                descriptive_risk=0,
+                similarity_risk=0,
+                closest_mark='',
+                scope_penalty=0,
+                shortlist_selected=True,
+                shortlist_rank=1,
+                shortlist_bucket='brandable',
+                shortlist_reason='diversity_accept',
+            )
+
+            run_id, _ = ng.persist_to_db(
+                db_path=db_path,
+                scope='global',
+                gate='strict',
+                variation_profile='expanded',
+                args=args,
+                candidates=[candidate],
+            )
+
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute('SELECT config_json FROM naming_runs WHERE id = ?', (run_id,)).fetchone()
+
+            self.assertIsNotNone(row)
+            config = json.loads(str(row[0]))
+            self.assertEqual(config['max_per_primary_atom'], 5)
+            self.assertEqual(config['shortlist_max_primary_atom'], 1)
+            self.assertEqual(config['shortlist_max_seed_base'], 1)
 
 
 if __name__ == '__main__':
