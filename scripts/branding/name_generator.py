@@ -501,6 +501,7 @@ class GenerationRequest:
     max_per_suffix2: int
     max_per_shape: int
     max_per_family: int
+    max_per_primary_atom: int
 
 
 @dataclass(frozen=True)
@@ -510,6 +511,7 @@ class FilterRequest:
     max_per_suffix2: int
     max_per_shape: int
     max_per_family: int
+    max_per_primary_atom: int
 
 
 @dataclass(frozen=True)
@@ -578,7 +580,7 @@ class CandidateValidatorEngine(Protocol):
 
 @dataclass(frozen=True)
 class PrefixSuffixShapeFilter:
-    filter_id: str = 'prefix_suffix_shape_v2'
+    filter_id: str = 'prefix_suffix_shape_v3'
 
     def apply(self, request: FilterRequest) -> list[GeneratedCandidate]:
         return diversity_filter(
@@ -587,6 +589,7 @@ class PrefixSuffixShapeFilter:
             max_per_suffix2=request.max_per_suffix2,
             max_per_shape=request.max_per_shape,
             max_per_family=request.max_per_family,
+            max_per_primary_atom=request.max_per_primary_atom,
         )
 
 
@@ -610,6 +613,7 @@ class FamilyRuleGeneratorEngine:
             request.max_per_suffix2,
             request.max_per_shape,
             request.max_per_family,
+            request.max_per_primary_atom,
             filter_engine=self.diversity_filter_engine,
         )
 
@@ -927,9 +931,38 @@ def merge_generated(
         out[normalized] = GeneratedCandidate(
             name=normalized,
             generator_family=family,
-            lineage_atoms=[normalize_alpha(part) for part in lineage_atoms if normalize_alpha(part)],
+            lineage_atoms=lineage_atom_list(lineage_atoms),
             source_confidence=source_confidence,
         )
+
+
+def lineage_atom_list(parts: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in parts:
+        normalized = normalize_alpha(str(part))
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def primary_diversity_atom(parts: Iterable[str], *, fallback_name: str = '') -> str:
+    atoms = lineage_atom_list(parts)
+    for atom in atoms:
+        if len(atom) >= 4:
+            return atom
+    if atoms:
+        return atoms[0]
+    return normalize_alpha(fallback_name)[:4]
+
+
+def seed_base_atom(parts: Iterable[str], *, fallback_name: str = '') -> str:
+    atoms = lineage_atom_list(parts)
+    if atoms:
+        return atoms[0]
+    return normalize_alpha(fallback_name)[:6]
 
 
 def source_atom_role(atom: dict) -> str:
@@ -1402,12 +1435,14 @@ def diversity_filter(
     max_per_suffix2: int,
     max_per_shape: int,
     max_per_family: int,
+    max_per_primary_atom: int,
 ) -> list[GeneratedCandidate]:
     out: list[GeneratedCandidate] = []
     prefix_counts: Counter[str] = Counter()
     suffix_counts: Counter[str] = Counter()
     shape_counts: Counter[str] = Counter()
     family_counts: Counter[str] = Counter()
+    primary_atom_counts: Counter[str] = Counter()
 
     ordered = sorted(
         generated,
@@ -1417,6 +1452,7 @@ def diversity_filter(
         prefix = item.name[:2]
         suffix = item.name[-2:]
         shape = pattern_shape(item.name)
+        primary_atom = primary_diversity_atom(item.lineage_atoms, fallback_name=item.name)
         if family_counts[item.generator_family] >= max_per_family:
             continue
         if prefix_counts[prefix] >= max_per_prefix2:
@@ -1425,11 +1461,15 @@ def diversity_filter(
             continue
         if shape_counts[shape] >= max_per_shape:
             continue
+        if primary_atom and primary_atom_counts[primary_atom] >= max_per_primary_atom:
+            continue
         out.append(item)
         family_counts[item.generator_family] += 1
         prefix_counts[prefix] += 1
         suffix_counts[suffix] += 1
         shape_counts[shape] += 1
+        if primary_atom:
+            primary_atom_counts[primary_atom] += 1
     return out
 
 
@@ -1447,6 +1487,7 @@ def generate_candidates(
     max_per_suffix2: int,
     max_per_shape: int,
     max_per_family: int,
+    max_per_primary_atom: int,
     filter_engine: CandidateFilter | None = None,
 ) -> list[GeneratedCandidate]:
     families = collect_family_candidates(
@@ -1501,6 +1542,7 @@ def generate_candidates(
         max_per_suffix2=max_per_suffix2,
         max_per_shape=max_per_shape,
         max_per_family=max_per_family,
+        max_per_primary_atom=max_per_primary_atom,
     )
     active_filter = filter_engine or PrefixSuffixShapeFilter()
     return active_filter.apply(filter_request)
@@ -2593,6 +2635,8 @@ def rerank_with_diversity(
     max_per_bucket: int,
     max_per_prefix3: int,
     max_per_phonetic: int,
+    max_per_primary_atom: int,
+    max_per_seed_base: int,
 ) -> list[Candidate]:
     if shortlist_size <= 0 or not candidates:
         return candidates
@@ -2600,6 +2644,8 @@ def rerank_with_diversity(
     bucket_counts: Counter[str] = Counter()
     prefix_counts: Counter[str] = Counter()
     phonetic_counts: Counter[str] = Counter()
+    primary_atom_counts: Counter[str] = Counter()
+    seed_base_counts: Counter[str] = Counter()
     selected: list[Candidate] = []
     deferred: list[Candidate] = []
 
@@ -2614,10 +2660,15 @@ def rerank_with_diversity(
         bucket = shortlist_bucket(candidate.name)
         prefix3 = candidate.name[:3]
         phonetic_key = phonetic_fingerprint(candidate.name)
+        lineage_parts = lineage_atom_list(str(candidate.lineage_atoms or '').split(';'))
+        primary_atom = primary_diversity_atom(lineage_parts, fallback_name=candidate.name)
+        seed_base = seed_base_atom(lineage_parts, fallback_name=candidate.name) if candidate.generator_family == 'seed' else ''
         allow = (
             bucket_counts[bucket] < max_per_bucket
             and prefix_counts[prefix3] < max_per_prefix3
             and phonetic_counts[phonetic_key] < max_per_phonetic
+            and (not primary_atom or primary_atom_counts[primary_atom] < max_per_primary_atom)
+            and (not seed_base or seed_base_counts[seed_base] < max_per_seed_base)
             and len(selected) < shortlist_size
         )
         candidate.shortlist_bucket = bucket
@@ -2625,11 +2676,16 @@ def rerank_with_diversity(
             bucket_counts[bucket] += 1
             prefix_counts[prefix3] += 1
             phonetic_counts[phonetic_key] += 1
+            if primary_atom:
+                primary_atom_counts[primary_atom] += 1
+            if seed_base:
+                seed_base_counts[seed_base] += 1
             candidate.shortlist_selected = True
             candidate.shortlist_reason = (
                 f'diversity_accept bucket={bucket} bucket_count={bucket_counts[bucket]} '
                 f'prefix3={prefix3} prefix_count={prefix_counts[prefix3]} '
-                f'phonetic={phonetic_key} phonetic_count={phonetic_counts[phonetic_key]}'
+                f'phonetic={phonetic_key} phonetic_count={phonetic_counts[phonetic_key]} '
+                f'primary_atom={primary_atom or "-"} primary_atom_count={primary_atom_counts.get(primary_atom, 0)}'
             )
             selected.append(candidate)
         else:
@@ -2642,6 +2698,10 @@ def rerank_with_diversity(
                 candidate.shortlist_reason = f'prefix3_quota_reached:{prefix3}'
             elif phonetic_counts[phonetic_key] >= max_per_phonetic:
                 candidate.shortlist_reason = f'phonetic_quota_reached:{phonetic_key}'
+            elif primary_atom and primary_atom_counts[primary_atom] >= max_per_primary_atom:
+                candidate.shortlist_reason = f'primary_atom_quota_reached:{primary_atom}'
+            elif seed_base and seed_base_counts[seed_base] >= max_per_seed_base:
+                candidate.shortlist_reason = f'seed_base_quota_reached:{seed_base}'
             else:
                 candidate.shortlist_reason = 'deferred'
             deferred.append(candidate)
@@ -3164,6 +3224,12 @@ def parse_args() -> argparse.Namespace:
         help='Diversity guard: hard cap per generator family before scoring.',
     )
     parser.add_argument(
+        '--max-per-primary-atom',
+        type=int,
+        default=5,
+        help='Diversity guard: max generated candidates sharing the same primary lineage atom.',
+    )
+    parser.add_argument(
         '--false-friend-fail-threshold',
         type=int,
         default=28,
@@ -3307,6 +3373,18 @@ def parse_args() -> argparse.Namespace:
         help='Max shortlist entries sharing same phonetic fingerprint.',
     )
     parser.add_argument(
+        '--shortlist-max-primary-atom',
+        type=int,
+        default=1,
+        help='Max shortlist entries sharing the same primary lineage atom.',
+    )
+    parser.add_argument(
+        '--shortlist-max-seed-base',
+        type=int,
+        default=1,
+        help='Max shortlist entries derived from the same seed base.',
+    )
+    parser.add_argument(
         '--stage-events',
         dest='stage_events',
         action='store_true',
@@ -3442,6 +3520,7 @@ def main() -> int:
                     max_per_suffix2=max(1, args.max_per_suffix2),
                     max_per_shape=max(1, args.max_per_shape),
                     max_per_family=max(1, args.max_per_family),
+                    max_per_primary_atom=max(1, args.max_per_primary_atom),
                 )
             )
         else:
@@ -3459,6 +3538,7 @@ def main() -> int:
                 max(1, args.max_per_suffix2),
                 max(1, args.max_per_shape),
                 max(1, args.max_per_family),
+                max(1, args.max_per_primary_atom),
             )
         by_name = {item.name: item for item in generated_items}
         for item in explicit_generated:
@@ -3732,6 +3812,8 @@ def main() -> int:
         max_per_bucket=max(1, args.shortlist_max_bucket),
         max_per_prefix3=max(1, args.shortlist_max_prefix3),
         max_per_phonetic=max(1, args.shortlist_max_phonetic),
+        max_per_primary_atom=max(1, args.shortlist_max_primary_atom),
+        max_per_seed_base=max(1, args.shortlist_max_seed_base),
     )
     shortlist_selected = sum(1 for candidate in final_ranked if candidate.shortlist_selected)
     emit_stage_event(

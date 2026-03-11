@@ -205,11 +205,77 @@ class NameGeneratorTest(unittest.TestCase):
             max_per_suffix2=99,
             max_per_shape=99,
             max_per_family=99,
+            max_per_primary_atom=99,
             filter_engine=_PassthroughFilter(),
         )
         self.assertLessEqual(len(generated), 3)
         self.assertTrue(all(item.generator_family == 'seed' for item in generated))
         self.assertIn('clarity', {item.name for item in generated})
+
+    def test_diversity_filter_limits_primary_atom_repetition(self) -> None:
+        generated = [
+            ng.GeneratedCandidate(name='vantaten', generator_family='coined', lineage_atoms=['vanta', 'ten'], source_confidence=0.9),
+            ng.GeneratedCandidate(name='vantabal', generator_family='coined', lineage_atoms=['vanta', 'bal'], source_confidence=0.8),
+            ng.GeneratedCandidate(name='vantaro', generator_family='coined', lineage_atoms=['vanta', 'ro'], source_confidence=0.7),
+            ng.GeneratedCandidate(name='solvara', generator_family='coined', lineage_atoms=['solva', 'ra'], source_confidence=0.6),
+        ]
+
+        out = ng.diversity_filter(
+            generated,
+            max_per_prefix2=99,
+            max_per_suffix2=99,
+            max_per_shape=99,
+            max_per_family=99,
+            max_per_primary_atom=2,
+        )
+
+        self.assertEqual([item.name for item in out], ['vantaten', 'vantabal', 'solvara'])
+
+    def test_rerank_with_diversity_limits_primary_atom_repetition(self) -> None:
+        candidates = [
+            ng.Candidate(name='vantaten', generator_family='coined', lineage_atoms='vanta;ten', source_confidence=0.9, quality_score=80, challenge_risk=10, total_score=90, descriptive_risk=0, similarity_risk=0, closest_mark='', scope_penalty=0),
+            ng.Candidate(name='vantabal', generator_family='coined', lineage_atoms='vanta;bal', source_confidence=0.8, quality_score=79, challenge_risk=11, total_score=89, descriptive_risk=0, similarity_risk=0, closest_mark='', scope_penalty=0),
+            ng.Candidate(name='solvara', generator_family='coined', lineage_atoms='solva;ra', source_confidence=0.7, quality_score=78, challenge_risk=12, total_score=88, descriptive_risk=0, similarity_risk=0, closest_mark='', scope_penalty=0),
+        ]
+
+        ranked = ng.rerank_with_diversity(
+            candidates,
+            gate='strict',
+            shortlist_size=3,
+            max_per_bucket=3,
+            max_per_prefix3=3,
+            max_per_phonetic=3,
+            max_per_primary_atom=1,
+            max_per_seed_base=1,
+        )
+
+        selected = [item.name for item in ranked if item.shortlist_selected]
+        deferred = {item.name: item.shortlist_reason for item in ranked if not item.shortlist_selected}
+        self.assertEqual(selected, ['vantaten', 'solvara'])
+        self.assertEqual(deferred['vantabal'], 'primary_atom_quota_reached:vanta')
+
+    def test_rerank_with_diversity_limits_seed_base_variants(self) -> None:
+        candidates = [
+            ng.Candidate(name='clarity', generator_family='seed', lineage_atoms='clarity', source_confidence=0.9, quality_score=80, challenge_risk=10, total_score=90, descriptive_risk=0, similarity_risk=0, closest_mark='', scope_penalty=0),
+            ng.Candidate(name='clarityon', generator_family='seed', lineage_atoms='clarity;on', source_confidence=0.8, quality_score=79, challenge_risk=11, total_score=89, descriptive_risk=0, similarity_risk=0, closest_mark='', scope_penalty=0),
+            ng.Candidate(name='solvara', generator_family='coined', lineage_atoms='solva;ra', source_confidence=0.7, quality_score=78, challenge_risk=12, total_score=88, descriptive_risk=0, similarity_risk=0, closest_mark='', scope_penalty=0),
+        ]
+
+        ranked = ng.rerank_with_diversity(
+            candidates,
+            gate='strict',
+            shortlist_size=3,
+            max_per_bucket=3,
+            max_per_prefix3=3,
+            max_per_phonetic=3,
+            max_per_primary_atom=3,
+            max_per_seed_base=1,
+        )
+
+        selected = [item.name for item in ranked if item.shortlist_selected]
+        deferred = {item.name: item.shortlist_reason for item in ranked if not item.shortlist_selected}
+        self.assertEqual(selected, ['clarity', 'solvara'])
+        self.assertEqual(deferred['clarityon'], 'seed_base_quota_reached:clarity')
 
     def test_web_collision_signal_ignores_social_handle_exact_hits(self) -> None:
         quoted = [
