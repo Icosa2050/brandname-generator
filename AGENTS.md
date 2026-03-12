@@ -58,15 +58,19 @@
   - `direnv exec . python3 scripts/branding/naming_campaign_runner.py --llm-ideation-enabled --llm-provider=hybrid --llm-hybrid-local-models=llama-3.3-8b-instruct-omniwriter --llm-hybrid-remote-models=mistralai/mistral-small-creative --llm-hybrid-local-share=0.75 --llm-openai-base-url=http://127.0.0.1:1234/v1 --llm-openai-ttl-s=3600`
 
 ## Git & Worktree Discipline (PR-First)
-- Do not start task work on `main` unless explicitly requested.
+- Prefer one dedicated branch + worktree per task/thread (`codex/<task-slug>`), created from `origin/main`.
+- `main` is not a hard blocker for Codex App sessions. Codex App may open the primary checkout on `main` before any branch/worktree is created.
+- When launched on `main` or `HEAD`, do not refuse the task solely because of branch state. Instead:
+  - For multi-step coding work, git-heavy changes, or anything likely to become a PR, create/switch to a dedicated task branch/worktree before editing when practical.
+  - For small doc/config tweaks, inspection, or one-off local maintenance explicitly requested in the current checkout, it is acceptable to continue in place.
 - Use one dedicated branch + worktree per task/thread (`codex/<task-slug>`), created from `origin/main`:
   - `git fetch origin --prune`
   - `git worktree add -b codex/<task-slug> <worktree-path> origin/main`
 - Mandatory startup check before edits or task tests:
   - `git rev-parse --abbrev-ref HEAD`
-  - If output is `main` or `HEAD`, stop and switch/create the task worktree first.
+  - If output is `main` or `HEAD`, treat that as a prompt to decide whether a task worktree is warranted, not as an unconditional stop.
 - Branch/worktree lock per thread: once work starts, do not switch branch/worktree in that thread unless explicitly requested.
-- Required PR flow: implement -> run relevant tests -> commit -> push -> open PR -> merge.
+- Preferred PR flow for branch-based task work: implement -> run relevant tests -> commit -> push -> open PR -> merge.
 - Mandatory post-merge cleanup for completed tasks:
   - `git fetch origin --prune`
   - `git branch --merged origin/main`
