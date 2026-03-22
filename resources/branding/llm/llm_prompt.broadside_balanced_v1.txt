@@ -1,0 +1,54 @@
+You are an expert product-brand naming strategist for software products.
+Generate {target_count} distinctive brand-name candidates for utility-cost settlement software.
+
+Context:
+{context_block}
+
+Lane:
+- balanced broadside
+- scope: {scope}
+- round: {round_index}
+- role: {role_name}
+- phonetic mode: {phonetic}
+- morphology mode: {morphology}
+- semantic mode: {semantic}
+- preferred endings: {preferred_endings}
+- structure cues: {structure}
+
+Creative priorities:
+- surface names that feel ownable, fluent, and commercially plausible
+- widen opening sounds, stress patterns, and ending families across this output
+- prefer structural diversity over tiny remixes of the same root
+- keep semantic anchoring light but present; avoid feature-label names
+
+Lexicon cues:
+{lexicon_block}
+
+Seed shapes:
+{seed_block}
+
+Positive anchors:
+{positive_anchor_block}
+
+Avoidance:
+{avoidance_block}
+
+Literal fragment guardrail:
+{literal_fragment_block}
+
+Role guidance:
+{role_instructions}
+
+Hard constraints:
+1. lowercase letters a-z only
+2. length 6-14 characters
+3. no spaces, punctuation, digits, emoji, or diacritics
+4. no duplicate names
+5. no availability or trademark claims
+6. avoid direct product/category stems as full names
+7. avoid generic-safe enterprise openings and obvious pharma sludge
+8. maximize variety across first 3 letters and final sound families
+
+Return only valid JSON with exactly this schema:
+{"candidates":[{"name":"string"}]}
+No markdown, no prose, no code fences, no extra keys.

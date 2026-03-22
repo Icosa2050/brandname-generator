@@ -1,0 +1,69 @@
+[run]
+title = "openrouter-attack-plosive"
+db_path = "../../test_outputs/brandpipe/attack_plosive/brandpipe.db"
+
+[brief]
+product_core = "placeholder"
+
+[ideation]
+provider = "openrouter_http"
+rounds = 8
+candidates_per_round = 24
+overgenerate_factor = 3.2
+round_seed_min = 8
+round_seed_max = 14
+seed_pool_multiplier = 16
+seed_saturation_limit = 2
+per_family_cap = 4
+lexicon_core_limit = 9
+lexicon_modifier_limit = 9
+lexicon_associative_limit = 9
+lexicon_morpheme_limit = 16
+local_filter_saturation_limit = 2
+local_filter_lead_fragment_limit = 1
+local_filter_lead_fragment_length = 4
+local_filter_lead_skeleton_limit = 2
+temperature = 0.95
+timeout_ms = 60000
+api_key_env = "OPENROUTER_API_KEY"
+prompt_template_file = "../branding/llm/llm_prompt.attack_plosive_precision_v1.txt"
+
+[ideation.pseudoword]
+language_plugin = "orthographic_german"
+language_plugins = ["orthographic_german", "orthographic_polish", "orthographic_english"]
+seed_count = 42
+
+[[ideation.roles]]
+model = "google/gemini-3.1-pro-preview"
+role = "phonetic_explorer"
+temperature = 1.0
+weight = 2
+
+[[ideation.roles]]
+model = "moonshotai/kimi-k2.5"
+role = "contrarian"
+temperature = 1.0
+weight = 2
+
+[[ideation.roles]]
+model = "google/gemini-3.1-pro-preview"
+role = "ending_diversifier"
+temperature = 0.92
+weight = 1
+
+[[ideation.roles]]
+model = "moonshotai/kimi-k2.5"
+role = "recombinator"
+temperature = 0.82
+weight = 1
+
+[validation]
+checks = "domain,package,web,social"
+parallel_workers = 4
+scope = "global"
+store_countries = "de,ch,it"
+web_search_order = "brave,google_cse,duckduckgo"
+
+[export]
+out_csv = "../../test_outputs/brandpipe/attack_plosive/finalists_{run_id}.csv"
+top_n = 80

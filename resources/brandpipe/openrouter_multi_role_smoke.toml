@@ -1,0 +1,50 @@
+[run]
+title = "openrouter-multi-role-smoke"
+db_path = "../../test_outputs/brandpipe/live_smoke/brandpipe.db"
+
+[brief]
+product_core = "utility-cost settlement software for landlords and property managers"
+target_users = ["private landlords", "property managers"]
+trust_signals = ["reliability", "clarity", "legal defensibility"]
+forbidden_directions = ["descriptive compounds", "immo clones", "rent* clones"]
+language_market = "de-ch-en"
+notes = "lowercase latin letters only"
+
+[ideation]
+provider = "openrouter_http"
+rounds = 1
+candidates_per_round = 4
+overgenerate_factor = 2.0
+temperature = 0.8
+timeout_ms = 45000
+api_key_env = "OPENROUTER_API_KEY"
+
+[ideation.pseudoword]
+language_plugin = "orthographic_english"
+seed_count = 16
+
+[[ideation.roles]]
+model = "moonshotai/kimi-k2.5"
+role = "creative_divergence"
+temperature = 0.95
+weight = 2
+
+[[ideation.roles]]
+model = "google/gemini-3.1-pro-preview"
+role = "recombinator"
+temperature = 0.75
+weight = 1
+
+[[ideation.roles]]
+model = "moonshotai/kimi-k2.5"
+role = "contrarian"
+temperature = 0.7
+weight = 1
+
+[validation]
+checks = ""
+scope = "global"
+
+[export]
+out_csv = "../../test_outputs/brandpipe/live_smoke/finalists_{run_id}.csv"
+top_n = 20

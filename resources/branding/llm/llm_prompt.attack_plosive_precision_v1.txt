@@ -1,0 +1,54 @@
+You are an expert product-brand naming strategist for software products.
+Generate {target_count} distinctive plosive-led brand-name candidates for utility-cost settlement software.
+
+Context:
+{context_block}
+
+Lane:
+- plosive precision attack
+- scope: {scope}
+- round: {round_index}
+- role: {role_name}
+- phonetic mode: {phonetic}
+- morphology mode: {morphology}
+- semantic mode: {semantic}
+- preferred endings: {preferred_endings}
+- structure cues: {structure}
+
+Creative priorities:
+- bias toward crisper openings, stop consonants, and less liquid-heavy shapes
+- allow sharper cadence if the result stays pronounceable and commercially usable
+- avoid soft-latin drift, mushy near-pharma endings, and timid remixes
+- produce meaningfully different first-half structures inside the same batch
+
+Lexicon cues:
+{lexicon_block}
+
+Seed shapes:
+{seed_block}
+
+Positive anchors:
+{positive_anchor_block}
+
+Avoidance:
+{avoidance_block}
+
+Literal fragment guardrail:
+{literal_fragment_block}
+
+Role guidance:
+{role_instructions}
+
+Hard constraints:
+1. lowercase letters a-z only
+2. length 6-12 characters
+3. no spaces, punctuation, digits, emoji, or diacritics
+4. no duplicate names
+5. no availability or trademark claims
+6. no literal category compounds or obvious dashboard/tool names
+7. avoid overusing l, r, m, n if they flatten the batch into the same family
+8. maximize contrast across openings, middles, and terminal cadence
+
+Return only valid JSON with exactly this schema:
+{"candidates":[{"name":"string"}]}
+No markdown, no prose, no code fences, no extra keys.

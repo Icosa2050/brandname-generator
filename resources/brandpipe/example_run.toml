@@ -1,0 +1,31 @@
+[run]
+title = "example-brand-run"
+db_path = "../../test_outputs/brandpipe/brandpipe.db"
+
+[brief]
+product_core = "utility-cost settlement software for landlords and property managers"
+target_users = ["private landlords", "property managers"]
+trust_signals = ["reliability", "clarity", "legal defensibility"]
+forbidden_directions = ["descriptive compounds", "immo* clones"]
+language_market = "de-ch-en"
+notes = "lowercase latin letters only"
+
+[ideation]
+provider = "fixture"
+fixture_input = "example_fixture.json"
+rounds = 1
+candidates_per_round = 12
+# For LLM providers, optional seed broadening via Wuggy:
+# [ideation.pseudoword]
+# language_plugin = "orthographic_english"
+# seed_count = 18
+
+[validation]
+checks = ""
+scope = "global"
+store_countries = "de,ch,it"
+web_search_order = "brave,google_cse,duckduckgo"
+
+[export]
+out_csv = "../../test_outputs/brandpipe/finalists_{run_id}.csv"
+top_n = 20
