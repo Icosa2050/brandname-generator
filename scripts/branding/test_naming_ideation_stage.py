@@ -131,6 +131,8 @@ class NamingIdeationStageTest(unittest.TestCase):
             context_packet=context,
         )
         self.assertIn('Context packet:', prompt)
+        self.assertIn('Round focus:', prompt)
+        self.assertIn('Creative directive:', prompt)
         self.assertIn('product_core: settlement automation for landlords and tenants', prompt)
         self.assertIn('target_users: landlords, property managers', prompt)
         self.assertIn('align with context packet priorities when provided', prompt)
@@ -152,6 +154,8 @@ class NamingIdeationStageTest(unittest.TestCase):
             'round={round_index}\n'
             'target={target_count}\n'
             'mode={phonetic}/{morphology}/{semantic}\n'
+            'focus={round_focus}\n'
+            'directive={creative_directive}\n'
             'banned={banned_tokens}\n'
             'prefixes={banned_prefixes}\n'
             '{context_block}'
@@ -168,6 +172,8 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertIn('scope=eu', prompt)
         self.assertIn('round=2', prompt)
         self.assertIn('target=12', prompt)
+        self.assertIn('focus=', prompt)
+        self.assertIn('directive=', prompt)
         self.assertIn('banned=fair', prompt)
         self.assertIn('prefixes=fai', prompt)
         self.assertIn('Context packet:', prompt)

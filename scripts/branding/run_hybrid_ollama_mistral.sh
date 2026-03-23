@@ -49,10 +49,11 @@ Usage:
   scripts/branding/run_hybrid_ollama_mistral.sh [options] [-- <extra runner args>]
 
 Options:
-  --profile <fast|quality|creative|remote_quality>  Apply preset args (default: custom/manual)
+  --profile <fast|quality|creative|creative_wide|remote_quality>  Apply preset args (default: custom/manual)
   --fast                             Alias for --profile fast
   --quality                          Alias for --profile quality
   --creative                         Alias for --profile creative
+  --creative-wide                    Alias for --profile creative_wide
   --remote-quality                   Alias for --profile remote_quality
   --out-dir <path>                   Campaign output root (default: /tmp/branding_hybrid_ollama)
   --local-model <id|csv>             Ollama model id(s), comma-separated allowed
@@ -117,6 +118,20 @@ Profiles:
     --validator-timeout-s 14
     --validator-max-concurrency 16
 
+  creative_wide:
+    --local-share 0.10
+    --local-model mistral-small3.1:latest
+    --llm-rounds 8
+    --llm-candidates-per-round 18
+    --generator-min-len 8
+    --generator-max-len 15
+    --llm-prompt-template-file resources/branding/llm/llm_prompt.creative_longer_names_v1.txt
+    --generator-seeds anchor,beacon,clarity,harbor,meridian,signal,serein,velora
+    --quota-profiles coined:250,stem:95,suggestive:145,morphology:140,seed:80,expression:120,source_pool:70,blend:230,lattice:250|coined:230,stem:90,suggestive:140,morphology:120,seed:85,expression:130,source_pool:75,blend:250,lattice:240
+    --validator-expensive-finalist-limit 28
+    --validator-timeout-s 16
+    --validator-max-concurrency 18
+
   remote_quality:
     --local-share 0.10
     --local-model mistral-small3.1:latest
@@ -175,6 +190,23 @@ apply_profile() {
         --validator-max-concurrency 16
       )
       ;;
+    "creative_wide")
+      LOCAL_SHARE="0.10"
+      LOCAL_MODEL="${HYBRID_CREATIVE_WIDE_LOCAL_MODEL:-mistral-small3.1:latest}"
+      LLM_ROUNDS="8"
+      LLM_CANDIDATES_PER_ROUND="18"
+      GENERATOR_MIN_LEN="8"
+      GENERATOR_MAX_LEN="15"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.creative_longer_names_v1.txt"
+      PROFILE_ARGS=(
+        --generator-seeds anchor,beacon,clarity,harbor,meridian,signal,serein,velora
+        '--quota-profiles'
+        'coined:250,stem:95,suggestive:145,morphology:140,seed:80,expression:120,source_pool:70,blend:230,lattice:250|coined:230,stem:90,suggestive:140,morphology:120,seed:85,expression:130,source_pool:75,blend:250,lattice:240'
+        --validator-expensive-finalist-limit 28
+        --validator-timeout-s 16
+        --validator-max-concurrency 18
+      )
+      ;;
     "remote_quality")
       LOCAL_SHARE="0.10"
       LOCAL_MODEL="${HYBRID_REMOTE_QUALITY_LOCAL_MODEL:-mistral-small3.1:latest}"
@@ -190,7 +222,7 @@ apply_profile() {
       )
       ;;
     *)
-      echo "Unknown profile: $PROFILE (expected fast|quality|creative|remote_quality)." >&2
+      echo "Unknown profile: $PROFILE (expected fast|quality|creative|creative_wide|remote_quality)." >&2
       exit 1
       ;;
   esac
@@ -212,6 +244,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --creative)
       PROFILE="creative"
+      shift
+      ;;
+    --creative-wide)
+      PROFILE="creative_wide"
       shift
       ;;
     --remote-quality)

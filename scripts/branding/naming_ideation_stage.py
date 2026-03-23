@@ -18,13 +18,66 @@ from typing import Any
 from urllib import error, parse, request
 
 
-MODE_TRIPLETS: tuple[tuple[str, str, str], ...] = (
-    ('smooth', 'blend', 'trust'),
-    ('crisp', 'coined', 'precision'),
-    ('balanced', 'hybrid', 'clarity'),
-    ('smooth', 'coined', 'neutral'),
-    ('crisp', 'hybrid', 'trust'),
-    ('balanced', 'blend', 'precision'),
+MODE_SPECS: tuple[dict[str, str], ...] = (
+    {
+        'phonetic': 'smooth',
+        'morphology': 'blend',
+        'semantic': 'trust',
+        'round_focus': 'calm signal + shelter',
+        'creative_directive': 'lean on shelter, beacon, and signal metaphors instead of billing language',
+    },
+    {
+        'phonetic': 'crisp',
+        'morphology': 'coined',
+        'semantic': 'precision',
+        'round_focus': 'angular coined control',
+        'creative_directive': 'prefer asymmetry, sharper openings, and confident endings over soft latin clones',
+    },
+    {
+        'phonetic': 'balanced',
+        'morphology': 'hybrid',
+        'semantic': 'clarity',
+        'round_focus': 'navigation + measurement',
+        'creative_directive': 'use route, axis, measure, and surface cues rather than explicit utility words',
+    },
+    {
+        'phonetic': 'open',
+        'morphology': 'lattice',
+        'semantic': 'evocative',
+        'round_focus': 'lateral metaphor',
+        'creative_directive': 'pull from landscape, motion, craft, and light to widen semantic territory',
+    },
+    {
+        'phonetic': 'bright',
+        'morphology': 'compound',
+        'semantic': 'elevated',
+        'round_focus': 'light + architecture',
+        'creative_directive': 'favor brighter vowel movement with structural cues from facets, frames, and alignment',
+    },
+    {
+        'phonetic': 'grounded',
+        'morphology': 'hybrid',
+        'semantic': 'stability',
+        'round_focus': 'anchor + foundation',
+        'creative_directive': 'aim for steady, ownable forms that imply anchoring without literal finance language',
+    },
+    {
+        'phonetic': 'smooth',
+        'morphology': 'coined',
+        'semantic': 'lateral',
+        'round_focus': 'cadence + current',
+        'creative_directive': 'make the batch feel more musical and flowing while preserving clean pronunciation',
+    },
+    {
+        'phonetic': 'crisp',
+        'morphology': 'lattice',
+        'semantic': 'trust',
+        'round_focus': 'hard-stop confidence',
+        'creative_directive': 'introduce firmer consonant stops and more contrast in openings, middles, and endings',
+    },
+)
+MODE_TRIPLETS: tuple[tuple[str, str, str], ...] = tuple(
+    (spec['phonetic'], spec['morphology'], spec['semantic']) for spec in MODE_SPECS
 )
 VALID_NAME_RE = re.compile(r'^[a-z]{6,14}$')
 
@@ -504,8 +557,11 @@ def build_prompt(
     context_packet: dict[str, Any] | None = None,
     prompt_template: str = '',
 ) -> tuple[str, tuple[str, str, str]]:
+    spec = MODE_SPECS[round_index % len(MODE_SPECS)]
     mode = MODE_TRIPLETS[round_index % len(MODE_TRIPLETS)]
     phonetic, morphology, semantic = mode
+    round_focus = spec['round_focus']
+    creative_directive = spec['creative_directive']
     banned_tokens = ','.join((constraints or {}).get('banned_tokens', [])[:30]) or 'none'
     banned_prefixes = ','.join((constraints or {}).get('banned_prefixes', [])[:20]) or 'none'
     context_lines = render_context_lines(context_packet or {})
@@ -520,6 +576,8 @@ def build_prompt(
         'phonetic': str(phonetic),
         'morphology': str(morphology),
         'semantic': str(semantic),
+        'round_focus': str(round_focus),
+        'creative_directive': str(creative_directive),
         'banned_tokens': str(banned_tokens),
         'banned_prefixes': str(banned_prefixes),
         'context_block': str(context_block or 'none\n'),
@@ -539,6 +597,8 @@ def build_prompt(
             f'Phonetic mode: {phonetic}\n'
             f'Morphology mode: {morphology}\n'
             f'Semantic mode: {semantic}\n'
+            f'Round focus: {round_focus}\n'
+            f'Creative directive: {creative_directive}\n'
             f'Banned tokens: {banned_tokens}\n'
             f'Banned prefixes: {banned_prefixes}\n'
             f'{context_block}'
@@ -546,6 +606,7 @@ def build_prompt(
             '- lowercase latin letters only, 6-14 chars\n'
             '- no spaces, punctuation, digits\n'
             '- align with context packet priorities when provided\n'
+            '- widen semantic territory through lateral metaphors before reusing category language\n'
             '- no availability claims (domain/store/trademark/social)\n'
             '- no duplicate names\n'
             '- no two names with same first 4 letters in this output\n'

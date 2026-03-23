@@ -6,6 +6,12 @@ This folder now contains only active documentation.
 - `docs/branding/local_remote_ai_workflow.md`: practical workflow for local-only, remote-only, and hybrid ideation modes.
 - `docs/branding/campaign_configuration_reference.md`: grouped configuration reference and high-impact runner options.
 - `docs/branding/background_daemon_setup.md`: cross-platform background daemon setup and operating guidance.
+- `docs/branding/creative_search_redesign_plan.md`: creativity-first redesign plan for wider name search in tight markets.
+- `docs/branding/creative_generation_stack_strategy.md`: strategy for combining pseudoword science, datasets, and multi-model widening without browser-driven production dependencies.
+- `docs/branding/creative_tactics_tight_markets.md`: concrete creativity tactics, multi-LLM broadening patterns, and scientific naming references.
+- `docs/branding/naming_algorithms_and_libraries.md`: algorithmic naming methods, key papers, and reusable libraries.
+- `docs/branding/science_based_creativity_recovery_plan.md`: concrete recovery plan for replacing collision-survivor naming with more attractive, science-guided generation and ranking.
+- `docs/branding/science_based_creativity_implementation_plan.md`: file-level implementation blueprint for creativity recovery, including Wuggy’s bounded role and helper-library choices.
 - `docs/branding/name_generator_guide.md`: operational guide and command reference.
 - `docs/branding/naming_brief.md`: product/problem framing for naming.
 - `docs/branding/naming_rubric.md`: scoring rubric.

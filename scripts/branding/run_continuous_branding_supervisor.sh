@@ -41,7 +41,7 @@ Options:
   --fallback-backend <none|lmstudio|ollama>
                                    Backend fallback on failed cycle (default: ollama)
   --profile-plan <csv>             Profile rotation per cycle (default: fast,fast,quality)
-                                   Allowed profiles: fast, quality, balanced, creative, remote_quality
+                                   Allowed profiles: fast, quality, balanced, creative, creative_wide, remote_quality
   --remote-models <csv>            OpenRouter model ids for ideation (supports multi-model CSV)
   --local-models <csv>             Local model ids for ideation (supports multi-model CSV)
   --llm-model-selection <mode>     LLM model picker for multi-model lists: round_robin|random
@@ -90,6 +90,19 @@ Profile definitions:
     --validator-expensive-finalist-limit 24
     --validator-timeout-s 14
     --validator-max-concurrency 16
+
+  creative_wide:
+    --local-share 0.10
+    --llm-rounds 8
+    --llm-candidates-per-round 18
+    --generator-min-len 8
+    --generator-max-len 15
+    --llm-prompt-template-file resources/branding/llm/llm_prompt.creative_longer_names_v1.txt
+    --generator-seeds anchor,beacon,clarity,harbor,meridian,signal,serein,velora
+    --quota-profiles coined:250,stem:95,suggestive:145,morphology:140,seed:80,expression:120,source_pool:70,blend:230,lattice:250|coined:230,stem:90,suggestive:140,morphology:120,seed:85,expression:130,source_pool:75,blend:250,lattice:240
+    --validator-expensive-finalist-limit 28
+    --validator-timeout-s 16
+    --validator-max-concurrency 18
 
   remote_quality:
     --local-share 0.10
@@ -268,11 +281,11 @@ for raw_profile in ${(s:,:)PROFILE_PLAN_RAW}; do
   local_profile="${local_profile//[[:space:]]/}"
   [[ -z "$local_profile" ]] && continue
   case "$local_profile" in
-    fast|quality|balanced|creative|remote_quality)
+    fast|quality|balanced|creative|creative_wide|remote_quality)
       PROFILE_PLAN+=("$local_profile")
       ;;
     *)
-      echo "Invalid profile in --profile-plan: $local_profile (allowed: fast,quality,balanced,creative,remote_quality)." >&2
+      echo "Invalid profile in --profile-plan: $local_profile (allowed: fast,quality,balanced,creative,creative_wide,remote_quality)." >&2
       exit 2
       ;;
   esac
@@ -376,6 +389,19 @@ build_profile_args() {
         --validator-expensive-finalist-limit 24
         --validator-timeout-s 14
         --validator-max-concurrency 16
+      )
+      ;;
+    creative_wide)
+      PROFILE_LOCAL_ARGS=(--local-share 0.10 --llm-rounds 8 --llm-candidates-per-round 18)
+      PROFILE_VALIDATOR_ARGS=(
+        --generator-min-len 8
+        --generator-max-len 15
+        --llm-prompt-template-file "$ROOT_DIR/resources/branding/llm/llm_prompt.creative_longer_names_v1.txt"
+        --generator-seeds anchor,beacon,clarity,harbor,meridian,signal,serein,velora
+        --quota-profiles 'coined:250,stem:95,suggestive:145,morphology:140,seed:80,expression:120,source_pool:70,blend:230,lattice:250|coined:230,stem:90,suggestive:140,morphology:120,seed:85,expression:130,source_pool:75,blend:250,lattice:240'
+        --validator-expensive-finalist-limit 28
+        --validator-timeout-s 16
+        --validator-max-concurrency 18
       )
       ;;
     remote_quality)

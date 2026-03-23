@@ -49,6 +49,15 @@ ACTIVE_STATUS_PATTERNS = (
     'under examination',
 )
 
+TMVIEW_DEFAULT_OFFICES = (
+    'AL,AT,BA,BG,BX,CH,CY,CZ,DE,DK,EE,ES,FI,FR,GB,GE,GR,HR,HU,IE,IS,IT,LI,LT,LV,MC,MD,ME,MK,MT,NO,PL,PT,RO,RS,RU,SE,SI,SK,SM,UA,EM,WO'
+)
+TMVIEW_DEFAULT_TERRITORIES = (
+    'AT,BE,BG,HR,CY,CZ,DK,EE,FI,FR,DE,GR,HU,IE,IT,LV,LT,LU,MT,NL,PL,PT,RO,SK,SI,ES,SE,AX,AL,AD,BY,BQ,BA,CW,FO,GE,GI,GG,IS,IM,JE,LI,MD,MC,ME,MK,NO,RU,SH,SM,RS,SX,SJ,CH,UA,GB,VA'
+)
+TMVIEW_DEFAULT_NICE_CLASS = '9,OR,42,OR,EMPTY'
+TMVIEW_DEFAULT_TM_STATUS = 'Filed,Registered'
+
 INACTIVE_STATUS_PATTERNS = (
     'expired',
     'ended',
@@ -80,10 +89,19 @@ def classify_tm_status(raw: str) -> str:
 
 
 def build_euipo_url(name: str) -> str:
-    return (
-        'https://www.tmdn.org/tmview/#/tmview/results'
-        '?page=1&pageSize=30&criteria=C&basicSearch='
-        + parse.quote(name)
+    search_value = f" {str(name or '').strip()}"
+    params = (
+        ('page', '1'),
+        ('pageSize', '30'),
+        ('criteria', 'F'),
+        ('offices', TMVIEW_DEFAULT_OFFICES),
+        ('territories', TMVIEW_DEFAULT_TERRITORIES),
+        ('basicSearch', search_value),
+        ('niceClass', TMVIEW_DEFAULT_NICE_CLASS),
+        ('tmStatus', TMVIEW_DEFAULT_TM_STATUS),
+    )
+    return 'https://www.tmdn.org/tmview/#/tmview/results?' + '&'.join(
+        f'{key}={parse.quote(value, safe=",")}' for key, value in params
     )
 
 

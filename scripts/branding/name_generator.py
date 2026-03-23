@@ -230,6 +230,24 @@ GLOBAL_VARIATION_ROOTS = [
     'hera',
 ]
 
+LATERAL_VARIATION_ROOTS = [
+    'auren',
+    'brisa',
+    'cairn',
+    'marin',
+    'meridi',
+    'navis',
+    'serein',
+    'solen',
+    'tandem',
+    'vela',
+    'radian',
+    'arden',
+]
+
+BRIDGE_VOWELS = ('a', 'e', 'i', 'o')
+LATTICE_ENDINGS = ('ra', 'ro', 'na', 'lo', 'ta', 'via', 'rio', 'or')
+
 GLOBAL_EXPRESSIONS = [
     'clearflow',
     'fairshare',
@@ -295,19 +313,21 @@ DEFAULT_GENERATOR_FAMILIES = [
     'expression',
     'source_pool',
     'blend',
+    'lattice',
 ]
 
 DEFAULT_FAMILY_QUOTAS = {
     'coined': 180,
-    'stem': 140,
-    'suggestive': 120,
-    'morphology': 200,
-    'seed': 120,
+    'stem': 120,
+    'suggestive': 110,
+    'morphology': 180,
+    'seed': 110,
     'expression': 80,
-    'source_pool': 220,
-    'blend': 220,
+    'source_pool': 190,
+    'blend': 190,
+    'lattice': 180,
 }
-SOURCE_DEPENDENT_FAMILIES = {'morphology', 'source_pool', 'blend'}
+SOURCE_DEPENDENT_FAMILIES = {'morphology', 'source_pool', 'blend', 'lattice'}
 
 FALSE_FRIEND_RULES: dict[str, tuple[int, str]] = {
     'mist': (18, 'negative_meaning_de'),
@@ -984,6 +1004,24 @@ def clamp_share(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def deterministic_choice(options: tuple[str, ...], *parts: str) -> str:
+    if not options:
+        return ''
+    total = 0
+    for idx, part in enumerate(parts, start=1):
+        for ch in normalize_alpha(part):
+            total += idx * ord(ch)
+    return options[total % len(options)]
+
+
+def deterministic_rank_key(*parts: str) -> tuple[int, str]:
+    joined = ''.join(normalize_alpha(part) for part in parts)
+    total = 0
+    for idx, ch in enumerate(joined, start=1):
+        total += idx * ord(ch)
+    return (total % 97, joined)
+
+
 def build_fallback_atom_pool(variation_profile: str) -> list[tuple[str, float]]:
     seed_tokens: list[str] = []
     seed_tokens.extend(MORPH_ROOT_DEFAULTS)
@@ -991,6 +1029,7 @@ def build_fallback_atom_pool(variation_profile: str) -> list[tuple[str, float]]:
     seed_tokens.extend(MORPH_SUFFIX_DEFAULTS)
     seed_tokens.extend(BRAND_STEMS)
     seed_tokens.extend(GLOBAL_VARIATION_ROOTS if variation_profile == 'expanded' else GLOBAL_VARIATION_ROOTS[:10])
+    seed_tokens.extend(LATERAL_VARIATION_ROOTS if variation_profile == 'expanded' else LATERAL_VARIATION_ROOTS[:6])
     seed_tokens.extend(SUGGESTIVE_ROOTS_GLOBAL if variation_profile == 'expanded' else SUGGESTIVE_ROOTS_GLOBAL[:10])
 
     out: list[tuple[str, float]] = []
@@ -1418,8 +1457,77 @@ def collect_family_candidates(
                 family='blend',
                 lineage_atoms=[left, right],
                 source_confidence=(l_conf + r_conf) / 2.0,
-            )
+                )
         families['blend'] = list(generated.values())
+
+    if 'lattice' in active:
+        generated = {}
+        prefixes, roots, suffixes = build_morphology_pools(
+            source_atoms,
+            variation_profile=variation_profile,
+            source_influence_share=source_influence_share,
+        )
+        lattice_atoms_source: list[tuple[str, float]] = []
+        for atom in source_atoms:
+            value = normalize_alpha(str(atom.get('atom_display') or atom.get('atom_normalized') or ''))
+            if value:
+                lattice_atoms_source.append((value, float(atom.get('confidence_weight') or 0.0)))
+
+        lattice_atoms = mix_atom_pools(
+            lattice_atoms_source,
+            build_fallback_atom_pool(variation_profile),
+            share=source_influence_share,
+            target=60 if variation_profile == 'expanded' else 34,
+        )
+
+        # Tri-part clipped assemblies widen phonetic territory without relaxing filters.
+        for pref, p_conf in prefixes[:22]:
+            for root, r_conf in roots[:28]:
+                if pref == root:
+                    continue
+                fused = f'{pref[:3]}{root[-4:]}'
+                merge_generated(
+                    generated,
+                    name=fused,
+                    family='lattice',
+                    lineage_atoms=[pref, root],
+                    source_confidence=(p_conf + r_conf) / 2.0,
+                )
+
+        for left, l_conf in lattice_atoms[:24]:
+            for right, r_conf in lattice_atoms[:24]:
+                if left == right:
+                    continue
+                bridge = deterministic_choice(BRIDGE_VOWELS, right, left)
+                fused = f'{left[:3]}{bridge}{right[-3:]}'
+                if len(fused) < 7:
+                    fused = f'{fused}{deterministic_choice(LATTICE_ENDINGS, left, right)}'
+                merge_generated(
+                    generated,
+                    name=fused,
+                    family='lattice',
+                    lineage_atoms=[left, right, bridge],
+                    source_confidence=(l_conf + r_conf) / 2.0,
+                )
+
+        for pref, p_conf in prefixes[:16]:
+            for root, r_conf in roots[:20]:
+                for suf, s_conf in suffixes[:10]:
+                    if pref == root:
+                        continue
+                    bridge = deterministic_choice(BRIDGE_VOWELS, pref, root, suf)
+                    fused = f'{root[:4]}{bridge}{suf[-2:]}'
+                    merge_generated(
+                        generated,
+                        name=fused,
+                        family='lattice',
+                        lineage_atoms=[pref, root, suf],
+                        source_confidence=(p_conf + r_conf + s_conf) / 3.0,
+                    )
+        families['lattice'] = sorted(
+            generated.values(),
+            key=lambda item: deterministic_rank_key(item.name, ''.join(item.lineage_atoms)),
+        )
 
     return families
 
@@ -1851,7 +1959,16 @@ def trademark_search_urls(name: str) -> tuple[str, str, str]:
         '?language=de&searchText='
         + parse.quote(name)
     )
-    tmview = 'https://www.tmdn.org/tmview/#/tmsearch?page=1&criteria=' + parse.quote(name)
+    tmview = (
+        'https://www.tmdn.org/tmview/#/tmview/results'
+        '?page=1&pageSize=30&criteria=F'
+        '&offices=AL,AT,BA,BG,BX,CH,CY,CZ,DE,DK,EE,ES,FI,FR,GB,GE,GR,HR,HU,IE,IS,IT,LI,LT,LV,MC,MD,ME,MK,MT,NO,PL,PT,RO,RS,RU,SE,SI,SK,SM,UA,EM,WO'
+        '&territories=AT,BE,BG,HR,CY,CZ,DK,EE,FI,FR,DE,GR,HU,IE,IT,LV,LT,LU,MT,NL,PL,PT,RO,SK,SI,ES,SE,AX,AL,AD,BY,BQ,BA,CW,FO,GE,GI,GG,IS,IM,JE,LI,MD,MC,ME,MK,NO,RU,SH,SM,RS,SX,SJ,CH,UA,GB,VA'
+        '&basicSearch='
+        + parse.quote(f' {str(name or "").strip()}', safe=',')
+        + '&niceClass=9,OR,42,OR,EMPTY'
+        + '&tmStatus=Filed,Registered'
+    )
     return dpma, swissreg, tmview
 
 
@@ -3165,12 +3282,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--generator-families',
         default=','.join(DEFAULT_GENERATOR_FAMILIES),
-        help='Comma-separated generator families (coined,stem,suggestive,morphology,seed,expression,source_pool,blend).',
+        help='Comma-separated generator families (coined,stem,suggestive,morphology,seed,expression,source_pool,blend,lattice).',
     )
     parser.add_argument(
         '--family-quotas',
         default='',
-        help='Optional comma list like coined:120,source_pool:220,blend:180.',
+        help='Optional comma list like coined:120,source_pool:220,blend:180,lattice:160.',
     )
     parser.add_argument(
         '--source-pool-db',

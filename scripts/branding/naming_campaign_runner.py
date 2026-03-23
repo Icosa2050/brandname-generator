@@ -40,7 +40,17 @@ except ModuleNotFoundError:  # pragma: no cover - Python <3.11 fallback
 
 
 TRUTHY_VALUES = {'1', 'true', 'yes', 'y'}
-DEFAULT_GENERATOR_FAMILIES = ['coined', 'stem', 'suggestive', 'morphology', 'seed', 'expression', 'source_pool', 'blend']
+DEFAULT_GENERATOR_FAMILIES = [
+    'coined',
+    'stem',
+    'suggestive',
+    'morphology',
+    'seed',
+    'expression',
+    'source_pool',
+    'blend',
+    'lattice',
+]
 DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS = [
     'adversarial',
     'psych',
@@ -2179,9 +2189,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--quota-profiles',
         default=(
-            'coined:220,stem:130,suggestive:180,morphology:120,seed:120,expression:90,source_pool:100,blend:240'
-            '|coined:260,stem:150,suggestive:190,morphology:90,seed:120,expression:95,source_pool:80,blend:220'
-            '|coined:200,stem:130,suggestive:170,morphology:110,seed:130,expression:90,source_pool:90,blend:260'
+            'coined:220,stem:120,suggestive:170,morphology:120,seed:100,expression:90,source_pool:90,blend:190,lattice:210'
+            '|coined:250,stem:130,suggestive:180,morphology:100,seed:110,expression:95,source_pool:75,blend:180,lattice:220'
+            '|coined:210,stem:120,suggestive:160,morphology:110,seed:115,expression:90,source_pool:85,blend:210,lattice:220'
         ),
         help='Pipe-separated family quota profiles used per run.',
     )

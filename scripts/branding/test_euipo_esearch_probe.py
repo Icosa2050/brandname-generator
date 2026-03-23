@@ -9,6 +9,13 @@ import euipo_esearch_probe as probe
 
 
 class EuipoEsearchProbeTest(unittest.TestCase):
+    def test_build_euipo_url_uses_tmview_results_filters(self) -> None:
+        url = probe.build_euipo_url('siglumen')
+        self.assertIn('criteria=F', url)
+        self.assertIn('basicSearch=%20siglumen', url)
+        self.assertIn('niceClass=9,OR,42,OR,EMPTY', url)
+        self.assertIn('tmStatus=Filed,Registered', url)
+
     def test_probe_from_body_segments_detects_exact_and_near_hits(self) -> None:
         body_text = """
 Graphic representation

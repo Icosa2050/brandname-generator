@@ -10,6 +10,8 @@ Ideation controls:
 - Phonetic mode: {phonetic}
 - Morphology mode: {morphology}
 - Semantic mode: {semantic}
+- Round focus: {round_focus}
+- Creative directive: {creative_directive}
 - Banned tokens: {banned_tokens}
 - Banned prefixes: {banned_prefixes}
 
@@ -26,6 +28,9 @@ Hard constraints:
 Quality target:
 - produce names that sound like standalone brands, not feature labels
 - maximize lexical variety in this output
+- widen semantic territory before reusing obvious category words
+- vary the opening, middle, and ending structures across the batch
+- allow more lateral metaphor and richer cadence when the names stay pronounceable
 - avoid near-duplicates by root or first 4 letters
 
 Return only valid JSON with exactly this schema:

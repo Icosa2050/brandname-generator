@@ -89,6 +89,13 @@ class NameGeneratorTest(unittest.TestCase):
             )
         self.assertEqual(got, set())
 
+    def test_trademark_search_urls_uses_filtered_tmview_results_url(self) -> None:
+        _dpma, _swissreg, tmview = ng.trademark_search_urls('siglumen')
+        self.assertIn('https://www.tmdn.org/tmview/#/tmview/results?', tmview)
+        self.assertIn('basicSearch=%20siglumen', tmview)
+        self.assertIn('niceClass=9,OR,42,OR,EMPTY', tmview)
+        self.assertIn('tmStatus=Filed,Registered', tmview)
+
     def test_load_llm_fallback_candidates_rereads_file_on_retry(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'llm_candidates.json'
@@ -217,6 +224,35 @@ class NameGeneratorTest(unittest.TestCase):
         self.assertTrue(all(item.generator_family == 'seed' for item in generated))
         self.assertIn('clarity', {item.name for item in generated})
 
+    def test_generate_candidates_lattice_family_surfaces_new_structures(self) -> None:
+        source_atoms = [
+            {'atom_display': 'clarity', 'confidence_weight': 0.82},
+            {'atom_display': 'beacon', 'confidence_weight': 0.78},
+            {'atom_display': 'serein', 'confidence_weight': 0.75},
+            {'atom_display': 'meridi', 'confidence_weight': 0.72},
+        ]
+        generated = ng.generate_candidates(
+            scope='global',
+            seeds=[],
+            min_len=6,
+            max_len=14,
+            variation_profile='expanded',
+            generator_families=['lattice'],
+            family_quotas={'lattice': 18},
+            source_atoms=source_atoms,
+            source_influence_share=0.35,
+            max_per_prefix2=99,
+            max_per_suffix2=99,
+            max_per_shape=99,
+            max_per_family=99,
+            max_per_primary_atom=99,
+            filter_engine=_PassthroughFilter(),
+        )
+        self.assertTrue(generated)
+        self.assertTrue(all(item.generator_family == 'lattice' for item in generated))
+        self.assertTrue(any(len(item.lineage_atoms) >= 3 for item in generated))
+        self.assertGreaterEqual(len({item.name[:3] for item in generated}), 3)
+
     def test_diversity_filter_limits_primary_atom_repetition(self) -> None:
         generated = [
             ng.GeneratedCandidate(name='vantaten', generator_family='coined', lineage_atoms=['vanta', 'ten'], source_confidence=0.9),
@@ -333,13 +369,14 @@ class NameGeneratorTest(unittest.TestCase):
 
     def test_rebalance_family_quotas_for_source_influence(self) -> None:
         out = ng.rebalance_family_quotas_for_source_influence(
-            active_families=['coined', 'source_pool', 'blend'],
-            family_quotas={'coined': 200, 'source_pool': 200, 'blend': 200},
+            active_families=['coined', 'source_pool', 'blend', 'lattice'],
+            family_quotas={'coined': 200, 'source_pool': 200, 'blend': 200, 'lattice': 200},
             source_influence_share=0.20,
         )
         self.assertEqual(out['coined'], 200)
         self.assertLess(out['source_pool'], 200)
         self.assertLess(out['blend'], 200)
+        self.assertLess(out['lattice'], 200)
 
     def test_template_likeness_signal_penalizes_lazy_category_suffix(self) -> None:
         penalty, flags = ng.template_likeness_signal('tenantlo')
