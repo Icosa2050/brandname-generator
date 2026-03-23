@@ -17,8 +17,10 @@ from brandpipe.tmview import (
     TmviewProbeResult,
     _title_exact_or_near,
     build_tmview_url,
+    clone_tmview_runtime_profile,
     normalize_alpha,
     probe_names,
+    TmviewProbe,
     write_results_json,
 )
 
@@ -81,3 +83,71 @@ class TmviewTests(unittest.TestCase):
             self.assertEqual(written, out_path.resolve())
             payload = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(payload[0]["name"], "cordnix")
+
+    def test_clone_tmview_runtime_profile_ignores_lock_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source = Path(tmp_dir) / "source-profile"
+            source.mkdir(parents=True)
+            (source / "SingletonLock").write_text("locked", encoding="utf-8")
+            (source / "SingletonCookie").write_text("cookie", encoding="utf-8")
+            (source / "SingletonSocket").write_text("socket", encoding="utf-8")
+            (source / "keep.txt").write_text("ok", encoding="utf-8")
+
+            temp_root, runtime_dir = clone_tmview_runtime_profile(source)
+            try:
+                self.assertTrue((runtime_dir / "keep.txt").exists())
+                self.assertFalse((runtime_dir / "SingletonLock").exists())
+                self.assertFalse((runtime_dir / "SingletonCookie").exists())
+                self.assertFalse((runtime_dir / "SingletonSocket").exists())
+            finally:
+                if temp_root.exists():
+                    import shutil
+
+                    shutil.rmtree(temp_root, ignore_errors=True)
+
+    def test_tmview_probe_uses_temp_runtime_profile_and_cleans_it_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source = Path(tmp_dir) / "source-profile"
+            source.mkdir(parents=True)
+            (source / "keep.txt").write_text("ok", encoding="utf-8")
+            browser_path = Path(tmp_dir) / "edge"
+            browser_path.write_text("", encoding="utf-8")
+
+            launch_calls: list[dict[str, object]] = []
+
+            class FakeContext:
+                def close(self) -> None:
+                    return None
+
+            class FakeChromium:
+                def launch_persistent_context(self, **kwargs):
+                    launch_calls.append(kwargs)
+                    return FakeContext()
+
+            class FakePlaywright:
+                chromium = FakeChromium()
+
+                def stop(self) -> None:
+                    return None
+
+            class FakeStarter:
+                def start(self):
+                    return FakePlaywright()
+
+            with mock.patch("brandpipe.tmview.sync_playwright", return_value=FakeStarter()):
+                probe = TmviewProbe(
+                    profile_dir=source,
+                    chrome_executable=browser_path,
+                    headless=True,
+                )
+                with probe:
+                    self.assertEqual(len(launch_calls), 1)
+                    user_data_dir = Path(str(launch_calls[0]["user_data_dir"]))
+                    self.assertNotEqual(user_data_dir, source)
+                    self.assertTrue(user_data_dir.exists())
+                    self.assertTrue((user_data_dir / "keep.txt").exists())
+                    self.assertFalse((user_data_dir / "SingletonLock").exists())
+                    runtime_root = probe._runtime_profile_root
+                    self.assertIsNotNone(runtime_root)
+                assert runtime_root is not None
+                self.assertFalse(runtime_root.exists())

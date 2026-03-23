@@ -94,8 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     recheck_tm = sub.add_parser("recheck-tmview", help="Recheck candidate/watch names against TMView and rerank affected runs")
     recheck_tm.add_argument("--db", required=True, help="SQLite path")
-    recheck_tm.add_argument("--profile-dir", required=True, help="Dedicated TMView browser profile directory")
-    recheck_tm.add_argument("--chrome-executable", default="", help="Optional Chrome executable path override")
+    recheck_tm.add_argument("--profile-dir", required=True, help="Warmed TMView browser profile directory used as the source template for a temporary runtime clone")
+    recheck_tm.add_argument("--chrome-executable", default="", help="Optional Chromium browser executable override (defaults to Edge, then Chrome, when omitted)")
     recheck_tm.add_argument("--run-id", type=int, default=None, help="Optional single run id")
     recheck_tm.add_argument("--batch-id", default="", help="Optional batch id filter")
     recheck_tm.add_argument("--limit", type=int, default=25, help="Maximum candidate/watch names to probe")
@@ -126,8 +126,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     tmview_probe = sub.add_parser("tmview-probe", help="Probe TMView/EUIPO with a dedicated logged-in browser profile")
     tmview_probe.add_argument("--names", required=True, help="Comma-separated names")
-    tmview_probe.add_argument("--profile-dir", required=True, help="Dedicated TMView browser profile directory")
-    tmview_probe.add_argument("--chrome-executable", default="", help="Optional Chrome executable path override")
+    tmview_probe.add_argument("--profile-dir", required=True, help="Warmed TMView browser profile directory used as the source template for a temporary runtime clone")
+    tmview_probe.add_argument("--chrome-executable", default="", help="Optional Chromium browser executable override (defaults to Edge, then Chrome, when omitted)")
     tmview_probe.add_argument("--timeout-ms", type=int, default=20000, help="Navigation timeout")
     tmview_probe.add_argument("--settle-ms", type=int, default=2500, help="Post-load settle delay")
     tmview_probe.add_argument("--headful", action="store_true", help="Run visible browser for debugging")

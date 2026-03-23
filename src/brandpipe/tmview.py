@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import tempfile
 import unicodedata
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
@@ -79,6 +81,25 @@ TMVIEW_RESULTS_PAGINATION_SELECTOR = '[data-test-id="search-results-pagination"]
 TMVIEW_RESULTS_GRID_SELECTOR = 'div.rt-table[role="grid"]'
 TMVIEW_RESULTS_ROW_SELECTOR = '[role="grid"] [role="rowgroup"] [role="row"]'
 TMVIEW_RESULTS_CELL_SELECTOR = '[role="gridcell"]'
+TMVIEW_BROWSER_CANDIDATES = (
+    Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+    Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+)
+TMVIEW_VOLATILE_PROFILE_NAMES = {
+    "SingletonLock",
+    "SingletonCookie",
+    "SingletonSocket",
+    "RunningChromeVersion",
+    "BrowserMetrics",
+    "ShaderCache",
+    "GrShaderCache",
+    "GraphiteDawnCache",
+    "Crashpad",
+    "Crash Reports",
+    "Code Cache",
+    "GPUCache",
+    "Cache",
+}
 
 
 def _fold_ascii_letters(raw: str) -> str:
@@ -175,6 +196,38 @@ def _segment_title(segment: str) -> str:
     return ""
 
 
+def _resolve_tmview_browser_executable(raw: str | Path | None = None) -> Path:
+    if raw:
+        return resolve_chrome_executable(raw)
+    for candidate in TMVIEW_BROWSER_CANDIDATES:
+        if candidate.exists():
+            return candidate.resolve()
+    raise FileNotFoundError("tmview_browser_executable_not_found")
+
+
+def _ignore_tmview_profile_entries(_directory: str, names: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for name in names:
+        if name in TMVIEW_VOLATILE_PROFILE_NAMES:
+            ignored.add(name)
+    return ignored
+
+
+def clone_tmview_runtime_profile(profile_dir: str | Path) -> tuple[Path, Path]:
+    source_dir = resolve_profile_dir(profile_dir)
+    if not source_dir.exists():
+        raise FileNotFoundError(f"tmview_profile_dir_not_found:{source_dir}")
+    temp_root = Path(tempfile.mkdtemp(prefix="tmview-profile-"))
+    runtime_dir = temp_root / "profile"
+    shutil.copytree(
+        source_dir,
+        runtime_dir,
+        symlinks=True,
+        ignore=_ignore_tmview_profile_entries,
+    )
+    return temp_root, runtime_dir
+
+
 def _probe_from_body_segments(name: str, body_text: str) -> tuple[int, int, list[str], list[str], int, int, int]:
     exact_hits = 0
     near_hits = 0
@@ -264,19 +317,23 @@ class TmviewProbe:
         self.settle_ms = max(0, int(settle_ms))
         self.headless = bool(headless)
         self.profile_dir = resolve_profile_dir(profile_dir) if profile_dir else None
-        self.chrome_executable = resolve_chrome_executable(chrome_executable) if chrome_executable else None
+        self.chrome_executable = _resolve_tmview_browser_executable(chrome_executable) if profile_dir else (
+            resolve_chrome_executable(chrome_executable) if chrome_executable else None
+        )
         self._playwright = None
         self._browser = None
         self._context = None
+        self._runtime_profile_root: Path | None = None
+        self._runtime_profile_dir: Path | None = None
         self._import_error = ""
 
     def __enter__(self) -> TmviewProbe:
         try:
             self._playwright = sync_playwright().start()
             if self.profile_dir is not None:
-                self.profile_dir.mkdir(parents=True, exist_ok=True)
+                self._runtime_profile_root, self._runtime_profile_dir = clone_tmview_runtime_profile(self.profile_dir)
                 self._context = self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(self.profile_dir),
+                    user_data_dir=str(self._runtime_profile_dir),
                     executable_path=str(self.chrome_executable) if self.chrome_executable else None,
                     headless=self.headless,
                     args=["--disable-blink-features=AutomationControlled"],
@@ -310,6 +367,11 @@ class TmviewProbe:
         try:
             if self._playwright is not None:
                 self._playwright.stop()
+        except Exception:
+            pass
+        try:
+            if self._runtime_profile_root is not None:
+                shutil.rmtree(self._runtime_profile_root, ignore_errors=True)
         except Exception:
             pass
 
