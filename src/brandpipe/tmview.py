@@ -25,6 +25,7 @@ class TmviewProbeResult:
     near_hits: int
     result_count: int
     sample_text: str
+    query_nice_class: str = ""
     error: str = ""
     exact_sample_text: str = ""
     active_exact_hits: int = 0
@@ -75,7 +76,7 @@ TMVIEW_DEFAULT_OFFICES = (
 TMVIEW_DEFAULT_TERRITORIES = (
     "AT,BE,BG,HR,CY,CZ,DK,EE,FI,FR,DE,GR,HU,IE,IT,LV,LT,LU,MT,NL,PL,PT,RO,SK,SI,ES,SE,AX,AL,AD,BY,BQ,BA,CW,FO,GE,GI,GG,IS,IM,JE,LI,MD,MC,ME,MK,NO,RU,SH,SM,RS,SX,SJ,CH,UA,GB,VA"
 )
-TMVIEW_DEFAULT_NICE_CLASS = "9,OR,42,OR,EMPTY"
+TMVIEW_DEFAULT_NICE_CLASS = "9,OR,42"
 TMVIEW_DEFAULT_TM_STATUS = "Filed,Registered"
 TMVIEW_RESULTS_PAGINATION_SELECTOR = '[data-test-id="search-results-pagination"]'
 TMVIEW_RESULTS_GRID_SELECTOR = 'div.rt-table[role="grid"]'
@@ -112,8 +113,9 @@ def normalize_alpha(raw: str) -> str:
     return "".join(ch for ch in folded if ch.isalpha())
 
 
-def build_tmview_url(name: str) -> str:
+def build_tmview_url(name: str, *, nice_class: str | None = None) -> str:
     search_value = f" {str(name or '').strip()}"
+    resolved_nice_class = str(nice_class or TMVIEW_DEFAULT_NICE_CLASS).strip() or TMVIEW_DEFAULT_NICE_CLASS
     params = (
         ("page", "1"),
         ("pageSize", "30"),
@@ -121,7 +123,7 @@ def build_tmview_url(name: str) -> str:
         ("offices", TMVIEW_DEFAULT_OFFICES),
         ("territories", TMVIEW_DEFAULT_TERRITORIES),
         ("basicSearch", search_value),
-        ("niceClass", TMVIEW_DEFAULT_NICE_CLASS),
+        ("niceClass", resolved_nice_class),
         ("tmStatus", TMVIEW_DEFAULT_TM_STATUS),
     )
     return TMVIEW_RESULTS_URL + "?" + "&".join(
@@ -168,6 +170,31 @@ def _title_exact_or_near(name: str, text: str) -> tuple[bool, bool]:
         if ratio >= 0.82 and abs(len(token) - len(name)) <= 1 and prefix_len >= 5:
             return False, True
     return False, False
+
+
+def _parse_result_count(text: str) -> int | None:
+    plain = re.sub(r"\s+", " ", str(text or "").strip())
+    if not plain:
+        return None
+    if re.search(r"No\s+rows\s+found", plain, flags=re.IGNORECASE):
+        return 0
+    patterns = (
+        r"\b\d+\s*-\s*\d+\s+of\s+(\d[\d., ]{0,12})\b",
+        r"Show\s+all\s+(\d[\d., ]{0,12})\s+results",
+        r"(\d[\d., ]{0,12})\s+results",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, plain, flags=re.IGNORECASE)
+        if not match:
+            continue
+        token = re.sub(r"[^0-9]", "", match.group(1))
+        if not token:
+            continue
+        try:
+            return int(token)
+        except ValueError:
+            return 0
+    return None
 
 
 def _has_body_result_context(text: str) -> bool:
@@ -312,11 +339,13 @@ class TmviewProbe:
         headless: bool = True,
         profile_dir: str | Path | None = None,
         chrome_executable: str | Path | None = None,
+        nice_class: str | None = None,
     ) -> None:
         self.timeout_ms = max(3000, int(timeout_ms))
         self.settle_ms = max(0, int(settle_ms))
         self.headless = bool(headless)
         self.profile_dir = resolve_profile_dir(profile_dir) if profile_dir else None
+        self.nice_class = str(nice_class or TMVIEW_DEFAULT_NICE_CLASS).strip() or TMVIEW_DEFAULT_NICE_CLASS
         self.chrome_executable = _resolve_tmview_browser_executable(chrome_executable) if profile_dir else (
             resolve_chrome_executable(chrome_executable) if chrome_executable else None
         )
@@ -380,7 +409,7 @@ class TmviewProbe:
 
     def probe_name(self, name: str) -> TmviewProbeResult:
         normalized = normalize_alpha(name)
-        url = build_tmview_url(normalized)
+        url = build_tmview_url(normalized, nice_class=self.nice_class)
         if not normalized:
             return TmviewProbeResult(
                 name="",
@@ -391,6 +420,7 @@ class TmviewProbe:
                 near_hits=-1,
                 result_count=-1,
                 sample_text="",
+                query_nice_class=self.nice_class,
                 error="invalid_name",
             )
         if not self.available():
@@ -403,6 +433,7 @@ class TmviewProbe:
                 near_hits=-1,
                 result_count=-1,
                 sample_text="",
+                query_nice_class=self.nice_class,
                 error=self._import_error or "playwright_unavailable",
             )
 
@@ -412,14 +443,20 @@ class TmviewProbe:
             page = self._context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
             page.wait_for_url(re.compile(r".*/tmview/results.*"), timeout=self.timeout_ms)
-            page.wait_for_function(
-                f"""() => Boolean(
-                    document.querySelector('{TMVIEW_RESULTS_PAGINATION_SELECTOR}')
-                    || document.querySelector('{TMVIEW_RESULTS_GRID_SELECTOR}')
-                    || /No\\s+rows\\s+found/i.test(document.body.innerText || '')
-                )""",
-                timeout=self.timeout_ms,
-            )
+            try:
+                page.wait_for_function(
+                    f"""() => Boolean(
+                        document.querySelector('{TMVIEW_RESULTS_PAGINATION_SELECTOR}')
+                        || document.querySelector('{TMVIEW_RESULTS_GRID_SELECTOR}')
+                        || /No\\s+rows\\s+found/i.test(document.body.innerText || '')
+                    )""",
+                    timeout=self.timeout_ms,
+                )
+            except Exception:
+                # TMView sometimes renders results without ever exposing the
+                # expected pagination hook in time; continue with best-effort
+                # extraction instead of hard-failing the whole probe.
+                pass
             if self.settle_ms > 0:
                 page.wait_for_timeout(self.settle_ms)
 
@@ -441,20 +478,9 @@ class TmviewProbe:
                     summary_text = page.locator(TMVIEW_RESULTS_PAGINATION_SELECTOR).first.inner_text(timeout=1500)
                 except Exception:
                     summary_text = body_text
-                if re.search(r"No\s+rows\s+found", summary_text, flags=re.IGNORECASE):
-                    result_count = 0
-                if result_count < 0:
-                    for pattern in (r"Show\s+all\s+(\d[\d., ]{0,12})\s+results", r"(\d[\d., ]{0,12})\s+results"):
-                        match = re.search(pattern, summary_text, flags=re.IGNORECASE)
-                        if not match:
-                            continue
-                        token = re.sub(r"[^0-9]", "", match.group(1))
-                        if token:
-                            try:
-                                result_count = int(token)
-                            except ValueError:
-                                result_count = 0
-                            break
+                parsed_count = _parse_result_count(summary_text)
+                if parsed_count is not None:
+                    result_count = parsed_count
 
                 try:
                     extracted = page.evaluate(
@@ -541,6 +567,7 @@ class TmviewProbe:
                 near_hits=near_hits,
                 result_count=result_count,
                 sample_text=" || ".join(samples),
+                query_nice_class=self.nice_class,
                 exact_sample_text=" || ".join(exact_samples),
                 active_exact_hits=active_exact_hits,
                 inactive_exact_hits=inactive_exact_hits,
@@ -557,6 +584,7 @@ class TmviewProbe:
                 near_hits=-1,
                 result_count=-1,
                 sample_text="",
+                query_nice_class=self.nice_class,
                 error=f"page_error:{exc.__class__.__name__}",
             )
         finally:
@@ -572,6 +600,7 @@ def probe_names(
     names: list[str],
     profile_dir: str | Path | None = None,
     chrome_executable: str | Path | None = None,
+    nice_class: str | None = None,
     timeout_ms: int = 20000,
     settle_ms: int = 2500,
     headless: bool = True,
@@ -591,6 +620,7 @@ def probe_names(
         headless=headless,
         profile_dir=profile_dir,
         chrome_executable=chrome_executable,
+        nice_class=nice_class,
     ) as probe:
         for name in normalized_names:
             results.append(probe.probe_name(name))

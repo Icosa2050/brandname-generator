@@ -8,14 +8,22 @@ Python dependencies.
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import hashlib
 import json
 import math
+import os
 import random
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-Unix fallback
+    fcntl = None
 
 
 MODE_SPECS: tuple[dict[str, str], ...] = (
@@ -142,6 +150,28 @@ def _sanitize_name_list(raw: Any, *, max_items: int) -> list[str]:
     return out
 
 
+def _sanitize_counter_map(raw: Any, *, max_items: int, max_key_len: int = 16) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    items: list[tuple[str, int]] = []
+    for key, value in raw.items():
+        token = normalize_alpha_name(str(key or ''))[:max_key_len]
+        if not token:
+            continue
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        items.append((token, count))
+    items.sort(key=lambda item: (-item[1], item[0]))
+    for token, count in items[: max(1, max_items)]:
+        out[token] = count
+    return out
+
+
 def _sanitize_tone_mix(raw: Any, *, max_items: int) -> dict[str, float]:
     if not isinstance(raw, dict):
         return {}
@@ -262,6 +292,185 @@ def render_context_lines(context_packet: dict[str, Any]) -> list[str]:
     if context_packet.get('notes'):
         lines.append(f"notes: {context_packet['notes']}")
     return lines
+
+
+def pattern_shape(name: str) -> str:
+    return ''.join('v' if ch in 'aeiouy' else 'c' for ch in normalize_alpha_name(name))
+
+
+def phonetic_fingerprint(name: str) -> str:
+    normalized = normalize_alpha_name(name)
+    if not normalized:
+        return ''
+    folded = normalized
+    replacements = (
+        ('sch', 's'),
+        ('ph', 'f'),
+        ('ck', 'k'),
+        ('qu', 'k'),
+        ('x', 'ks'),
+        ('z', 's'),
+    )
+    for src, dst in replacements:
+        folded = folded.replace(src, dst)
+    first = folded[0]
+    tail = re.sub(r'[aeiouy]', '', folded[1:])
+    collapsed = re.sub(r'(.)\1+', r'\1', tail)
+    return (first + collapsed)[:6]
+
+
+def lineage_atom_list(parts: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in parts:
+        token = normalize_alpha_name(str(part or ''))
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def primary_diversity_atom(parts: list[str], *, fallback_name: str = '') -> str:
+    atoms = lineage_atom_list(parts)
+    for atom in atoms:
+        if len(atom) >= 4:
+            return atom
+    if atoms:
+        return atoms[0]
+    return normalize_alpha_name(fallback_name)[:4]
+
+
+def seed_base_atom(parts: list[str], *, fallback_name: str = '') -> str:
+    atoms = lineage_atom_list(parts)
+    if atoms:
+        return atoms[0]
+    return normalize_alpha_name(fallback_name)[:6]
+
+
+def load_diversity_memory(path: str) -> dict[str, Any]:
+    file_path = Path(str(path or '').strip()).expanduser()
+    if not str(path or '').strip() or not file_path.exists():
+        return {}
+    try:
+        payload = json.loads(file_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        'recent_names': _sanitize_name_list(payload.get('recent_names'), max_items=400),
+        'avoid_names': _sanitize_name_list(payload.get('avoid_names'), max_items=160),
+        'prefix4_counts': _sanitize_counter_map(payload.get('prefix4_counts'), max_items=160, max_key_len=4),
+        'suffix3_counts': _sanitize_counter_map(payload.get('suffix3_counts'), max_items=160, max_key_len=3),
+        'phonetic_counts': _sanitize_counter_map(payload.get('phonetic_counts'), max_items=160, max_key_len=6),
+        'shape_counts': _sanitize_counter_map(payload.get('shape_counts'), max_items=96, max_key_len=12),
+        'primary_atom_counts': _sanitize_counter_map(payload.get('primary_atom_counts'), max_items=160, max_key_len=12),
+        'seed_base_counts': _sanitize_counter_map(payload.get('seed_base_counts'), max_items=160, max_key_len=12),
+    }
+
+
+def update_diversity_memory(
+    *,
+    path: Path,
+    run_csv: Path,
+    max_recent_names: int = 400,
+    max_counter_entries: int = 160,
+) -> dict[str, Any]:
+    if not run_csv.exists():
+        return {}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + '.lock')
+    with lock_path.open('a+', encoding='utf-8') as lock_handle:
+        if fcntl is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            memory = load_diversity_memory(str(path))
+            recent_names = list(memory.get('recent_names') or [])
+            avoid_names = list(memory.get('avoid_names') or [])
+            prefix4_counts = dict(memory.get('prefix4_counts') or {})
+            suffix3_counts = dict(memory.get('suffix3_counts') or {})
+            phonetic_counts = dict(memory.get('phonetic_counts') or {})
+            shape_counts = dict(memory.get('shape_counts') or {})
+            primary_atom_counts = dict(memory.get('primary_atom_counts') or {})
+            seed_base_counts = dict(memory.get('seed_base_counts') or {})
+
+            shortlisted_rows: list[dict[str, str]] = []
+            with run_csv.open('r', encoding='utf-8', newline='') as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    if not is_truthy(str(row.get('shortlist_selected') or '')):
+                        continue
+                    shortlisted_rows.append({str(k): str(v or '') for k, v in row.items()})
+
+            seen_recent: set[str] = set(recent_names)
+            for row in shortlisted_rows:
+                name = normalize_alpha_name(row.get('name') or '')
+                if not name:
+                    continue
+                if name not in seen_recent:
+                    recent_names.append(name)
+                    seen_recent.add(name)
+                if len(name) >= 4:
+                    prefix4_counts[name[:4]] = int(prefix4_counts.get(name[:4], 0)) + 1
+                if len(name) >= 3:
+                    suffix3_counts[name[-3:]] = int(suffix3_counts.get(name[-3:], 0)) + 1
+                phonetic = phonetic_fingerprint(name)
+                if phonetic:
+                    phonetic_counts[phonetic] = int(phonetic_counts.get(phonetic, 0)) + 1
+                shape = pattern_shape(name)[:8]
+                if shape:
+                    shape_counts[shape] = int(shape_counts.get(shape, 0)) + 1
+                lineage_parts = lineage_atom_list(str(row.get('lineage_atoms') or '').split(';'))
+                primary_atom = primary_diversity_atom(lineage_parts, fallback_name=name)
+                if primary_atom:
+                    primary_atom_counts[primary_atom] = int(primary_atom_counts.get(primary_atom, 0)) + 1
+                if str(row.get('generator_family') or '').strip() == 'seed':
+                    seed_base = seed_base_atom(lineage_parts, fallback_name=name)
+                    if seed_base:
+                        seed_base_counts[seed_base] = int(seed_base_counts.get(seed_base, 0)) + 1
+
+            def _dedupe_keep_recent(values: list[str], cap: int) -> list[str]:
+                seen: set[str] = set()
+                out: list[str] = []
+                for value in reversed(values):
+                    token = normalize_alpha_name(value)
+                    if not token or token in seen:
+                        continue
+                    seen.add(token)
+                    out.append(token)
+                    if len(out) >= max(1, cap):
+                        break
+                return list(reversed(out))
+
+            def _trim_counter_map(raw: dict[str, int]) -> dict[str, int]:
+                items = [(normalize_alpha_name(key), int(value)) for key, value in raw.items() if normalize_alpha_name(key) and int(value) > 0]
+                items.sort(key=lambda item: (-item[1], item[0]))
+                return {key: value for key, value in items[: max(1, max_counter_entries)]}
+
+            recent_names = _dedupe_keep_recent(recent_names, max_recent_names)
+            avoid_seed = recent_names[-48:]
+            avoid_names = _dedupe_keep_recent(avoid_seed + avoid_names, 96)
+            payload = {
+                'version': 1,
+                'updated_at': dt.datetime.now().isoformat(timespec='seconds'),
+                'recent_names': recent_names,
+                'avoid_names': avoid_names,
+                'prefix4_counts': _trim_counter_map(prefix4_counts),
+                'suffix3_counts': _trim_counter_map(suffix3_counts),
+                'phonetic_counts': _trim_counter_map(phonetic_counts),
+                'shape_counts': _trim_counter_map(shape_counts),
+                'primary_atom_counts': _trim_counter_map(primary_atom_counts),
+                'seed_base_counts': _trim_counter_map(seed_base_counts),
+            }
+            with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=path.parent, delete=False) as handle:
+                handle.write(json.dumps(payload, indent=2, ensure_ascii=False) + '\n')
+                temp_path = Path(handle.name)
+            os.replace(temp_path, path)
+            return payload
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 def is_truthy(raw: str) -> bool:
@@ -436,11 +645,14 @@ def compute_dynamic_constraints(
     *,
     runs_dir: Path,
     seen_shortlist: set[str],
+    memory_packet: dict[str, Any] | None = None,
     window_runs: int = 5,
     fail_threshold: float = 0.20,
     entropy_threshold: float = 2.5,
     max_token_ban: int = 50,
     max_prefix_ban: int = 30,
+    max_suffix_ban: int = 20,
+    max_avoid_names: int = 24,
     carry_prev_from_latest: bool = True,
 ) -> dict[str, Any]:
     fail_rows: list[tuple[str, str]] = []
@@ -473,6 +685,7 @@ def compute_dynamic_constraints(
                 selected_reasons.add(reason)
 
     banned_prefixes: list[str] = []
+    banned_suffixes: list[str] = []
     for name, reason in fail_rows:
         if selected_reasons and reason not in selected_reasons:
             continue
@@ -498,8 +711,26 @@ def compute_dynamic_constraints(
         for pref, _ in over:
             banned_prefixes.append(pref)
 
+    memory = memory_packet if isinstance(memory_packet, dict) else {}
+    memory_prefixes = _sanitize_counter_map(memory.get('prefix4_counts'), max_items=max(8, max_prefix_ban), max_key_len=4)
+    memory_suffixes = _sanitize_counter_map(memory.get('suffix3_counts'), max_items=max(8, max_suffix_ban), max_key_len=3)
+    memory_atoms = _sanitize_counter_map(memory.get('primary_atom_counts'), max_items=max(8, max_token_ban), max_key_len=12)
+    memory_recent_names = _sanitize_name_list(memory.get('recent_names'), max_items=max(8, max_avoid_names))
+    memory_avoid_names = _sanitize_name_list(memory.get('avoid_names'), max_items=max(8, max_avoid_names))
+    for pref, count in memory_prefixes.items():
+        if count >= 2:
+            banned_prefixes.append(pref)
+    for suffix, count in memory_suffixes.items():
+        if count >= 3:
+            banned_suffixes.append(suffix)
+    for atom, count in memory_atoms.items():
+        if count >= 2 and len(atom) >= 4:
+            banned_tokens.append(atom)
+
     carry_tokens: list[str] = []
     carry_prefixes: list[str] = []
+    carry_suffixes: list[str] = []
+    carry_names: list[str] = []
     if carry_prev_from_latest:
         latest = sorted(runs_dir.glob('run_*_dynamic_constraints.json'))
         if latest:
@@ -510,11 +741,21 @@ def compute_dynamic_constraints(
                         carry_tokens = [str(v) for v in prev['banned_tokens']]
                     if isinstance(prev.get('banned_prefixes'), list):
                         carry_prefixes = [str(v) for v in prev['banned_prefixes']]
+                    if isinstance(prev.get('banned_suffixes'), list):
+                        carry_suffixes = [str(v) for v in prev['banned_suffixes']]
+                    if isinstance(prev.get('avoid_names'), list):
+                        carry_names = [str(v) for v in prev['avoid_names']]
             except (OSError, json.JSONDecodeError):
                 pass
 
     merged_tokens = [t for t in carry_tokens if t] + [t for t in banned_tokens if t]
     merged_prefixes = [p for p in carry_prefixes if p] + [p for p in banned_prefixes if p]
+    merged_suffixes = [s for s in carry_suffixes if s] + [s for s in banned_suffixes if s]
+    merged_names = (
+        [n for n in carry_names if n]
+        + [n for n in memory_recent_names if n]
+        + [n for n in memory_avoid_names if n]
+    )
 
     def _dedupe_keep_order(values: list[str], cap: int) -> list[str]:
         seen: set[str] = set()
@@ -533,6 +774,17 @@ def compute_dynamic_constraints(
 
     final_tokens = _dedupe_keep_order(merged_tokens, max(1, max_token_ban))
     final_prefixes = _dedupe_keep_order(merged_prefixes, max(1, max_prefix_ban))
+    final_suffixes = _dedupe_keep_order(merged_suffixes, max(1, max_suffix_ban))
+    final_avoid_names = _dedupe_keep_order(merged_names, max(1, max_avoid_names))
+
+    novelty_parts: list[str] = []
+    if final_prefixes:
+        novelty_parts.append(f'avoid recycled opening families like {", ".join(final_prefixes[:6])}')
+    if final_suffixes:
+        novelty_parts.append(f'avoid repeated ending families like {", ".join(final_suffixes[:6])}')
+    if final_tokens:
+        novelty_parts.append(f'do not reuse crowded root fragments like {", ".join(final_tokens[:6])}')
+    novelty_directive = '; '.join(novelty_parts) if novelty_parts else 'push into fresh opening, middle, and ending patterns'
 
     return {
         'window_runs': int(max(1, window_runs)),
@@ -543,6 +795,9 @@ def compute_dynamic_constraints(
         'shortlist_prefix_max_share': round(max_share, 4),
         'banned_tokens': final_tokens,
         'banned_prefixes': final_prefixes,
+        'banned_suffixes': final_suffixes,
+        'avoid_names': final_avoid_names,
+        'novelty_directive': novelty_directive,
         'max_pattern_counts': {'prefix4': 1},
         'min_new_names_target': max(8, min(40, len(final_prefixes) + 8)),
     }
@@ -564,6 +819,9 @@ def build_prompt(
     creative_directive = spec['creative_directive']
     banned_tokens = ','.join((constraints or {}).get('banned_tokens', [])[:30]) or 'none'
     banned_prefixes = ','.join((constraints or {}).get('banned_prefixes', [])[:20]) or 'none'
+    banned_suffixes = ','.join((constraints or {}).get('banned_suffixes', [])[:16]) or 'none'
+    avoid_names = ','.join((constraints or {}).get('avoid_names', [])[:12]) or 'none'
+    novelty_directive = str((constraints or {}).get('novelty_directive') or 'push into fresh opening, middle, and ending patterns')
     context_lines = render_context_lines(context_packet or {})
     context_block = ''
     if context_lines:
@@ -578,8 +836,11 @@ def build_prompt(
         'semantic': str(semantic),
         'round_focus': str(round_focus),
         'creative_directive': str(creative_directive),
+        'novelty_directive': str(novelty_directive),
         'banned_tokens': str(banned_tokens),
         'banned_prefixes': str(banned_prefixes),
+        'banned_suffixes': str(banned_suffixes),
+        'avoid_names': str(avoid_names),
         'context_block': str(context_block or 'none\n'),
     }
 
@@ -599,8 +860,11 @@ def build_prompt(
             f'Semantic mode: {semantic}\n'
             f'Round focus: {round_focus}\n'
             f'Creative directive: {creative_directive}\n'
+            f'Novelty directive: {novelty_directive}\n'
             f'Banned tokens: {banned_tokens}\n'
             f'Banned prefixes: {banned_prefixes}\n'
+            f'Banned suffixes: {banned_suffixes}\n'
+            f'Avoid names: {avoid_names}\n'
             f'{context_block}'
             'Rules:\n'
             '- lowercase latin letters only, 6-14 chars\n'

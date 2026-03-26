@@ -318,6 +318,50 @@ class NameGeneratorTest(unittest.TestCase):
         self.assertEqual(selected, ['clarity', 'solvara'])
         self.assertEqual(deferred['clarityon'], 'seed_base_quota_reached:clarity')
 
+    def test_filter_generated_by_diversity_memory_skips_recent_names(self) -> None:
+        generated = [
+            ng.GeneratedCandidate(name='verofida', generator_family='coined', lineage_atoms=['vero', 'fida']),
+            ng.GeneratedCandidate(name='civendo', generator_family='coined', lineage_atoms=['cive', 'endo']),
+        ]
+        filtered, skipped = ng.filter_generated_by_diversity_memory(
+            generated,
+            {
+                'recent_names': ['verofida'],
+                'avoid_names': ['fesigan'],
+            },
+        )
+        self.assertEqual([item.name for item in filtered], ['civendo'])
+        self.assertEqual(skipped, {'verofida'})
+
+    def test_apply_diversity_memory_penalties_marks_crowded_patterns(self) -> None:
+        candidate = ng.Candidate(
+            name='verodomo',
+            generator_family='coined',
+            lineage_atoms='vero;domo',
+            source_confidence=0.8,
+            quality_score=80,
+            challenge_risk=12,
+            total_score=88,
+            descriptive_risk=0,
+            similarity_risk=0,
+            closest_mark='',
+            scope_penalty=0,
+        )
+        ng.apply_diversity_memory_penalties(
+            [candidate],
+            {
+                'prefix4_counts': {'vero': 3},
+                'suffix3_counts': {'omo': 3},
+                'phonetic_counts': {ng.phonetic_fingerprint('verodomo'): 2},
+                'shape_counts': {ng.pattern_shape('verodomo')[:8]: 4},
+                'primary_atom_counts': {'vero': 3},
+            },
+        )
+        self.assertGreater(candidate.novelty_penalty, 0)
+        self.assertIn('memory_prefix4:vero:3', candidate.novelty_flags)
+        self.assertLess(candidate.total_score, 88)
+        self.assertGreater(candidate.challenge_risk, 12)
+
     def test_web_collision_signal_ignores_social_handle_exact_hits(self) -> None:
         quoted = [
             ('https://www.tiktok.com/@billevis', 'BiL LeviS (@billevis) | TikTok'),

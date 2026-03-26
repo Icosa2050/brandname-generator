@@ -11,6 +11,12 @@ pack_dir = ""
 # Relative to pack_dir unless absolute path.
 decision_csv = "review_unique_top160.csv"
 
+# Straight workflow: acceptance-tail plus async publish validation on the same reviewed input.
+workflow = "dual"
+
+# Optional separate output dir for dual workflow; defaults to pack_dir.
+validation_out_dir = ""
+
 # Guardrail: require real human triage before running.
 require_human_decisions = true
 min_human_decisions = 8
@@ -42,6 +48,9 @@ swissreg_ui_probe = true
 swissreg_timeout_ms = 30000
 swissreg_settle_ms = 3500
 swissreg_headful = false
+
+async_checks = "adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,app_store,package,social"
+async_concurrency = 6
 
 python_bin = "python3"
 dry_run = false

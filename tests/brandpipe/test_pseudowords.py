@@ -206,6 +206,51 @@ class PseudowordTests(unittest.TestCase):
         self.assertGreaterEqual(len(report["plugin_reports"]), 1)
         self.assertEqual(report["plugin_reports"][0]["language_plugin"], "orthographic_english")
 
+    def test_generate_pseudoword_pool_adds_low_collision_phase1_names(self) -> None:
+        fake_module = types.SimpleNamespace(WuggyGenerator=_FakeWuggyGenerator)
+        brief = Brief(product_core="tenant balance clarity ledger")
+
+        with mock.patch.dict(sys.modules, {"wuggy": fake_module}):
+            names, report = generate_pseudoword_pool(
+                brief=brief,
+                config=PseudowordConfig(
+                    language_plugin="orthographic_english",
+                    seed_count=4,
+                    rare_seed_count=8,
+                    rare_profile="aggressive",
+                ),
+            )
+
+        self.assertGreaterEqual(len(names), 8)
+        self.assertIn("rare_pronounceable", report["engines"])
+        self.assertEqual(report["rare_pronounceable"]["profile"], "aggressive")
+        self.assertGreaterEqual(int(report["rare_pronounceable"]["generated_count"]), 4)
+        self.assertTrue(any(name[:2] in {"zk", "zv", "vr", "kv", "tv", "zl", "xr", "xl"} for name in names))
+
+    def test_generate_pseudoword_pool_rare_phase_can_cover_small_wuggy_yield(self) -> None:
+        class _TinyWuggy(_FakeWuggyGenerator):
+            def generate_classic(self, input_sequences, ncandidates_per_sequence=10, output_mode="plain"):  # type: ignore[no-untyped-def]
+                seed = input_sequences[0]
+                return [{"plain": f"{seed}ix"}]
+
+        fake_module = types.SimpleNamespace(WuggyGenerator=_TinyWuggy)
+        brief = Brief(product_core="tenant balance clarity ledger")
+
+        with mock.patch.dict(sys.modules, {"wuggy": fake_module}):
+            names, report = generate_pseudoword_pool(
+                brief=brief,
+                config=PseudowordConfig(
+                    language_plugin="orthographic_english",
+                    seed_count=10,
+                    rare_seed_count=8,
+                    rare_profile="aggressive",
+                ),
+            )
+
+        self.assertGreaterEqual(len(names), 10)
+        self.assertEqual(report["warning"], "")
+        self.assertGreaterEqual(int(report["rare_pronounceable"]["generated_count"]), 4)
+
     def test_select_round_seed_names_rotates_pool(self) -> None:
         pool = ["alpha", "bravo", "charly", "delta", "echo"]
 

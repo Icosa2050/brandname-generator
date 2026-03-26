@@ -156,8 +156,11 @@ class NamingIdeationStageTest(unittest.TestCase):
             'mode={phonetic}/{morphology}/{semantic}\n'
             'focus={round_focus}\n'
             'directive={creative_directive}\n'
+            'novelty={novelty_directive}\n'
             'banned={banned_tokens}\n'
             'prefixes={banned_prefixes}\n'
+            'suffixes={banned_suffixes}\n'
+            'avoid={avoid_names}\n'
             '{context_block}'
             'json={"candidates":[{"name":"string"}]}'
         )
@@ -165,7 +168,13 @@ class NamingIdeationStageTest(unittest.TestCase):
             scope='eu',
             round_index=1,
             target_count=12,
-            constraints={'banned_tokens': ['fair'], 'banned_prefixes': ['fai']},
+            constraints={
+                'banned_tokens': ['fair'],
+                'banned_prefixes': ['fai'],
+                'banned_suffixes': ['ten'],
+                'avoid_names': ['verofida'],
+                'novelty_directive': 'push into fresher structures',
+            },
             context_packet={'product_core': 'utility settlement'},
             prompt_template=template,
         )
@@ -174,8 +183,11 @@ class NamingIdeationStageTest(unittest.TestCase):
         self.assertIn('target=12', prompt)
         self.assertIn('focus=', prompt)
         self.assertIn('directive=', prompt)
+        self.assertIn('novelty=push into fresher structures', prompt)
         self.assertIn('banned=fair', prompt)
         self.assertIn('prefixes=fai', prompt)
+        self.assertIn('suffixes=ten', prompt)
+        self.assertIn('avoid=verofida', prompt)
         self.assertIn('Context packet:', prompt)
         self.assertIn('json={"candidates":[{"name":"string"}]}', prompt)
 
@@ -502,6 +514,49 @@ class NamingIdeationStageTest(unittest.TestCase):
             )
             self.assertLessEqual(len(constraints['banned_tokens']), 3)
             self.assertLessEqual(len(constraints['banned_prefixes']), 2)
+
+    def test_compute_dynamic_constraints_merges_diversity_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            runs = Path(td)
+            constraints = nide.compute_dynamic_constraints(
+                runs_dir=runs,
+                seen_shortlist={'verofida', 'vantaten'},
+                memory_packet={
+                    'recent_names': ['verofida', 'vantaten', 'fesigan'],
+                    'avoid_names': ['fendagar'],
+                    'prefix4_counts': {'vero': 3, 'vant': 2},
+                    'suffix3_counts': {'ten': 4},
+                    'primary_atom_counts': {'vero': 3, 'vanta': 2},
+                },
+            )
+            self.assertIn('vero', constraints['banned_prefixes'])
+            self.assertIn('ten', constraints['banned_suffixes'])
+            self.assertIn('verofida', constraints['avoid_names'])
+            self.assertIn('fendagar', constraints['avoid_names'])
+            self.assertIn('vero', constraints['banned_tokens'])
+
+    def test_update_diversity_memory_tracks_shortlist_patterns(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_csv = root / 'run_001.csv'
+            memory_path = root / 'diversity_memory.json'
+            headers = ['name', 'generator_family', 'lineage_atoms', 'shortlist_selected']
+            rows = [
+                {'name': 'verofida', 'generator_family': 'coined', 'lineage_atoms': 'vero;fida', 'shortlist_selected': 'true'},
+                {'name': 'vantaten', 'generator_family': 'seed', 'lineage_atoms': 'vanta;ten', 'shortlist_selected': 'true'},
+                {'name': 'ignored', 'generator_family': 'coined', 'lineage_atoms': 'igno;red', 'shortlist_selected': ''},
+            ]
+            with run_csv.open('w', encoding='utf-8', newline='') as handle:
+                writer = csv.DictWriter(handle, fieldnames=headers)
+                writer.writeheader()
+                writer.writerows(rows)
+
+            got = nide.update_diversity_memory(path=memory_path, run_csv=run_csv)
+            self.assertIn('verofida', got['recent_names'])
+            self.assertGreaterEqual(got['prefix4_counts'].get('vero', 0), 1)
+            self.assertGreaterEqual(got['suffix3_counts'].get('ten', 0), 1)
+            loaded = nide.load_diversity_memory(str(memory_path))
+            self.assertIn('vantaten', loaded['recent_names'])
 
     def test_evaluate_ideation_slo_breach(self) -> None:
         got = nide.evaluate_ideation_slo(

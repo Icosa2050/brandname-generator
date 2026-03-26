@@ -78,6 +78,8 @@ class PseudowordConfig:
     language_plugin: str = "orthographic_english"
     language_plugins: tuple[str, ...] = ()
     seed_count: int = 18
+    rare_seed_count: int = 0
+    rare_profile: str = "off"
 
 
 @dataclass(frozen=True)

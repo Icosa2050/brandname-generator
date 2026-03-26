@@ -7,6 +7,7 @@ import csv
 import json
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import datetime, timezone
 import math
 from pathlib import Path
@@ -19,8 +20,8 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from brandpipe import db
-from brandpipe.batch import load_batch_briefs, run_batch
-from brandpipe.pipeline import load_config
+from brandpipe.batch import build_batch_run_configs, load_batch_briefs
+from brandpipe.pipeline import load_config, run_loaded_config
 
 
 LANE_CONFIGS = {
@@ -211,6 +212,124 @@ def _write_markdown(path: Path, summary: dict[str, object]) -> None:
             ]
         )
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def _timestamp_batch_id() -> str:
+    return datetime.now(timezone.utc).strftime("batch-%Y%m%dT%H%M%SZ")
+
+
+def _lane_state_dir(*, run_out_dir: Path, lane: str) -> Path:
+    return run_out_dir / "lane_state" / str(lane).strip()
+
+
+def _lane_db_path(*, run_out_dir: Path, lane: str) -> Path:
+    return _lane_state_dir(run_out_dir=run_out_dir, lane=lane) / "brandpipe.db"
+
+
+def _lane_export_template(*, run_out_dir: Path, lane: str) -> Path:
+    return _lane_state_dir(run_out_dir=run_out_dir, lane=lane) / "finalists_{run_id}.csv"
+
+
+def _build_isolated_batch_run_configs(
+    *,
+    lane: str,
+    config_path: Path,
+    briefs_file: Path,
+    run_out_dir: Path,
+    pseudoword_rare_seed_count: int = 0,
+    pseudoword_rare_profile: str = "off",
+) -> tuple[str, list[object]]:
+    base_title, run_configs = build_batch_run_configs(
+        template_config_path=config_path,
+        briefs_file_path=briefs_file,
+    )
+    lane_db = _lane_db_path(run_out_dir=run_out_dir, lane=lane)
+    lane_export = _lane_export_template(run_out_dir=run_out_dir, lane=lane)
+    resolved_rare_profile = (
+        str(pseudoword_rare_profile).strip().lower()
+        if str(pseudoword_rare_profile).strip()
+        else ("balanced" if int(pseudoword_rare_seed_count) > 0 else "off")
+    )
+    isolated_configs = [
+        replace(
+            run_config,
+            db_path=lane_db,
+            ideation=replace(
+                run_config.ideation,
+                pseudoword=(
+                    replace(
+                        run_config.ideation.pseudoword,
+                        rare_seed_count=max(0, int(pseudoword_rare_seed_count)),
+                        rare_profile=resolved_rare_profile if int(pseudoword_rare_seed_count) > 0 else "off",
+                    )
+                    if run_config.ideation.pseudoword is not None
+                    else None
+                ),
+            ),
+            export=replace(run_config.export, out_csv=lane_export),
+        )
+        for run_config in run_configs
+    ]
+    return base_title, isolated_configs
+
+
+def _run_batch_isolated(
+    *,
+    lane: str,
+    config_path: Path,
+    briefs_file: Path,
+    run_out_dir: Path,
+    batch_id: str = "",
+    stop_on_error: bool = False,
+    pseudoword_rare_seed_count: int = 0,
+    pseudoword_rare_profile: str = "off",
+) -> dict[str, object]:
+    resolved_batch_id = batch_id.strip() or _timestamp_batch_id()
+    base_title, run_configs = _build_isolated_batch_run_configs(
+        lane=lane,
+        config_path=config_path,
+        briefs_file=briefs_file,
+        run_out_dir=run_out_dir,
+        pseudoword_rare_seed_count=pseudoword_rare_seed_count,
+        pseudoword_rare_profile=pseudoword_rare_profile,
+    )
+    succeeded = 0
+    failed = 0
+    run_ids: list[int] = []
+    failures: list[dict[str, object]] = []
+    for index, run_config in enumerate(run_configs):
+        try:
+            run_id = run_loaded_config(
+                run_config,
+                config_path=config_path,
+                batch_id=resolved_batch_id,
+                batch_index=index,
+            )
+            run_ids.append(run_id)
+            succeeded += 1
+        except Exception as exc:
+            failed += 1
+            failures.append(
+                {
+                    "index": index,
+                    "title": run_config.title,
+                    "error_class": exc.__class__.__name__,
+                    "error_message": str(exc),
+                }
+            )
+            if stop_on_error:
+                break
+    return {
+        "batch_id": resolved_batch_id,
+        "title": base_title,
+        "requested": len(run_configs),
+        "attempted": succeeded + failed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "stopped_early": bool(stop_on_error and failed > 0 and (succeeded + failed) < len(run_configs)),
+        "run_ids": run_ids,
+        "failures": failures,
+    }
 
 
 def _auto_lane_cap(*, top_n: int, lane_count: int) -> int:
@@ -532,6 +651,7 @@ def _run_lane(
     lane: str,
     config_path: Path,
     briefs_file: Path,
+    run_out_dir: Path,
     generated_at: str,
     requested_briefs: int,
     stop_on_error: bool,
@@ -540,8 +660,10 @@ def _run_lane(
     progress_json_path: Path,
     progress_payload: dict[str, object],
     progress_lock: threading.Lock,
+    pseudoword_rare_seed_count: int,
+    pseudoword_rare_profile: str,
 ) -> dict[str, object]:
-    lane_db_path = _resolve_db_path(config_path)
+    lane_db_path = _lane_db_path(run_out_dir=run_out_dir, lane=lane)
     validation_check_count = len(load_config(config_path).validation.checks)
     batch_id = f"attack-{generated_at}-{lane}"
 
@@ -577,11 +699,15 @@ def _run_lane(
     )
     monitor.start()
     try:
-        summary = run_batch(
-            template_config_path=config_path,
-            briefs_file_path=briefs_file,
+        summary = _run_batch_isolated(
+            lane=lane,
+            config_path=config_path,
+            briefs_file=briefs_file,
+            run_out_dir=run_out_dir,
             batch_id=batch_id,
             stop_on_error=stop_on_error,
+            pseudoword_rare_seed_count=pseudoword_rare_seed_count,
+            pseudoword_rare_profile=pseudoword_rare_profile,
         )
     finally:
         stop_event.set()
@@ -610,7 +736,7 @@ def _run_lane(
 
     lane_rows, lane_summary = _collect_lane_rows(
         lane=lane,
-        config_path=config_path,
+        db_path=lane_db_path,
         batch_summary=summary,
     )
     complete_line = (
@@ -628,9 +754,8 @@ def _run_lane(
     }
 
 
-def _collect_lane_rows(*, lane: str, config_path: Path, batch_summary: dict[str, object]) -> tuple[list[dict[str, object]], dict[str, object]]:
+def _collect_lane_rows(*, lane: str, db_path: Path, batch_summary: dict[str, object]) -> tuple[list[dict[str, object]], dict[str, object]]:
     lane_rows: list[dict[str, object]] = []
-    db_path = _resolve_db_path(config_path)
     with db.open_db(db_path) as conn:
         db.ensure_schema(conn)
         for run_id in batch_summary["run_ids"]:
@@ -679,12 +804,6 @@ def _collect_lane_rows(*, lane: str, config_path: Path, batch_summary: dict[str,
         "diversity": _summarize_diversity(deduped),
     }
     return deduped, lane_summary
-
-
-def _resolve_db_path(config_path: Path) -> Path:
-    from brandpipe.pipeline import load_config
-
-    return load_config(config_path).db_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -748,6 +867,18 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of lanes to run concurrently. Use 1 for serial lane execution.",
     )
+    parser.add_argument(
+        "--pseudoword-rare-seed-count",
+        type=int,
+        default=0,
+        help="Extra phase-1 low-collision pseudoword seeds to synthesize per brief.",
+    )
+    parser.add_argument(
+        "--pseudoword-rare-profile",
+        default="off",
+        choices=("off", "balanced", "aggressive"),
+        help="Rarity profile for the synthetic phase-1 pseudoword generator.",
+    )
     return parser.parse_args()
 
 
@@ -755,6 +886,10 @@ def main() -> int:
     args = parse_args()
     briefs_file = Path(args.briefs_file).expanduser().resolve()
     out_dir = Path(args.out_dir).expanduser().resolve()
+    rare_seed_count = max(0, int(getattr(args, "pseudoword_rare_seed_count", 0) or 0))
+    rare_profile = str(getattr(args, "pseudoword_rare_profile", "off") or "").strip().lower()
+    if not rare_profile:
+        rare_profile = "balanced" if rare_seed_count > 0 else "off"
     if str(args.lanes).strip().lower() == "all":
         lanes = list(LANE_CONFIGS.keys())
     else:
@@ -781,10 +916,16 @@ def main() -> int:
         lane_cap = _auto_lane_cap(top_n=top_n, lane_count=len(lanes)) if int(args.lane_cap) < 0 else max(0, int(args.lane_cap))
         print(f"lane_cap={lane_cap}")
         print(f"lane_workers={max(1, int(args.lane_workers))}")
+        print(f"pseudoword_rare_seed_count={rare_seed_count}")
+        print(f"pseudoword_rare_profile={rare_profile}")
         print(f"progress_log={progress_log_path}")
         print(f"progress_json={progress_json_path}")
         for lane in lanes:
-            print(f"lane={lane} config={LANE_CONFIGS[lane]}")
+            print(
+                f"lane={lane} config={LANE_CONFIGS[lane]} "
+                f"db={_lane_db_path(run_out_dir=run_out_dir, lane=lane)} "
+                f"csv={_lane_export_template(run_out_dir=run_out_dir, lane=lane)}"
+            )
         return 0
 
     run_out_dir.mkdir(parents=True, exist_ok=True)
@@ -815,6 +956,7 @@ def main() -> int:
                 lane=lane,
                 config_path=LANE_CONFIGS[lane],
                 briefs_file=briefs_file,
+                run_out_dir=run_out_dir,
                 generated_at=generated_at,
                 requested_briefs=requested_briefs,
                 stop_on_error=bool(args.stop_on_error),
@@ -823,6 +965,8 @@ def main() -> int:
                 progress_json_path=progress_json_path,
                 progress_payload=progress_payload,
                 progress_lock=progress_lock,
+                pseudoword_rare_seed_count=rare_seed_count,
+                pseudoword_rare_profile=rare_profile,
             )
     else:
         with ThreadPoolExecutor(max_workers=lane_workers) as executor:
@@ -832,6 +976,7 @@ def main() -> int:
                     lane=lane,
                     config_path=LANE_CONFIGS[lane],
                     briefs_file=briefs_file,
+                    run_out_dir=run_out_dir,
                     generated_at=generated_at,
                     requested_briefs=requested_briefs,
                     stop_on_error=bool(args.stop_on_error),
@@ -840,6 +985,8 @@ def main() -> int:
                     progress_json_path=progress_json_path,
                     progress_payload=progress_payload,
                     progress_lock=progress_lock,
+                    pseudoword_rare_seed_count=rare_seed_count,
+                    pseudoword_rare_profile=rare_profile,
                 ): lane
                 for lane in lanes
             }

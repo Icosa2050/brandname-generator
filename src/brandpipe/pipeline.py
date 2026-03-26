@@ -140,6 +140,8 @@ def load_config(config_path: Path) -> RunConfig:
             language_plugin=_cfg_str(pseudoword_cfg.get("language_plugin"), "orthographic_english"),
             language_plugins=tuple(_list_of_strings(pseudoword_cfg.get("language_plugins"))),
             seed_count=_cfg_int(pseudoword_cfg.get("seed_count"), 18, minimum=1),
+            rare_seed_count=_cfg_int(pseudoword_cfg.get("rare_seed_count"), 0, minimum=0),
+            rare_profile=_cfg_str(pseudoword_cfg.get("rare_profile"), "off"),
         )
     ideation = IdeationConfig(
         provider=_cfg_str(ideation_cfg.get("provider"), "fixture"),
@@ -679,6 +681,7 @@ def recheck_tmview(
     db_path: Path,
     profile_dir: Path,
     chrome_executable: Path | None = None,
+    nice_class: str = "",
     run_id: int | None = None,
     batch_id: str = "",
     limit: int = 25,
@@ -719,6 +722,7 @@ def recheck_tmview(
                 names=names,
                 profile_dir=profile_dir,
                 chrome_executable=chrome_executable,
+                nice_class=nice_class,
                 timeout_ms=timeout_ms,
                 settle_ms=settle_ms,
                 headless=headless,

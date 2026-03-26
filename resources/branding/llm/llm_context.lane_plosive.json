@@ -1,0 +1,48 @@
+{
+  "llm_context": {
+    "product_core": "Administrative settlement software that should imply control, precision, and auditability.",
+    "target_users": [
+      "landlords",
+      "property controllers",
+      "operational finance admins"
+    ],
+    "trust_signals": [
+      "precision",
+      "control",
+      "auditability",
+      "confidence"
+    ],
+    "forbidden_directions": [
+      "militaristic tone",
+      "gaming brands",
+      "debt collection energy",
+      "generic fintech",
+      "harsh industrial tool names"
+    ],
+    "language_market": "Short, punchy, pronounceable in DE and EN",
+    "tone_mix": {
+      "precision": 0.38,
+      "trust": 0.31,
+      "modern": 0.19,
+      "restraint": 0.12
+    },
+    "good_examples": [
+      "vantaten",
+      "civendo"
+    ],
+    "bad_examples": [
+      "verovero",
+      "gridtrace",
+      "vericore"
+    ],
+    "seed_roots": [
+      "brisk",
+      "flint",
+      "forge",
+      "grain",
+      "pivot",
+      "vector"
+    ],
+    "notes": "Prefer firmer consonant movement and sharper structure, but stay calm and commercially usable."
+  }
+}

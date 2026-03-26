@@ -1,0 +1,698 @@
+---
+owner: product
+status: draft
+last_validated: 2026-02-17
+---
+
+# Name Generator Guide
+
+## Purpose
+`scripts/branding/name_generator.py` creates brand-name candidates and pre-screens them for:
+- generator-family mixing (`coined`, `stem`, `suggestive`, `seed`, `expression`, `source_pool`, `blend`),
+- curated source-pool based generation with lineage tracking (`source_atoms` in SQLite),
+- challenge risk (similarity to protected names + descriptiveness),
+- App Store collisions (DE/CH/US quick signal),
+- domain availability via RDAP (`.com`, `.de`, `.ch`).
+- package namespace collisions (`PyPI` + `npm`),
+- social-handle signal (`GitHub`, `LinkedIn`, `X`, `Instagram`),
+- adversarial challenger similarity and confusion risk,
+- expanded multilingual phonetic variation roots for less-crowded naming space,
+- anti-gibberish gates and diversity controls (prefix/suffix/shape family balancing),
+- false-friend and negative-association risk filtering,
+- generated trademark lookup links (DPMA, Swissreg, TMview) for manual legal checks.
+- run-history logging (`JSONL`) for long-term iterative search.
+- strict gate checks:
+  - base `.com` availability required (no fallback accepted),
+  - broader App Store country checks (`de,ch,us,gb,fr,it` by default),
+  - exact web collision detection (quoted-name search results).
+
+It is a **screening** tool, not legal advice. Final legal clearance still requires professional trademark review.
+
+## Path Conventions
+- Static inputs/examples: `resources/branding/...`
+- Mutable outputs and SQLite working DBs: `test_outputs/branding/...`
+- Historical snapshots moved out of docs: `artifacts/branding/legacy/2026-02/...`
+
+## Environment Bootstrap
+Use Python 3.11+ with a local virtual environment.
+
+```zsh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+```
+
+Notes:
+- `requirements.txt` currently includes optional pipeline dependencies:
+  - `playwright` for EUIPO/Swissreg browser probes.
+  - `wordfreq` for zipf-based source filtering in `name_input_ingest.py`.
+- Core generation/validation flows are standard-library based.
+- For remote model runs, keep using `direnv exec . <command>` so `OPENROUTER_*` variables are present.
+
+## Quick Start
+
+### Worktree Path Rule
+- Keep editable task worktrees under a stable development root:
+  - `/Users/bernhard/Development/brandname-generator-worktrees/`
+- Do not use `/tmp` or `/private/tmp` for active coding worktrees.
+  - Reason: path-alias/sandbox prefix mismatches can trigger avoidable edit approval friction.
+- Canonical task start command:
+```zsh
+git -C /Users/bernhard/Development/brandname-generator worktree add \
+  -b codex/<task-slug> \
+  /Users/bernhard/Development/brandname-generator-worktrees/<task-slug> \
+  main
+```
+
+### 1) DACH-first run
+```zsh
+python3 scripts/branding/name_generator.py \
+  --scope=dach \
+  --gate=strict \
+  --seeds="kostula,utilaro,saldaro,ledger" \
+  --pool-size=280 \
+  --check-limit=70 \
+  --json-output=test_outputs/branding/generated_name_candidates_dach_strict.json
+```
+
+### 2) Broader EU run
+```zsh
+python3 scripts/branding/name_generator.py \
+  --scope=eu \
+  --gate=strict \
+  --seeds="utility,settlement,property,saldo" \
+  --pool-size=320 \
+  --check-limit=90
+```
+
+### 3) Global-leaning run
+```zsh
+python3 scripts/branding/name_generator.py \
+  --scope=global \
+  --gate=strict \
+  --variation-profile=expanded \
+  --seeds="utility,rent,property,ledger" \
+  --pool-size=360 \
+  --check-limit=100
+```
+
+### 4) Screen a handcrafted shortlist directly
+```zsh
+python3 scripts/branding/name_generator.py \
+  --scope=global \
+  --gate=strict \
+  --candidates="utilaro,saldaro,saldio,immosaldo,nebensaldo,objektsaldo" \
+  --only-candidates \
+  --output=test_outputs/branding/shortlist_screening.csv \
+  --json-output=test_outputs/branding/shortlist_screening.json
+```
+
+### 4b) Build acceptance preflight from decision pack (no new generation)
+```zsh
+PACK_DIR=test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final
+python3 scripts/branding/build_acceptance_preflight.py \
+  --decision-csv "$PACK_DIR/review_unique_top120.csv" \
+  --db test_outputs/branding/continuous_creative_mistral_claude/naming_campaign.db \
+  --out-dir "$PACK_DIR/acceptance_keep_only" \
+  --mode keep \
+  --top-n 12
+```
+- `--mode keep_maybe` includes both manually kept and maybe rows.
+- Outputs:
+  - `acceptance_ranked.csv`
+  - `acceptance_strict_pass.csv`
+  - `acceptance_preflight_summary.md`
+
+### 4c) Automated legal + brand research precheck
+```zsh
+PACK_DIR=test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final
+python3 scripts/branding/legal_brand_research.py \
+  --names-file "$PACK_DIR/acceptance_keep_only/finalist_top12.txt" \
+  --countries de,ch,it \
+  --registry-top-n 8 \
+  --web-top-n 8 \
+  --output-csv "$PACK_DIR/acceptance_keep_only/legal_brand_research.csv" \
+  --output-json "$PACK_DIR/acceptance_keep_only/legal_brand_research.json" \
+  --print-top 12
+```
+- Wrapper (recommended):
+```zsh
+zsh scripts/branding/run_legal_brand_research.sh \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final
+```
+- EUIPO mode uses Playwright browser automation. One-time setup:
+```zsh
+python3 -m playwright install chromium
+```
+- Swissreg mode uses the Swissreg UI search (`database-client/home`) and reads the `Marken` counter via Playwright.
+- Disable EUIPO probe if browser runtime is unavailable:
+```zsh
+zsh scripts/branding/run_legal_brand_research.sh \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --no-euipo-probe
+```
+- Disable Swissreg UI probe if needed:
+```zsh
+zsh scripts/branding/run_legal_brand_research.sh \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --no-swissreg-ui-probe
+```
+- This is an automated **precheck**, not legal advice.
+- Registry signals include search-index probes (DPMA/Swissreg/TMview) plus EUIPO eSearch browser probe, and should be used to prioritize counsel review, not replace it.
+- Web collision hard-fail triggers only when exact matches appear on at least two distinct non-social/commercial domains; social/profile handle-only exact matches (for example `@name` on TikTok/Instagram) are treated as soft signal.
+
+### 4d) One-command acceptance tail automation (recommended)
+Runs the manual last-mile flow in one step:
+- preflight from `review_unique_top120.csv`
+- keep/maybe lane shortlist extraction
+- strict live screening (optional)
+- merged final survivors
+- legal+brand precheck (optional)
+- recommended counsel list
+
+```zsh
+direnv exec . python3 scripts/branding/run_acceptance_tail.py \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final
+```
+
+Useful variants:
+```zsh
+# Reuse existing live-screening CSVs, only rebuild finals + legal
+direnv exec . python3 scripts/branding/run_acceptance_tail.py \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --skip-live-screening
+
+# Fast mode without browser probes (less robust legal signal)
+direnv exec . python3 scripts/branding/run_acceptance_tail.py \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --no-euipo-probe \
+  --no-swissreg-ui-probe
+
+# Build survivors only (no legal stage)
+direnv exec . python3 scripts/branding/run_acceptance_tail.py \
+  --pack-dir test_outputs/branding/continuous_creative_mistral_claude/decision_pack_20260224_172239_final \
+  --skip-legal-research
+```
+
+Primary outputs in `<pack-dir>/acceptance_keep_only`:
+- `final_survivors_<N>.csv`
+- `final_survivors_<N>.txt`
+- `legal_brand_research_final<N>.csv` (unless skipped)
+- `recommended_top<N>_for_legal.csv`
+- `acceptance_tail_summary.md`
+
+### 4e) Two-Lane Workflow (config-driven)
+Use this when you want a compact, repeatable split:
+1. Creation lane generates a fresh decision pack for human review.
+2. Manual review edits `keep/maybe/drop`.
+3. Validation lane executes final filtering + legal precheck.
+
+Creation lane:
+```zsh
+direnv exec . python3 scripts/branding/run_creation_lane.py \
+  --config resources/branding/configs/creation_lane.default.toml
+```
+
+Validation lane (after review is filled):
+```zsh
+direnv exec . python3 scripts/branding/run_validation_lane.py \
+  --config resources/branding/configs/validation_lane.default.toml \
+  --pack-dir <decision_pack_dir>
+```
+
+Notes:
+- Creation lane creates `decision_pack_<timestamp>` with:
+  - `strict_strong.csv`
+  - `strict_good.csv`
+  - `brand_forward_needs_expensive_checks.csv`
+  - `review_unique_top120.csv` and `review_unique_top50.csv`
+  - `manifest.json`
+- Validation lane refuses to run if review CSV has no manual `keep/maybe/drop` marks.
+
+Tuned profile pair:
+```zsh
+# Creation: creative lane with remote mix (Mistral + Claude)
+direnv exec . python3 scripts/branding/run_creation_lane.py \
+  --config resources/branding/configs/creation_lane.creative_hybrid.toml
+
+# Validation: legal-heavy probes + stricter post-review narrowing
+# Review file for this tuned pair: review_unique_top160.csv
+direnv exec . python3 scripts/branding/run_validation_lane.py \
+  --config resources/branding/configs/validation_lane.legal_heavy.toml \
+  --pack-dir <decision_pack_dir>
+```
+
+### 4f) Prompt location and market/brand variants
+Recommended prompt placement:
+- baseline prompts: `resources/branding/llm/llm_prompt.*.txt`
+- reusable template: `resources/branding/llm/llm_prompt.brand_market_template_v1.txt`
+- brand+market prompts: `resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+
+How to use a custom prompt in lane configs:
+- add or update this flag inside creation `generation_command`:
+  - `--llm-prompt-template-file resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+
+How to adapt for another market:
+1. Create config copies:
+   - `resources/branding/configs/creation_lane.<brand>_<market>.toml`
+   - `resources/branding/configs/validation_lane.<brand>_<market>.toml`
+2. Update creation settings:
+   - `out_dir`
+   - prompt file path
+   - `--generator-min-len` / `--generator-max-len`
+   - `--llm-rounds` / `--llm-candidates-per-round`
+3. Update validation settings:
+   - `countries`
+   - shortlist sizes (`keep_top_n`, `maybe_top_n`, `final_top_n`)
+4. Keep legal probes enabled (`euipo_probe`, `swissreg_ui_probe`) for final shortlist.
+
+Example (DE/CH/IT real-estate settlement brand):
+```zsh
+direnv exec . python3 scripts/branding/run_creation_lane.py \
+  --config resources/branding/configs/creation_lane.creative_hybrid.toml \
+  --out-dir test_outputs/branding/settlement_dach_it
+
+# review keep/maybe/drop in review_unique_top160.csv
+
+direnv exec . python3 scripts/branding/run_validation_lane.py \
+  --config resources/branding/configs/validation_lane.legal_heavy.toml \
+  --pack-dir test_outputs/branding/settlement_dach_it/decision_pack_creative_<timestamp>
+```
+
+Operational recommendation:
+- Treat prompt + config as a pair versioned together.
+- Store each experimental variant under a dedicated `out_dir`.
+- Compare variants only at the same validation mode (`strict`, same countries, same legal settings).
+
+### 5) Long-run exploration (50 candidates, network-degraded tolerant)
+```zsh
+python3 scripts/branding/name_generator.py \
+  --scope=global \
+  --gate=balanced \
+  --variation-profile=expanded \
+  --degraded-network-mode \
+  --seeds="kostula,utilaro,ledger,allocation,clarity,balance,tenant" \
+  --pool-size=420 \
+  --check-limit=50 \
+  --store-countries=de,ch,us \
+  --output=test_outputs/branding/generated_name_candidates_global_balanced_degraded.csv \
+  --json-output=test_outputs/branding/generated_name_candidates_global_balanced_degraded.json \
+  --run-log=test_outputs/branding/name_generator_runs.jsonl
+```
+
+### 6) Initialize candidate lake DB
+```zsh
+python3 scripts/branding/naming_db.py --db test_outputs/branding/naming_pipeline.db init
+```
+
+### 7) Import historical artifacts into candidate lake
+```zsh
+python3 scripts/branding/naming_db.py \
+  --db test_outputs/branding/naming_pipeline.db \
+  import \
+  --inputs "test_outputs/branding/generated_name_candidates_*.csv" "test_outputs/branding/generated_name_candidates_*.json" \
+  --source-type=import
+```
+
+### 8) Ingest AI-generated batches with provenance
+```zsh
+python3 scripts/branding/name_ideation_ingest.py \
+  --db test_outputs/branding/naming_pipeline.db \
+  --names="Amaniro,Imarvia,Nuruvia" \
+  --scope=global \
+  --gate=balanced \
+  --model="google/gemini-3-pro-preview" \
+  --provider="pal" \
+  --prompt="latin-script catchy names with trust tone" \
+  --source-label="gemini_batch_01"
+```
+
+### 9) Run async validator orchestration on candidate lake
+```zsh
+python3 scripts/branding/naming_validate_async.py \
+  --db test_outputs/branding/naming_pipeline.db \
+  --state-filter="new" \
+  --checks="adversarial,psych,descriptive,domain,web,app_store,package,social" \
+  --candidate-limit=200 \
+  --concurrency=16 \
+  --max-retries=2
+```
+
+### 10) Ingest curated source atoms for generator v2
+```zsh
+python3 scripts/branding/name_input_ingest.py \
+  --db test_outputs/branding/naming_pipeline_v1.db \
+  --inputs resources/branding/inputs/source_inputs_v2.csv \
+  --source-label=curated_lexicon_v2 \
+  --scope=global \
+  --gate=balanced \
+  --also-candidates
+```
+
+### 11) Run v2 generation using source-pool and blend families
+```zsh
+python3 scripts/branding/name_generator.py \
+  --scope=global \
+  --gate=balanced \
+  --variation-profile=expanded \
+  --generator-families=source_pool,blend,seed,suggestive,coined \
+  --family-quotas=source_pool:260,blend:220,seed:120,suggestive:90,coined:90 \
+  --source-pool-db=test_outputs/branding/naming_pipeline_v1.db \
+  --source-pool-limit=600 \
+  --source-min-confidence=0.58 \
+  --false-friend-lexicon=resources/branding/lexicon/naming_false_friend_lexicon_v1.md \
+  --degraded-network-mode \
+  --pool-size=500 \
+  --check-limit=120 \
+  --output=test_outputs/branding/candidate_batch_v2.csv \
+  --json-output=test_outputs/branding/candidate_batch_v2.json \
+  --persist-db --db=test_outputs/branding/naming_pipeline_v1.db
+```
+
+### 12) One-command test runner (smoke/full)
+```zsh
+# fast smoke run (writes to /tmp)
+zsh scripts/branding/test_naming_pipeline_v2.sh smoke
+
+# full run (writes canonical test_outputs/branding outputs)
+zsh scripts/branding/test_naming_pipeline_v2.sh full
+
+# optional black format check (ruff runs by default)
+USE_BLACK=1 zsh scripts/branding/test_naming_pipeline_v2.sh smoke
+```
+
+### 13) Campaign runner with active ideation (phase 0)
+```zsh
+python3 scripts/branding/naming_campaign_runner.py \
+  --hours=1.0 \
+  --max-runs=8 \
+  --generator-quality-first \
+  --generator-only-llm-candidates \
+  --llm-ideation-enabled \
+  --llm-provider=openrouter_http \
+  --llm-model="mistralai/mistral-small-creative" \
+  --llm-openrouter-http-referer="https://github.com/Icosa2050/kostula" \
+  --llm-openrouter-x-title="Kostula Naming Pipeline" \
+  --llm-context-file=resources/branding/llm/llm_context.example.json \
+  --llm-rounds=2 \
+  --llm-candidates-per-round=20 \
+  --llm-max-call-latency-ms=8000 \
+  --llm-stage-timeout-ms=30000 \
+  --llm-max-usd-per-run=0.50 \
+  --llm-pricing-input-per-1k=0.0006 \
+  --llm-pricing-output-per-1k=0.0006 \
+  --llm-slo-min-success-rate=0.60 \
+  --llm-slo-max-timeout-rate=0.35 \
+  --llm-slo-max-empty-rate=0.40 \
+  --llm-slo-fail-open \
+  --llm-cache-dir=test_outputs/branding/llm_cache \
+  --validator-state-filter=new \
+  --sqlite-busy-timeout-ms=5000 \
+  --validator-memory-db=test_outputs/branding/naming_exclusion_memory.db \
+  --validator-memory-ttl-days=180 \
+  --dynamic-window-runs=5 \
+  --dynamic-fail-threshold=0.20 \
+  --dynamic-prefix-entropy-threshold=2.5 \
+  --ab-mode \
+  --ab-seed=722
+```
+
+Notes:
+- Set `OPENROUTER_API_KEY` for `openrouter_http` mode.
+- Optional attribution headers: `--llm-openrouter-http-referer` and `--llm-openrouter-x-title`
+  (or env vars `OPENROUTER_HTTP_REFERER`, `OPENROUTER_X_TITLE`).
+- Local OpenAI-compatible runtimes can use residency hints:
+  `--llm-openai-ttl-s=<seconds>` (LM Studio) and `--llm-openai-keep-alive=<value>`
+  (runtimes that accept keep-alive fields).
+- Hybrid mode combines local + remote ideation in one run:
+  `--llm-provider=hybrid --llm-hybrid-local-models=<local> --llm-hybrid-remote-models=<remote>`
+  with `--llm-hybrid-local-share=<0..1>` controlling round split.
+- `--llm-provider=fixture --llm-fixture-input=<file>` is useful for offline smoke tests.
+- Fixture mode can now consume OpenRouter-style response envelopes (`choices[].message.content`) to mirror live parser behavior.
+- `--llm-context-file=<json>` injects product/user/tone guidance into the LLM prompt.
+- Example context packet: `resources/branding/llm/llm_context.example.json`.
+- `llm_cost_usd` now prefers provider-reported `usage.cost` when available; token-price flags remain fallback estimation.
+- Ideation SLO thresholds are configurable via `--llm-slo-min-success-rate`, `--llm-slo-max-timeout-rate`,
+  `--llm-slo-max-empty-rate`, and `--llm-slo-min-samples`; breach metadata is emitted in progress rows.
+- `--llm-slo-fail-open` keeps campaign runs deterministic even when SLO breaches are recorded.
+- `--generator-only-llm-candidates` keeps generator output focused on model candidates (avoids deterministic legacy families in the same run).
+- `--validator-state-filter=new` avoids revalidating `checked` names in follow-up runs; use `new,checked` only for explicit refresh.
+- `--sqlite-busy-timeout-ms` tunes SQLite lock wait behavior for validator primary/memory DB connections.
+- `--no-track-job-lifecycle` skips intermediate `running/pending` job-state writes in validator for max throughput.
+- `--min-concurrency` / `--max-concurrency` bound adaptive validator concurrency scaling (50-job error-rate windows).
+- `--shard-db-isolation` (default) writes each shard to its own DB (`*_shard<N>.db`) when `--shard-count > 1`.
+- `--merge-shards` (default on shard 0) merges shard DBs into `--db` at campaign completion.
+- `--shard-scheduling=weighted` balances sweep combos across shards using historical `duration_s` estimates.
+- `--shard-history-progress-csv=<path>` points weighted scheduling at a previous `campaign_progress.csv` file.
+- `--shard-weight-fallback-s=<seconds>` sets the default duration estimate when a combo has no history.
+- `--validator-memory-db` stores persistent hard-fail exclusions across campaigns so eliminated names are skipped in later runs.
+- `--validator-memory-ttl-days` controls exclusion memory lifetime; policy signature + scope + gate must match to apply.
+- Campaign default memory DB is `test_outputs/branding/naming_exclusion_memory.db` (override per branch/experiment if needed).
+- DB reuse is default when the same `--db` path exists; add `--reset-db` for a clean slate.
+- Generator default `--skip-failed-history` skips names that already failed in DB history before external checks.
+- Use `--no-skip-failed-history` only if you intentionally want to re-screen failed names.
+- Fresh start: remove the DB file (`--db` target) to clear history.
+- `--live-progress` (default on) now forwards selected generator/validator child lines to campaign stdout.
+- `--live-progress-patterns` controls forwarded line matching (default includes `stage_event=`, `async_validation_`, `run_summary=`).
+- `--heartbeat-events` (default on) emits `campaign_event=` lifecycle records and writes JSONL heartbeat to `<out-dir>/runs/campaign_heartbeat.jsonl`.
+- `--heartbeat-interval-s` controls periodic `stage_heartbeat` events for long-running child stages.
+- `--heartbeat-jsonl` can override the default heartbeat file path.
+- `campaign_progress.csv` now includes `history_skip_count` so skipped failed-history names are visible per run.
+- `--source-input-files` allows curated corpus composition (comma-separated files) for source ingest.
+- `--source-exclusion-files` applies pre-ingest exclusion lists (for example entity/brand blacklists).
+- `--source-zipf-min` / `--source-zipf-max` / `--source-zipf-language` apply word-frequency gating during source ingest.
+- OpenRouter calls use a compatibility fallback chain (`json_schema+require_parameters` -> `json_object` -> plain chat) so models that reject strict routing still return candidates.
+- Campaign `llm_stage_status` now distinguishes empty/error cases (`empty_with_errors`, `empty`) instead of reporting `ok` with zero candidates.
+- Validator `run_summary` now includes SQLite lock contention metrics:
+  `lock_acquisitions`, `lock_total_wait_ms`, `lock_max_wait_ms`, `lock_contended_count`.
+- A/B mode writes `ab_report.json` and `ab_report.md` in campaign output root.
+
+### 13a) Corpus Strategy Baseline + Corpus-Filtered Run
+```zsh
+# 1) Build baseline diagnostics from existing campaign DB
+python3 scripts/branding/build_corpus_strategy_baseline.py \
+  --db test_outputs/branding/continuous_creative_mistral_claude/naming_campaign.db \
+  --out-dir test_outputs/branding/corpus_baseline \
+  --label pre_corpus_v3
+
+# 2) Run campaign with layered corpus inputs + exclusion seed + frequency gates
+direnv exec . python3 scripts/branding/naming_campaign_runner.py \
+  --out-dir test_outputs/branding/corpus_v3_trial \
+  --source-input-files resources/branding/inputs/source_inputs_v2.csv,resources/branding/inputs/source_inputs_core_v3.csv,resources/branding/inputs/source_inputs_expansion_v3.csv \
+  --source-exclusion-files resources/branding/inputs/source_exclusions_seed_v1.txt \
+  --source-zipf-min 1.0 \
+  --source-zipf-max 6.0 \
+  --source-zipf-language en \
+  --validator-state-filter new
+```
+
+### 13b) Local runtime warm-cache probe (LM Studio / Ollama)
+```zsh
+# one-command LM Studio local smoke (probe + one campaign run)
+zsh scripts/branding/test_lmstudio_local_smoke.sh
+
+# one-command Ollama local smoke (probe + one campaign run)
+zsh scripts/branding/test_ollama_local_smoke.sh --model gemma3:12b --keep-alive 30m
+
+# one-command benchmark across 3 local lanes (lmstudio fast + ollama + lmstudio quality)
+zsh scripts/branding/benchmark_local_llm_profiles.sh
+
+# LM Studio (OpenAI-compatible endpoint, keep model resident for 1 hour)
+python3 scripts/branding/test_local_llm_warm_cache.py \
+  --provider=openai_compat \
+  --base-url=http://localhost:1234/v1 \
+  --model=llama-3.3-8b-instruct-omniwriter \
+  --ttl-s=3600 \
+  --runs=5 \
+  --gap-s=1.0 \
+  --eviction-gap-s=70 \
+  --output-json=/tmp/lmstudio_warm_probe.json
+
+# Ollama native API (pin model in memory for 30 minutes)
+python3 scripts/branding/test_local_llm_warm_cache.py \
+  --provider=ollama_native \
+  --base-url=http://localhost:11434 \
+  --model=qwen2.5:14b \
+  --keep-alive=30m \
+  --runs=5 \
+  --gap-s=1.0 \
+  --eviction-gap-s=70 \
+  --output-json=/tmp/ollama_warm_probe.json
+```
+
+Interpretation:
+- `cold_ms`: first request latency (usually includes load time).
+- `warm_median_ms`: steady-state latency once model is resident.
+- `post_idle_ms`: latency after idle gap; if this jumps, model likely evicted.
+
+### 13c) Hybrid local + OpenRouter ideation
+```zsh
+python3 scripts/branding/naming_campaign_runner.py \
+  --hours=1 \
+  --max-runs=2 \
+  --sleep-s=0 \
+  --llm-ideation-enabled \
+  --llm-provider=hybrid \
+  --llm-hybrid-local-models=llama-3.3-8b-instruct-omniwriter \
+  --llm-hybrid-remote-models=mistralai/mistral-small-creative \
+  --llm-hybrid-local-share=0.75 \
+  --llm-openai-base-url=http://127.0.0.1:1234/v1 \
+  --llm-openai-ttl-s=3600
+```
+
+Notes:
+- Local provider is `openai_compat`; remote provider is `openrouter_http`.
+- Remote side still needs `OPENROUTER_API_KEY`.
+- Quality-first local mode (slower) can switch to `qwen3-vl-30b-a3b-instruct-mlx`.
+- Shortcut wrappers:
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh`
+  - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative`
+  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative --remote-models mistralai/mistral-small-creative,anthropic/claude-sonnet-4.5`
+
+### 13d) Continuous robust loop (profile rotation + retry + targets)
+```zsh
+zsh scripts/branding/run_continuous_branding_supervisor.sh \
+  --out-dir test_outputs/branding/continuous_hybrid \
+  --backend auto \
+  --fallback-backend ollama \
+  --profile-plan fast,quality,creative \
+  --target-good 120 \
+  --target-strong 40
+```
+
+What it adds:
+- profile rotation (`fast` + `quality` + `creative`) for throughput vs quality vs distinctiveness balance,
+- health-based backend selection with fallback (`lmstudio`/`ollama`),
+- failure backoff + fail-streak cap,
+- automatic stop once strict target counts are reached
+  (checked `strong/consider` with full expensive-check pass/warn coverage and no fail/error).
+
+LaunchAgent install (macOS background service):
+```zsh
+zsh scripts/branding/install_launchd_continuous_branding.sh --install
+zsh scripts/branding/install_launchd_continuous_branding.sh --status
+```
+
+Progress summary during long runs:
+```zsh
+zsh scripts/branding/report_campaign_progress.sh \
+  --out-dir test_outputs/branding/continuous_hybrid \
+  --top-n 25
+```
+
+Further references:
+- `docs/branding/continuous_pipeline_test_plan.md`
+- `docs/branding/continuous_pipeline_deferred_backlog.md`
+
+### 14) Benchmark validator parallelism
+```zsh
+# quick benchmark (CI-friendly)
+python3 scripts/branding/benchmark_validation.py --quick
+
+# expanded matrix
+python3 scripts/branding/benchmark_validation.py \
+  --candidate-counts=50,100,200 \
+  --concurrency-levels=1,4,8,16 \
+  --shard-counts=1,2,4 \
+  --rounds=3 \
+  --checks=adversarial,psych,descriptive
+```
+
+### 15) CI and canary checks
+- `.github/workflows/branding-ci.yml` runs deterministic fixture smoke on PRs and uploads run artifacts.
+- `.github/workflows/branding-openrouter-canary.yml` runs scheduled live OpenRouter canary with timeout + cost caps.
+- Both workflows assert artifact contract signals:
+  - candidate artifact exists (`runs/run_*.json`),
+  - validator emitted `run_summary=` in logs,
+  - heartbeat telemetry snapshot contains `campaign_start` and `campaign_complete`.
+
+## Output
+The script writes a CSV to:
+- default: `test_outputs/branding/generated_name_candidates_<scope>_<timestamp>.csv`
+- or your custom `--output` path.
+
+Key columns:
+- `generator_family`: generation family producing the candidate.
+- `lineage_atoms`: source atoms used to construct candidate.
+- `source_confidence`: source confidence proxy from input corpus.
+- `quality_score`: pronounceability/length/memorability quality.
+- `challenge_risk`: similarity + descriptiveness + scope penalty.
+- `total_score`: quality adjusted by risk.
+- `gate`: `strict` or `balanced`.
+- `itunes_*`: quick store collision signal.
+- `itunes_exact_countries`: where exact App Store name matches were found.
+- `itunes_unknown_countries`: countries that could not be checked.
+- `domain_*_available`: RDAP availability signal.
+- `domain_com_fallback_*`: availability of fallback `.com` patterns
+  (`get<name>.com`, `use<name>.com`, `<name>app.com`, `<name>hq.com`, `<name>cloud.com`).
+- `web_*`: quoted-name web-collision signal from top results.
+- `pypi_exists` / `npm_exists`: package namespace collision signal.
+- `social_*`: best-effort availability signal for key handles.
+- `adversarial_*`: confusion signal versus likely challenger/incumbent marks.
+- `psych_*`: spelling risk and trust-proxy heuristics for early filtering.
+- `gibberish_*`: low-humanity pattern penalties and reasons.
+- `false_friend_*`: negative-association and false-friend risk evidence.
+- `trademark_*_url`: prebuilt lookup URLs for DPMA/Swissreg/TMview checks.
+- `external_penalty`: extra risk applied from web/store signals.
+- `hard_fail` / `fail_reason`: automatic rejection reason.
+- `recommendation`: `strong`, `consider`, `weak`, `reject`.
+
+Important flags:
+- `--candidates`: always include these names in screening.
+- `--only-candidates`: skip generation and evaluate only explicit names.
+- `--gate=strict`: default; requires base `.com`, rejects exact web collisions.
+- `--gate=balanced`: allows fallback `.com` patterns and softer filtering.
+- `--store-countries=de,ch,us,gb,fr,it`: set App Store check countries.
+- `--no-store-check`: skip App Store queries.
+- `--no-domain-check`: skip RDAP domain checks.
+- `--no-web-check`: disable web collision checks (not recommended).
+- `--no-package-check`: disable PyPI/npm collision checks.
+- `--no-social-check`: disable social-handle checks.
+- `--no-progress`: disable live per-candidate progress output.
+- `--variation-profile=expanded`: adds broader multilingual phonetic roots.
+- `--generator-families=<list>`: select generator families.
+- `--family-quotas=<family:count,...>`: control family contribution.
+- `--source-pool-db=<path>`: DB path for curated source atoms.
+- `--source-pool-limit=<n>`: cap source atoms loaded for generation.
+- `--source-min-confidence=<0..1>`: minimum source confidence.
+- `--source-languages=<list>`: optional language filters for source atoms.
+- `--source-categories=<list>`: optional semantic category filters.
+- `--max-per-prefix2/--max-per-suffix2/--max-per-shape/--max-per-family`: diversity gates.
+- `--false-friend-lexicon=<path>`: markdown lexicon for semantic safety checks.
+- `--false-friend-fail-threshold=<n>`: fail threshold for false-friend risk.
+- `--gibberish-fail-threshold=<n>`: fail threshold for gibberish penalty.
+- `--degraded-network-mode`: keep `unknown` external checks as soft warnings (useful with flaky network/bot throttling).
+- `--adversarial-fail-threshold=82`: tune hard-fail threshold for challenger similarity.
+- `--json-output=<path>`: write machine-readable JSON artifact.
+- `--run-log=<path>`: append per-run summary JSONL for longitudinal tracking.
+- `--persist-db --db=<path>`: store scored candidates into SQLite candidate lake.
+- `scripts/branding/naming_db.py`: initialize/import/stats for candidate lake.
+- `scripts/branding/name_ideation_ingest.py`: import AI ideation batches with provenance metadata.
+- `scripts/branding/name_input_ingest.py`: ingest curated source atoms into `source_atoms`.
+- `scripts/branding/naming_validate_async.py`: async job orchestration and persisted validator lifecycle states.
+- `scripts/branding/naming_campaign_runner.py`: long-running campaign sweeps with optional active LLM ideation stage.
+- `--progress-every=<N>`: progress snapshot cadence for async validator.
+- `--progress-interval-s=<seconds>`: time-based progress fallback.
+- `--no-progress`: disable async validator progress output.
+
+## Recommended Workflow
+1. Ingest curated source atoms (`name_input_ingest.py`) before generation.
+2. Run `--scope=dach` and `--scope=global` with mixed generator families.
+3. Keep names with:
+- `recommendation in {strong, consider}`
+- `hard_fail=false`
+- required domains available for target scope.
+4. Use generated trademark URLs for manual registry pre-screen (DPMA, IGE/Swissreg, EUIPO/TMview, Zefix).
+5. Merge top candidates into the naming framework shortlist.
+6. Run 5-second user trust/comprehension test before final choice.
+7. Track every run in `test_outputs/branding/name_generator_runs.jsonl` to monitor drift and avoid repeating dead-end candidate clusters.
+
+## Notes
+- The built-in protected list is heuristic and intentionally conservative.
+- Add/remove known market marks directly in `PROTECTED_MARKS` for your category.
+- Expanded variation includes curated Latin-script roots inspired by African-language phonetics (for example Swahili-origin forms) to widen search space; treat this as naming inspiration, not linguistic certification.
+- Social and web checks are best-effort only and may return `unknown` due rate limiting or bot protection.

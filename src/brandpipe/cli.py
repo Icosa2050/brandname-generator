@@ -104,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     recheck_tm.add_argument("--headful", action="store_true", help="Run visible browser for debugging")
     recheck_tm.add_argument("--timeout-ms", type=int, default=20000, help="Navigation timeout")
     recheck_tm.add_argument("--settle-ms", type=int, default=2500, help="Post-load settle delay")
+    recheck_tm.add_argument("--nice-class", default="", help="Explicit TMView niceClass query, for example '9,OR,42'")
 
     browser_smoke = sub.add_parser("browser-profile-smoke", help="Create or reuse a dedicated Chrome profile and smoke-test it")
     browser_smoke.add_argument("--profile-dir", default="", help="Dedicated browser profile directory")
@@ -132,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     tmview_probe.add_argument("--settle-ms", type=int, default=2500, help="Post-load settle delay")
     tmview_probe.add_argument("--headful", action="store_true", help="Run visible browser for debugging")
     tmview_probe.add_argument("--output-json", default="", help="Optional output JSON path")
+    tmview_probe.add_argument("--nice-class", default="", help="Explicit TMView niceClass query, for example '9,OR,42'")
 
     return parser
 
@@ -206,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
             db_path=Path(args.db).expanduser().resolve(),
             profile_dir=Path(args.profile_dir).expanduser().resolve(),
             chrome_executable=(Path(args.chrome_executable).expanduser().resolve() if args.chrome_executable else None),
+            nice_class=args.nice_class,
             run_id=args.run_id,
             batch_id=args.batch_id,
             limit=args.limit,
@@ -215,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
             timeout_ms=args.timeout_ms,
             settle_ms=args.settle_ms,
         )
+        if args.nice_class:
+            print(f"nice_class={args.nice_class}")
         print(f"retried={summary['retried']} runs={summary['run_count']}")
         for item in summary["runs"]:
             print(
@@ -266,10 +271,13 @@ def main(argv: list[str] | None = None) -> int:
             names=names,
             profile_dir=Path(args.profile_dir).expanduser().resolve(),
             chrome_executable=(Path(args.chrome_executable).expanduser().resolve() if args.chrome_executable else None),
+            nice_class=args.nice_class,
             timeout_ms=args.timeout_ms,
             settle_ms=args.settle_ms,
             headless=not bool(args.headful),
         )
+        if args.nice_class:
+            print(f"nice_class={args.nice_class}")
         for item in results:
             print(
                 f"tmview_probe name={item.name} ok={int(item.query_ok)} exact={item.exact_hits} "

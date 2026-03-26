@@ -150,6 +150,7 @@ def main() -> int:
     print(f'creation_pack_output_dir={pack_output}')
     if dry_run:
         print('next_step=manual_review_then_run_validation_lane')
+        print('recommended_validation_workflow=dual')
     return 0
 
 

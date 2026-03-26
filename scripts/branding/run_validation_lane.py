@@ -15,6 +15,10 @@ from typing import Any
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT_DIR / 'resources/branding/configs/validation_lane.default.toml'
 REQUIRED_REVIEW_COLUMNS = ('keep', 'maybe', 'drop')
+DEFAULT_ASYNC_CHECKS = (
+    'adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,'
+    'web_google_like,tm_registry_global,app_store,package,social'
+)
 
 
 def _resolve_path(value: str, *, base: Path) -> Path:
@@ -64,6 +68,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--config', default=str(DEFAULT_CONFIG), help='Path to validation lane TOML config')
     parser.add_argument('--pack-dir', default='', help='Decision pack directory override')
     parser.add_argument('--decision-csv', default='', help='Manual review CSV override')
+    parser.add_argument(
+        '--workflow',
+        choices=('dual', 'acceptance_only'),
+        default='',
+        help='Override config workflow. dual runs acceptance-tail then async publish validation.',
+    )
+    parser.add_argument('--out-dir', default='', help='Validation output directory override (default: pack_dir)')
     parser.add_argument('--dry-run', action='store_true', help='Print commands only')
     return parser.parse_args()
 
@@ -94,61 +105,132 @@ def main() -> int:
         )
 
     python_bin = str(cfg.get('python_bin') or sys.executable).strip() or sys.executable
-    cmd = [
-        python_bin,
-        str(ROOT_DIR / 'scripts/branding/run_acceptance_tail.py'),
-        '--pack-dir',
-        str(pack_dir),
-        '--decision-csv',
-        str(decision_csv),
-        '--mode',
-        str(cfg.get('mode', 'keep_maybe')),
-        '--keep-top-n',
-        str(int(cfg.get('keep_top_n', 12))),
-        '--maybe-top-n',
-        str(int(cfg.get('maybe_top_n', 12))),
-        '--final-top-n',
-        str(int(cfg.get('final_top_n', 8))),
-        '--recommended-top-n',
-        str(int(cfg.get('recommended_top_n', 6))),
-        '--scope',
-        str(cfg.get('scope', 'global')),
-        '--gate',
-        str(cfg.get('gate', 'strict')),
-        '--countries',
-        str(cfg.get('countries', 'de,ch,it')),
-        '--registry-top-n',
-        str(int(cfg.get('registry_top_n', 8))),
-        '--web-top-n',
-        str(int(cfg.get('web_top_n', 8))),
-        '--print-top',
-        str(int(cfg.get('print_top', 12))),
-        '--euipo-timeout-ms',
-        str(int(cfg.get('euipo_timeout_ms', 20000))),
-        '--euipo-settle-ms',
-        str(int(cfg.get('euipo_settle_ms', 2500))),
-        '--swissreg-timeout-ms',
-        str(int(cfg.get('swissreg_timeout_ms', 20000))),
-        '--swissreg-settle-ms',
-        str(int(cfg.get('swissreg_settle_ms', 2500))),
-    ]
+    workflow = args.workflow.strip() or str(cfg.get('workflow') or 'dual').strip() or 'dual'
+    if workflow not in {'dual', 'acceptance_only'}:
+        raise SystemExit(f'unsupported workflow: {workflow}')
+    out_dir_raw = args.out_dir.strip() or str(cfg.get('validation_out_dir') or '').strip()
+    out_dir = _resolve_path(out_dir_raw, base=ROOT_DIR) if out_dir_raw else pack_dir
+    acceptance_dir_raw = str(cfg.get('acceptance_dir') or '').strip()
+    acceptance_dir = (
+        _resolve_path(acceptance_dir_raw, base=ROOT_DIR)
+        if acceptance_dir_raw
+        else (out_dir / 'acceptance_tail')
+    )
 
-    if bool(cfg.get('skip_live_screening', False)):
-        cmd.append('--skip-live-screening')
-    if bool(cfg.get('skip_legal_research', False)):
-        cmd.append('--skip-legal-research')
-    cmd.append('--euipo-probe' if bool(cfg.get('euipo_probe', True)) else '--no-euipo-probe')
-    cmd.append('--swissreg-ui-probe' if bool(cfg.get('swissreg_ui_probe', True)) else '--no-swissreg-ui-probe')
-    if bool(cfg.get('euipo_headful', False)):
-        cmd.append('--euipo-headful')
-    if bool(cfg.get('swissreg_headful', False)):
-        cmd.append('--swissreg-headful')
+    if workflow == 'dual':
+        cmd = [
+            python_bin,
+            str(ROOT_DIR / 'scripts/branding/run_review_validation_bundle.py'),
+            '--review-csv',
+            str(decision_csv),
+            '--out-dir',
+            str(out_dir),
+            '--mode',
+            str(cfg.get('mode', 'keep_maybe')),
+            '--scope',
+            str(cfg.get('scope', 'global')),
+            '--gate',
+            str(cfg.get('gate', 'strict')),
+            '--keep-top-n',
+            str(int(cfg.get('keep_top_n', 12))),
+            '--maybe-top-n',
+            str(int(cfg.get('maybe_top_n', 12))),
+            '--final-top-n',
+            str(int(cfg.get('final_top_n', 8))),
+            '--recommended-top-n',
+            str(int(cfg.get('recommended_top_n', 6))),
+            '--countries',
+            str(cfg.get('countries', 'de,ch,it')),
+            '--registry-top-n',
+            str(int(cfg.get('registry_top_n', 8))),
+            '--web-top-n',
+            str(int(cfg.get('web_top_n', 8))),
+            '--print-top',
+            str(int(cfg.get('print_top', 12))),
+            '--euipo-timeout-ms',
+            str(int(cfg.get('euipo_timeout_ms', 20000))),
+            '--euipo-settle-ms',
+            str(int(cfg.get('euipo_settle_ms', 2500))),
+            '--swissreg-timeout-ms',
+            str(int(cfg.get('swissreg_timeout_ms', 20000))),
+            '--swissreg-settle-ms',
+            str(int(cfg.get('swissreg_settle_ms', 2500))),
+            '--async-checks',
+            str(cfg.get('async_checks') or DEFAULT_ASYNC_CHECKS),
+            '--async-concurrency',
+            str(int(cfg.get('async_concurrency', 6))),
+        ]
+        if bool(cfg.get('skip_legal_research', False)):
+            cmd.append('--skip-legal-research')
+        if not bool(cfg.get('euipo_probe', True)):
+            cmd.append('--no-euipo-probe')
+        if not bool(cfg.get('swissreg_ui_probe', True)):
+            cmd.append('--no-swissreg-ui-probe')
+        if bool(cfg.get('euipo_headful', False)):
+            cmd.append('--euipo-headful')
+        if bool(cfg.get('swissreg_headful', False)):
+            cmd.append('--swissreg-headful')
+    else:
+        cmd = [
+            python_bin,
+            str(ROOT_DIR / 'scripts/branding/run_acceptance_tail.py'),
+            '--pack-dir',
+            str(pack_dir),
+            '--decision-csv',
+            str(decision_csv),
+            '--acceptance-dir',
+            str(acceptance_dir),
+            '--mode',
+            str(cfg.get('mode', 'keep_maybe')),
+            '--keep-top-n',
+            str(int(cfg.get('keep_top_n', 12))),
+            '--maybe-top-n',
+            str(int(cfg.get('maybe_top_n', 12))),
+            '--final-top-n',
+            str(int(cfg.get('final_top_n', 8))),
+            '--recommended-top-n',
+            str(int(cfg.get('recommended_top_n', 6))),
+            '--scope',
+            str(cfg.get('scope', 'global')),
+            '--gate',
+            str(cfg.get('gate', 'strict')),
+            '--countries',
+            str(cfg.get('countries', 'de,ch,it')),
+            '--registry-top-n',
+            str(int(cfg.get('registry_top_n', 8))),
+            '--web-top-n',
+            str(int(cfg.get('web_top_n', 8))),
+            '--print-top',
+            str(int(cfg.get('print_top', 12))),
+            '--euipo-timeout-ms',
+            str(int(cfg.get('euipo_timeout_ms', 20000))),
+            '--euipo-settle-ms',
+            str(int(cfg.get('euipo_settle_ms', 2500))),
+            '--swissreg-timeout-ms',
+            str(int(cfg.get('swissreg_timeout_ms', 20000))),
+            '--swissreg-settle-ms',
+            str(int(cfg.get('swissreg_settle_ms', 2500))),
+        ]
+        if bool(cfg.get('skip_live_screening', False)):
+            cmd.append('--skip-live-screening')
+        if bool(cfg.get('skip_legal_research', False)):
+            cmd.append('--skip-legal-research')
+        cmd.append('--euipo-probe' if bool(cfg.get('euipo_probe', True)) else '--no-euipo-probe')
+        cmd.append('--swissreg-ui-probe' if bool(cfg.get('swissreg_ui_probe', True)) else '--no-swissreg-ui-probe')
+        if bool(cfg.get('euipo_headful', False)):
+            cmd.append('--euipo-headful')
+        if bool(cfg.get('swissreg_headful', False)):
+            cmd.append('--swissreg-headful')
 
     dry_run = bool(cfg.get('dry_run', False)) or bool(args.dry_run)
+    if dry_run and workflow == 'dual':
+        cmd.append('--dry-run')
     _run(cmd, dry_run=dry_run)
 
     print('validation_lane_done')
+    print(f'validation_workflow={workflow}')
     print(f'validation_pack_dir={pack_dir}')
+    print(f'validation_out_dir={out_dir}')
     print(f'validation_decision_csv={decision_csv}')
     print(f'validation_review_rows={total_rows}')
     print(f'validation_manual_decisions={decisions}')

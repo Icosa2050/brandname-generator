@@ -12,6 +12,7 @@ BUNDLE_C="mistralai/mistral-small-creative,qwen/qwen3-next-80b-a3b-instruct,open
 MODEL="${OPENROUTER_MODEL:-$BUNDLE_A}"
 MODEL_SELECTION="${OPENROUTER_MODEL_SELECTION:-random}"
 PROFILE="${OPENROUTER_PROFILE:-quality}"
+LANE_PROFILE="${OPENROUTER_LANE_PROFILE:-constrained}"
 MAX_RUNS=1
 SLEEP_S=0
 POOL_SIZE=400
@@ -30,8 +31,11 @@ LLM_MAX_CALL_LATENCY_MS="${OPENROUTER_LLM_MAX_CALL_LATENCY_MS:-60000}"
 LLM_STAGE_TIMEOUT_MS="${OPENROUTER_LLM_STAGE_TIMEOUT_MS:-180000}"
 LLM_MAX_RETRIES="${OPENROUTER_LLM_MAX_RETRIES:-1}"
 PROMPT_TEMPLATE_FILE="${OPENROUTER_PROMPT_TEMPLATE_FILE:-}"
+LLM_CONTEXT_FILE="${OPENROUTER_LLM_CONTEXT_FILE:-$ROOT_DIR/resources/branding/llm/llm_context.example.json}"
+DIVERSITY_MEMORY_FILE="${OPENROUTER_DIVERSITY_MEMORY_FILE:-$ROOT_DIR/test_outputs/branding/curated/diversity_memory.json}"
 LIVE_PROGRESS=1
 NO_EXTERNAL_CHECKS=1
+IDEATION_ONLY=0
 POST_RANK=1
 POST_RANK_TOP_N="${OPENROUTER_POST_RANK_TOP_N:-40}"
 POST_RANK_INCLUDE_NON_SHORTLIST=0
@@ -58,6 +62,7 @@ USER_LLM_TEMPERATURE=""
 USER_LLM_MAX_CALL_LATENCY_MS=""
 USER_LLM_STAGE_TIMEOUT_MS=""
 USER_LLM_MAX_RETRIES=""
+USER_LLM_CONTEXT_FILE=""
 USER_VALIDATOR_CANDIDATE_LIMIT=""
 USER_VALIDATOR_EXPENSIVE_FINALIST_LIMIT=""
 USER_VALIDATOR_CONCURRENCY=""
@@ -66,6 +71,7 @@ USER_VALIDATOR_MAX_CONCURRENCY=""
 USER_VALIDATOR_TIMEOUT_S=""
 USER_VALIDATOR_CHECKS=""
 USER_PROMPT_TEMPLATE_FILE=""
+LANE_PROFILE_ARGS=()
 
 usage() {
   cat <<'EOF'
@@ -76,6 +82,8 @@ Usage:
 
 Options:
   --profile <fast|quality|remote_quality> Apply tuning preset (default: quality)
+  --lane-profile <constrained|heritage|expressive|plosive|minimal>
+                                    Apply ideation taste profile (default: constrained)
   --lane <n>                         Shard id (default: 0)
   --shard-count <n>                  Total shard workers (default: 2)
   --out-dir <path>                   Campaign output root (default: /tmp/branding_openrouter_tuned)
@@ -102,6 +110,8 @@ Options:
   --llm-stage-timeout-ms <ms>        Total ideation-stage timeout (default: profile-specific)
   --llm-max-retries <n>              Retriable LLM call retries (default: profile-specific)
   --llm-prompt-template-file <path>  Optional prompt template file
+  --llm-context-file <path>          Optional ideation context JSON file
+  --ideation-only                  Stop after ideation/generation and skip validator-facing downstream stages
   --post-rank                        Run deterministic DE/EN post-ranker (default: on)
   --no-post-rank                     Skip deterministic post-ranker
   --post-rank-top-n <n>              Names kept by post-ranker (default: 40)
@@ -134,7 +144,7 @@ Options:
 
 Examples:
   scripts/branding/run_openrouter_lane.sh --lane 0
-  scripts/branding/run_openrouter_lane.sh --lane 1 --out-dir /tmp/branding_openrouter_tuned
+  scripts/branding/run_openrouter_lane.sh --lane 1 --lane-profile plosive --out-dir /tmp/branding_openrouter_tuned
 EOF
 }
 
@@ -194,10 +204,95 @@ apply_profile() {
   esac
 }
 
+apply_lane_profile() {
+  LANE_PROFILE_ARGS=()
+  case "${LANE_PROFILE:l}" in
+    ""|"constrained")
+      LANE_PROFILE="constrained"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.constrained_pronounceable_de_en_v3.txt"
+      LLM_CONTEXT_FILE="$ROOT_DIR/resources/branding/llm/llm_context.lane_constrained.json"
+      LANE_PROFILE_ARGS=(
+        --generator-min-len 7
+        --generator-max-len 13
+        --generator-seeds anchor,beacon,clarity,harbor,meridian,signal
+        --source-influence-shares 0.20
+      )
+      ;;
+    "heritage")
+      LANE_PROFILE="heritage"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.lane_heritage_trust_de_en_v1.txt"
+      LLM_CONTEXT_FILE="$ROOT_DIR/resources/branding/llm/llm_context.lane_heritage.json"
+      LLM_ROUNDS="4"
+      LLM_CANDIDATES_PER_ROUND="12"
+      LLM_TEMPERATURE="0.68"
+      LANE_PROFILE_ARGS=(
+        --generator-min-len 7
+        --generator-max-len 12
+        --generator-seeds beacon,harbor,meridian,serein,signal,steady
+        --source-influence-shares 0.25
+        --quota-profiles 'coined:190,stem:120,suggestive:165,morphology:135,seed:90,expression:85,source_pool:90,blend:170,lattice:175'
+      )
+      ;;
+    "expressive")
+      LANE_PROFILE="expressive"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.lane_expressive_trust_de_en_v1.txt"
+      LLM_CONTEXT_FILE="$ROOT_DIR/resources/branding/llm/llm_context.lane_expressive.json"
+      LLM_ROUNDS="4"
+      LLM_CANDIDATES_PER_ROUND="16"
+      LLM_TEMPERATURE="0.92"
+      LANE_PROFILE_ARGS=(
+        --generator-min-len 8
+        --generator-max-len 14
+        --generator-seeds beacon,canopy,harbor,meridian,signal,serein,verge
+        --source-influence-shares 0.35
+        --quota-profiles 'coined:170,stem:90,suggestive:175,morphology:145,seed:80,expression:140,source_pool:80,blend:235,lattice:205'
+      )
+      ;;
+    "plosive")
+      LANE_PROFILE="plosive"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.lane_plosive_precision_de_en_v1.txt"
+      LLM_CONTEXT_FILE="$ROOT_DIR/resources/branding/llm/llm_context.lane_plosive.json"
+      LLM_ROUNDS="4"
+      LLM_CANDIDATES_PER_ROUND="14"
+      LLM_TEMPERATURE="0.86"
+      LANE_PROFILE_ARGS=(
+        --generator-min-len 6
+        --generator-max-len 11
+        --generator-seeds brisk,flint,forge,grain,pivot,signal,stone,vector
+        --source-influence-shares 0.12
+        --quota-profiles 'coined:255,stem:145,suggestive:110,morphology:95,seed:70,expression:55,source_pool:75,blend:150,lattice:245'
+      )
+      ;;
+    "minimal")
+      LANE_PROFILE="minimal"
+      PROMPT_TEMPLATE_FILE="$ROOT_DIR/resources/branding/llm/llm_prompt.lane_minimal_abstract_de_en_v1.txt"
+      LLM_CONTEXT_FILE="$ROOT_DIR/resources/branding/llm/llm_context.lane_minimal.json"
+      LLM_ROUNDS="4"
+      LLM_CANDIDATES_PER_ROUND="12"
+      LLM_TEMPERATURE="0.74"
+      LANE_PROFILE_ARGS=(
+        --generator-min-len 6
+        --generator-max-len 10
+        --generator-seeds axis,beacon,frame,grain,meridian,signal,stone
+        --source-influence-shares 0.10
+        --quota-profiles 'coined:265,stem:145,suggestive:95,morphology:85,seed:60,expression:50,source_pool:70,blend:155,lattice:255'
+      )
+      ;;
+    *)
+      echo "Unknown --lane-profile: $LANE_PROFILE (expected constrained|heritage|expressive|plosive|minimal)." >&2
+      exit 2
+      ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile)
       PROFILE="$2"
+      shift 2
+      ;;
+    --lane-profile)
+      LANE_PROFILE="$2"
       shift 2
       ;;
     --lane|--shard-id)
@@ -324,6 +419,15 @@ while [[ $# -gt 0 ]]; do
       USER_PROMPT_TEMPLATE_FILE="$2"
       shift 2
       ;;
+    --llm-context-file)
+      LLM_CONTEXT_FILE="$2"
+      USER_LLM_CONTEXT_FILE="$2"
+      shift 2
+      ;;
+    --ideation-only)
+      IDEATION_ONLY=1
+      shift
+      ;;
     --post-rank)
       POST_RANK=1
       shift
@@ -434,6 +538,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 apply_profile
+apply_lane_profile
 if [[ -n "$USER_MODEL" ]]; then
   MODEL="$USER_MODEL"
 fi
@@ -481,6 +586,14 @@ if [[ -n "$USER_VALIDATOR_CHECKS" ]]; then
 fi
 if [[ -n "$USER_PROMPT_TEMPLATE_FILE" ]]; then
   PROMPT_TEMPLATE_FILE="$USER_PROMPT_TEMPLATE_FILE"
+fi
+if [[ -n "$USER_LLM_CONTEXT_FILE" ]]; then
+  LLM_CONTEXT_FILE="$USER_LLM_CONTEXT_FILE"
+fi
+if (( IDEATION_ONLY )); then
+  POST_RANK=0
+  PUBLISH_COVERAGE=0
+  HEALTH_CHECK=0
 fi
 
 MODEL_SELECTION="${MODEL_SELECTION:l}"
@@ -559,7 +672,7 @@ CMD=(
   --llm-model-selection "$MODEL_SELECTION"
   --llm-openrouter-http-referer "$HTTP_REFERER"
   --llm-openrouter-x-title "$X_TITLE"
-  --llm-context-file "$ROOT_DIR/resources/branding/llm/llm_context.example.json"
+  --llm-context-file "$LLM_CONTEXT_FILE"
   --llm-rounds "$LLM_ROUNDS"
   --llm-candidates-per-round "$LLM_CANDIDATES_PER_ROUND"
   --llm-temperature "$LLM_TEMPERATURE"
@@ -569,7 +682,12 @@ CMD=(
   --shard-id "$LANE"
   --shard-count "$SHARD_COUNT"
   --out-dir "$OUT_DIR"
+  --diversity-memory-file "$DIVERSITY_MEMORY_FILE"
 )
+
+if (( IDEATION_ONLY )); then
+  CMD+=(--ideation-only)
+fi
 
 if (( NO_EXTERNAL_CHECKS )); then
   CMD+=(--generator-no-external-checks)
@@ -584,11 +702,14 @@ if (( LIVE_PROGRESS )); then
 else
   CMD+=(--no-live-progress)
 fi
+if (( ${#LANE_PROFILE_ARGS[@]} > 0 )); then
+  CMD+=("${LANE_PROFILE_ARGS[@]}")
+fi
 if (( ${#EXTRA_ARGS[@]} > 0 )); then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
-echo "running lane=$LANE/$SHARD_COUNT out_dir=$OUT_DIR model=$MODEL"
+echo "running lane=$LANE/$SHARD_COUNT lane_profile=$LANE_PROFILE ideation_only=$IDEATION_ONLY out_dir=$OUT_DIR model=$MODEL diversity_memory=$DIVERSITY_MEMORY_FILE"
 printf '$ '
 printf '%q ' "${CMD[@]}"
 echo

@@ -4,7 +4,7 @@
 Execution order per run:
 1) (optional) active LLM ideation stage -> artifact for --llm-input
 2) v3 generator run
-3) async validator run
+3) async validator run (unless --ideation-only)
 4) contract assertion + novelty tracking + reporting
 """
 
@@ -1081,6 +1081,7 @@ def run_active_llm_ideation(
     scope: str,
     seen_shortlist: set[str],
     context_packet: dict[str, Any],
+    diversity_memory: dict[str, Any] | None = None,
 ) -> tuple[Path | None, dict[str, Any]]:
     context_hash = nide.constraints_hash({'context': context_packet}) if context_packet else ''
     report: dict[str, Any] = {
@@ -1121,6 +1122,7 @@ def run_active_llm_ideation(
     constraints = nide.compute_dynamic_constraints(
         runs_dir=runs_dir,
         seen_shortlist=seen_shortlist,
+        memory_packet=diversity_memory,
         window_runs=max(1, args.dynamic_window_runs),
         fail_threshold=max(0.0, min(1.0, args.dynamic_fail_threshold)),
         entropy_threshold=max(0.0, float(args.dynamic_prefix_entropy_threshold)),
@@ -2117,6 +2119,14 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        '--ideation-only',
+        dest='ideation_only',
+        action='store_true',
+        default=False,
+        help='Stop after generator + shortlist reporting; skip validator execution and downstream publish stages.',
+    )
+    parser.add_argument('--no-ideation-only', dest='ideation_only', action='store_false')
+    parser.add_argument(
         '--prefix-audit-csv',
         default='',
         help='Optional prefix audit CSV used to inject low-risk pronounceable seeds.',
@@ -2319,7 +2329,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--llm-prompt-template-file',
         default=os.environ.get('LLM_PROMPT_TEMPLATE_FILE', ''),
-        help='Optional text template file for ideation prompt placeholders ({scope},{round_index},{target_count},{phonetic},{morphology},{semantic},{banned_tokens},{banned_prefixes},{context_block}).',
+        help='Optional text template file for ideation prompt placeholders ({scope},{round_index},{target_count},{phonetic},{morphology},{semantic},{round_focus},{creative_directive},{novelty_directive},{banned_tokens},{banned_prefixes},{banned_suffixes},{avoid_names},{context_block}).',
     )
     parser.add_argument('--llm-max-call-latency-ms', type=int, default=8000, help='Per-call timeout in milliseconds.')
     parser.add_argument('--llm-stage-timeout-ms', type=int, default=30000, help='Total ideation stage timeout in milliseconds.')
@@ -2374,6 +2384,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--dynamic-prefix-entropy-threshold', type=float, default=2.5, help='Entropy threshold for prefix bans.')
     parser.add_argument('--dynamic-max-token-ban', type=int, default=50, help='Maximum banned token list size.')
     parser.add_argument('--dynamic-max-prefix-ban', type=int, default=30, help='Maximum banned prefix list size.')
+    parser.add_argument(
+        '--diversity-memory-file',
+        default='',
+        help='Optional JSON file used to persist cross-run diversity memory for prompt constraints and generator ranking.',
+    )
     parser.add_argument('--ab-mode', dest='ab_mode', action='store_true', default=False, help='Enable A/B run assignment.')
     parser.add_argument('--ab-seed', type=int, default=722, help='Random seed used for A/B block randomization.')
     parser.add_argument('--out-dir', default='', help='Campaign output root (default test_outputs/branding/naming_campaign_<timestamp>).')
@@ -2452,6 +2467,11 @@ def main() -> int:
     seen_names_path = out_dir / 'seen_shortlist_names.txt'
     campaign_summary_path = out_dir / 'campaign_summary.json'
     heartbeat_path = Path(args.heartbeat_jsonl).expanduser() if args.heartbeat_jsonl else runs_dir / 'campaign_heartbeat.jsonl'
+    diversity_memory_path = (
+        Path(args.diversity_memory_file).expanduser()
+        if str(args.diversity_memory_file).strip()
+        else out_dir / 'diversity_memory.json'
+    )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -2514,6 +2534,7 @@ def main() -> int:
         except ValueError as exc:
             print(f'Invalid LLM context file: {exc}')
             return 1
+    diversity_memory = nide.load_diversity_memory(str(diversity_memory_path))
     if args.enforce_family_quota_parity:
         for profile in quota_profiles:
             ok, msg = validate_quota_profile(active_families=active_families, quota_profile=profile)
@@ -2634,6 +2655,7 @@ def main() -> int:
         f'heartbeat_interval_s={args.heartbeat_interval_s} '
         f'live_progress={args.live_progress} live_patterns={live_patterns} '
         f'llm_context_enabled={bool(llm_context_packet)} '
+        f'diversity_memory_file={diversity_memory_path} '
         f'llm_attribution_headers={bool(str(args.llm_openrouter_http_referer).strip() or str(args.llm_openrouter_x_title).strip())}'
     )
 
@@ -2805,6 +2827,7 @@ def main() -> int:
 
     while run_count < max(1, args.max_runs) and time.monotonic() < deadline:
         run_count += 1
+        diversity_memory = nide.load_diversity_memory(str(diversity_memory_path))
         run_started = time.monotonic()
         run_stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
         run_id = f'run_{run_count:03d}_{run_stamp}'
@@ -2889,6 +2912,7 @@ def main() -> int:
                 scope=scope,
                 seen_shortlist=seen_shortlist,
                 context_packet=llm_context_packet,
+                diversity_memory=diversity_memory,
             )
             print(
                 f'llm_ideation_complete run={run_id} status={llm_report.get("status")} '
@@ -2987,6 +3011,7 @@ def main() -> int:
             f'--output={run_csv}',
             f'--json-output={run_json}',
             f'--run-log={run_log}',
+            f'--diversity-memory-file={diversity_memory_path}',
         ]
         if args.generator_seeds.strip():
             generator_cmd.append(f'--seeds={args.generator_seeds.strip()}')
@@ -3078,6 +3103,137 @@ def main() -> int:
             continue
 
         hard_fail_ratio = nide.compute_hard_fail_ratio(run_csv)
+        updated_diversity_memory = nide.update_diversity_memory(
+            path=diversity_memory_path,
+            run_csv=run_csv,
+        )
+        if updated_diversity_memory:
+            diversity_memory = updated_diversity_memory
+        assert_cmd = [
+            'python3',
+            str(root / 'scripts' / 'branding' / 'naming_db.py'),
+            '--db',
+            str(db_path_worker),
+            'assert-contract',
+            '--min-candidates=10',
+            '--require-shortlist',
+        ]
+        if args.ideation_only:
+            code = run_cmd(assert_cmd, cwd=root, log_path=assert_log)
+            if code != 0:
+                error_count += 1
+                last_status = 'assert_failed'
+                print(f'run_failed idx={run_count} stage=assert_contract exit={code} log={assert_log}')
+                if error_count >= max(1, args.max_errors):
+                    break
+                if time.monotonic() < deadline:
+                    time.sleep(max(0, args.sleep_s))
+                continue
+
+            shortlist = load_shortlist_names(run_csv)
+            new_names = [name for name in shortlist if name not in seen_shortlist]
+            seen_shortlist.update(new_names)
+            novelty_window.append(len(new_names))
+            if new_names:
+                with seen_names_path.open('a', encoding='utf-8') as handle:
+                    for name in new_names:
+                        handle.write(f'{name}\n')
+
+            run_status = 'ok_ideation_only'
+            if llm_active_for_run and llm_artifact is None:
+                llm_stage = str(llm_report.get('status') or 'missing').strip().lower() or 'missing'
+                run_status = f'ok_ideation_only_llm_degraded_{llm_stage}'
+            duration_s = int(time.monotonic() - run_started)
+            append_progress_row(
+                progress_csv,
+                {
+                    'run': run_count,
+                    'arm': arm,
+                    'llm_active': int(llm_active_for_run),
+                    'llm_provider': llm_report.get('provider', ''),
+                    'llm_model': llm_report.get('model', ''),
+                    'llm_candidate_count': llm_report.get('candidate_count', 0),
+                    'llm_cost_usd': llm_report.get('cost_usd', 0.0),
+                    'llm_stage_status': llm_report.get('status', 'skipped'),
+                    'llm_slo_status': (llm_report.get('slo') or {}).get('status', 'skipped'),
+                    'llm_slo_success_rate': (llm_report.get('slo') or {}).get('success_rate', 0.0),
+                    'llm_slo_timeout_rate': (llm_report.get('slo') or {}).get('timeout_rate', 0.0),
+                    'llm_slo_empty_rate': (llm_report.get('slo') or {}).get('empty_rate', 0.0),
+                    'llm_slo_breaches': json.dumps((llm_report.get('slo') or {}).get('breaches', []), ensure_ascii=False),
+                    'shard_id': args.shard_id,
+                    'shard_count': args.shard_count,
+                    'shard_combo_count': len(shard_combos),
+                    'shard_scheduling': str(shard_schedule_meta.get('mode') or args.shard_scheduling),
+                    'combo_key': combo_key,
+                    'history_skip_count': history_skip_count,
+                    'history_skip_generated_count': history_skip_generated_count,
+                    'timestamp': dt.datetime.now().isoformat(timespec='seconds'),
+                    'scope': scope,
+                    'gate': gate,
+                    'source_influence_share': f'{share:.2f}',
+                    'quota_profile': quota_profile,
+                    'quota_profile_effective': quota_profile_effective,
+                    'shortlist_count': len(shortlist),
+                    'new_shortlist_count': len(new_names),
+                    'hard_fail_ratio': round(hard_fail_ratio, 6),
+                    'cumulative_unique_shortlist': len(seen_shortlist),
+                    'validator_total_jobs': 0,
+                    'validator_status_counts': json.dumps({}, ensure_ascii=False),
+                    'validator_tier_result_counts': json.dumps({}, ensure_ascii=False),
+                    'status': run_status,
+                    'duration_s': duration_s,
+                },
+            )
+
+            if args.ab_mode and arm in {'A', 'B'}:
+                ab_metrics.append(
+                    {
+                        'arm': arm,
+                        'new_shortlist_count': float(len(new_names)),
+                        'hard_fail_ratio': float(hard_fail_ratio),
+                    }
+                )
+
+            remaining_s = max(0, int(deadline - time.monotonic()))
+            print(
+                f'run_done idx={run_count} arm={arm} duration_s={duration_s} shortlist={len(shortlist)} '
+                f'new={len(new_names)} unique_total={len(seen_shortlist)} '
+                f'hard_fail_ratio={hard_fail_ratio:.4f} validator_total_jobs=0 '
+                f'history_skip={history_skip_count} history_skip_generated={history_skip_generated_count} '
+                f'llm_stage_status={llm_report.get("status", "")} llm_candidates={llm_report.get("candidate_count", 0)} '
+                f'status={run_status} '
+                f'remaining_s={remaining_s} shard={args.shard_id + 1}/{args.shard_count}'
+            )
+            emit_campaign_event(
+                enabled=bool(args.heartbeat_events),
+                heartbeat_path=heartbeat_path,
+                event='run_complete',
+                run=run_count,
+                run_id=run_id,
+                status=run_status,
+                duration_s=duration_s,
+                shortlist_count=len(shortlist),
+                new_shortlist_count=len(new_names),
+                validator_total_jobs=0,
+                history_skip_count=int(history_skip_count),
+                history_skip_generated_count=int(history_skip_generated_count),
+            )
+            last_status = run_status
+
+            if (
+                len(novelty_window) >= max(1, args.stop_window)
+                and sum(novelty_window) < max(0, args.stop_min_new)
+            ):
+                print(
+                    f'early_stop triggered: novelty_window={list(novelty_window)} '
+                    f'sum={sum(novelty_window)} < stop_min_new={args.stop_min_new}'
+                )
+                last_status = 'early_stop_low_novelty'
+                break
+
+            if time.monotonic() < deadline and run_count < max(1, args.max_runs):
+                time.sleep(max(0, args.sleep_s))
+            continue
 
         validator_runtime = derive_validator_runtime_settings(
             requested_concurrency=int(args.validator_concurrency),
@@ -3175,15 +3331,6 @@ def main() -> int:
                 time.sleep(max(0, args.sleep_s))
             continue
 
-        assert_cmd = [
-            'python3',
-            str(root / 'scripts' / 'branding' / 'naming_db.py'),
-            '--db',
-            str(db_path_worker),
-            'assert-contract',
-            '--min-candidates=10',
-            '--require-shortlist',
-        ]
         code = run_cmd(assert_cmd, cwd=root, log_path=assert_log)
         if code != 0:
             error_count += 1
@@ -3374,6 +3521,7 @@ def main() -> int:
         'unique_shortlist_names': int(len(seen_shortlist)),
         'progress_csv': str(progress_csv),
         'seen_shortlist_names_path': str(seen_names_path),
+        'diversity_memory_path': str(diversity_memory_path),
         'ab_mode': bool(args.ab_mode),
         'ab_report_json': str(ab_report_paths[0]) if ab_report_paths else '',
         'ab_report_md': str(ab_report_paths[1]) if ab_report_paths else '',

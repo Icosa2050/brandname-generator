@@ -4,6 +4,7 @@ import inspect
 import math
 import os
 import re
+from collections import Counter
 
 from .models import Brief, LexiconBundle, PseudowordConfig
 
@@ -36,6 +37,75 @@ STOPWORDS = {
 }
 PSEUDOWORD_MIN_GENERATED = 6
 PSEUDOWORD_MIN_SUCCESSFUL_SEEDS = 2
+RARE_PROFILES = frozenset({"balanced", "aggressive"})
+LOW_FREQUENCY_CONSONANTS = frozenset("jkvwxz")
+RARE_INITIAL_CONSONANTS = {
+    "balanced": ("z", "v", "k", "t", "d", "g", "f", "s"),
+    "aggressive": ("z", "v", "k", "t", "d", "g", "f", "s", "x", "p", "b"),
+}
+RARE_INITIAL_CLUSTERS = {
+    "balanced": ("vr", "kv", "tv", "zl", "cl", "cr", "gr", "kr", "tr", "dr"),
+    "aggressive": ("zk", "zv", "vr", "kv", "tv", "zl", "xr", "xl", "cl", "cr", "gr", "kr", "tr", "dr"),
+}
+RARE_INTERNAL_CLUSTERS = {
+    "balanced": ("vr", "kv", "tv", "zl", "rn", "rv", "lm", "vl"),
+    "aggressive": ("vr", "kv", "tv", "zl", "rn", "rv", "lm", "vl", "nv", "lx", "zr", "rk"),
+}
+RARE_DIPHTHONGS = {
+    "balanced": ("ae", "eo", "io", "ua", "ue"),
+    "aggressive": ("ae", "ao", "eo", "io", "ua", "ue", "uo", "oa"),
+}
+RARE_TAILS_SHORT = {
+    "balanced": ("or", "on", "ar", "en", "ev", "un", "ix", "el"),
+    "aggressive": ("or", "on", "ar", "en", "ev", "un", "ix", "el", "al", "ur"),
+}
+RARE_TAILS_LONG = {
+    "balanced": ("nor", "vek", "zar", "len", "vak", "rix"),
+    "aggressive": ("nor", "vek", "zar", "len", "vak", "rix", "vor", "mel", "dal", "sen"),
+}
+RARE_LIQUIDS = ("r", "l", "n", "m")
+RARE_CODAS = ("n", "r", "l", "m", "v", "k", "z", "x")
+ROMANCE_LIKE_ENDINGS = (
+    "ia",
+    "io",
+    "ium",
+    "ius",
+    "aria",
+    "eria",
+    "ella",
+    "etta",
+    "anza",
+    "enza",
+    "ano",
+    "ino",
+    "ora",
+)
+GERMAN_LIKE_CLUSTERS = ("sch", "cht", "tz", "pf", "sp", "st", "ei", "ie", "au")
+ENGLISH_LIKE_MORPHEMES = (
+    "land",
+    "rent",
+    "home",
+    "house",
+    "prop",
+    "flow",
+    "fund",
+    "bank",
+    "pay",
+    "cash",
+    "bill",
+    "safe",
+    "trust",
+    "ledger",
+    "tax",
+    "ware",
+    "soft",
+    "cloud",
+    "logic",
+    "smart",
+    "guard",
+    "sure",
+)
+COMMON_BIGRAMS = ("th", "he", "in", "er", "an", "re", "on", "at", "nd")
 
 
 def _normalize_alpha(value: str) -> str:
@@ -141,16 +211,243 @@ def _plugin_target_counts(total: int, plugin_count: int) -> list[int]:
     return [base + (1 if index < remainder else 0) for index in range(plugin_count)]
 
 
-def generate_pseudoword_pool(
+def _rare_profile(config: PseudowordConfig) -> str:
+    profile = str(config.rare_profile or "").strip().lower()
+    return profile if profile in RARE_PROFILES else ""
+
+
+def _blocked_lexical_fragments(
+    *,
+    brief: Brief,
+    lexicon: LexiconBundle | None,
+    seed_words: list[str],
+) -> tuple[str, ...]:
+    blocked = {fragment for fragment in ENGLISH_LIKE_MORPHEMES}
+    texts: list[str] = [
+        brief.product_core,
+        *brief.target_users,
+        *brief.trust_signals,
+        *brief.forbidden_directions,
+        brief.notes,
+        *seed_words,
+    ]
+    if lexicon is not None:
+        texts.extend(
+            [
+                *lexicon.core_terms,
+                *lexicon.modifiers,
+                *lexicon.associative_terms,
+                *lexicon.avoid_terms,
+            ]
+        )
+    for text in texts:
+        for token in SEED_TOKEN_RE.findall(str(text or "").lower()):
+            cleaned = _normalize_alpha(token)
+            if len(cleaned) < 4 or cleaned in STOPWORDS:
+                continue
+            blocked.add(cleaned)
+    return tuple(sorted(blocked))
+
+
+def _looks_japanese_like_cv_shape(value: str) -> bool:
+    pieces = re.findall(r"[bcdfghjklmnpqrstvwxyz]{1,2}[aeiou]", value)
+    return len(pieces) >= 3 and "".join(pieces) == value
+
+
+def _has_rare_markers(value: str, *, initial_clusters: tuple[str, ...], internal_clusters: tuple[str, ...]) -> bool:
+    return (
+        bool(set(value) & LOW_FREQUENCY_CONSONANTS)
+        or any(cluster in value for cluster in initial_clusters)
+        or any(cluster in value for cluster in internal_clusters)
+    )
+
+
+def _is_low_collision_shape(
+    value: str,
+    *,
+    blocked_fragments: tuple[str, ...],
+    initial_clusters: tuple[str, ...],
+    internal_clusters: tuple[str, ...],
+) -> bool:
+    if not _is_valid_pseudoword(value):
+        return False
+    if re.search(r"[aeiouy]{3,}", value):
+        return False
+    if re.search(r"[^aeiouy]{4,}", value):
+        return False
+    if sum(1 for char in value if char in "aeiouy") < 2:
+        return False
+    if _looks_japanese_like_cv_shape(value):
+        return False
+    if any(value.endswith(suffix) for suffix in ROMANCE_LIKE_ENDINGS):
+        return False
+    if any(cluster in value for cluster in GERMAN_LIKE_CLUSTERS):
+        return False
+    if any(fragment in value for fragment in blocked_fragments):
+        return False
+    return _has_rare_markers(value, initial_clusters=initial_clusters, internal_clusters=internal_clusters)
+
+
+def _rare_candidate_score(
+    value: str,
+    *,
+    initial_clusters: tuple[str, ...],
+    internal_clusters: tuple[str, ...],
+    diphthongs: tuple[str, ...],
+) -> int:
+    low_freq_chars = len({char for char in value if char in LOW_FREQUENCY_CONSONANTS})
+    cluster_hits = sum(1 for cluster in initial_clusters if cluster in value)
+    cluster_hits += sum(1 for cluster in internal_clusters if cluster in value)
+    diphthong_hits = sum(1 for diphthong in diphthongs if diphthong in value)
+    common_bigram_hits = sum(1 for bigram in COMMON_BIGRAMS if bigram in value)
+    return (low_freq_chars * 2) + (cluster_hits * 3) + (diphthong_hits * 2) - common_bigram_hits
+
+
+def _generate_rare_pronounceable_pool(
     *,
     brief: Brief,
     config: PseudowordConfig,
-    lexicon: LexiconBundle | None = None,
+    lexicon: LexiconBundle | None,
+    seed_words: list[str],
+    seen: set[str],
 ) -> tuple[list[str], dict[str, object]]:
-    seed_words = derive_seed_words_from_lexicon(lexicon) if lexicon is not None else derive_seed_words(brief)
+    requested = max(0, int(config.rare_seed_count))
+    profile = _rare_profile(config)
+    report: dict[str, object] = {
+        "requested_count": requested,
+        "generated_count": 0,
+        "profile": profile or "off",
+        "warning": "",
+        "pattern_counts": {},
+        "sample_scores": {},
+    }
+    if requested <= 0:
+        return [], report
+    if not profile:
+        report["warning"] = "unsupported_rare_profile"
+        return [], report
+
+    initial_consonants = RARE_INITIAL_CONSONANTS[profile]
+    initial_clusters = RARE_INITIAL_CLUSTERS[profile]
+    internal_clusters = RARE_INTERNAL_CLUSTERS[profile]
+    diphthongs = RARE_DIPHTHONGS[profile]
+    tails_short = RARE_TAILS_SHORT[profile]
+    tails_long = RARE_TAILS_LONG[profile]
+    blocked_fragments = _blocked_lexical_fragments(brief=brief, lexicon=lexicon, seed_words=seed_words)
+    min_score = 6 if profile == "balanced" else 8
+    candidate_rows: list[dict[str, object]] = []
+    seen_candidates: set[str] = set(seen)
+
+    def consider(name: str, pattern: str) -> None:
+        normalized = _normalize_alpha(name)
+        if normalized in seen_candidates:
+            return
+        if not _is_low_collision_shape(
+            normalized,
+            blocked_fragments=blocked_fragments,
+            initial_clusters=initial_clusters,
+            internal_clusters=internal_clusters,
+        ):
+            return
+        score = _rare_candidate_score(
+            normalized,
+            initial_clusters=initial_clusters,
+            internal_clusters=internal_clusters,
+            diphthongs=diphthongs,
+        )
+        if score < min_score:
+            return
+        candidate_rows.append({"name": normalized, "pattern": pattern, "score": score})
+        seen_candidates.add(normalized)
+
+    for cluster in initial_clusters:
+        for vowel in ("a", "e", "i", "o", "u"):
+            for liquid in RARE_LIQUIDS:
+                for tail in tails_short:
+                    consider(f"{cluster}{vowel}{liquid}{tail}", "cluster_vowel_liquid_tail")
+
+    for consonant in initial_consonants:
+        for cluster in internal_clusters:
+            for vowel in ("a", "e", "i", "o", "u"):
+                for tail in tails_short:
+                    consider(f"{consonant}{cluster}{vowel}{tail}", "single_cluster_vowel_tail")
+
+    for cluster in initial_clusters:
+        for diphthong in diphthongs:
+            for tail in tails_short:
+                consider(f"{cluster}{diphthong}{tail}", "cluster_diphthong_tail")
+
+    for consonant in initial_consonants:
+        for vowel in ("a", "e", "i", "o", "u"):
+            for cluster in internal_clusters:
+                for tail in tails_short:
+                    consider(f"{consonant}{vowel}{cluster}{tail}", "single_vowel_cluster_tail")
+
+    if profile == "aggressive":
+        for cluster in initial_clusters:
+            for vowel in ("a", "e", "i", "o", "u"):
+                for coda in RARE_CODAS:
+                    for tail in tails_long:
+                        consider(f"{cluster}{vowel}{coda}{tail}", "cluster_vowel_coda_longtail")
+
+        for consonant in initial_consonants:
+            for diphthong in diphthongs:
+                for coda in RARE_CODAS:
+                    for tail in tails_long:
+                        consider(f"{consonant}{diphthong}{coda}{tail}", "single_diphthong_coda_longtail")
+
+    ranked = sorted(
+        candidate_rows,
+        key=lambda row: (
+            -int(row["score"]),
+            len(str(row["name"])),
+            str(row["pattern"]),
+            str(row["name"]),
+        ),
+    )
+    selected: list[dict[str, object]] = []
+    prefix_counts: Counter[str] = Counter()
+    ending_counts: Counter[str] = Counter()
+    for row in ranked:
+        name = str(row["name"])
+        prefix = name[:2]
+        ending = name[-2:]
+        if prefix_counts[prefix] >= 2 or ending_counts[ending] >= 2:
+            continue
+        selected.append(row)
+        prefix_counts[prefix] += 1
+        ending_counts[ending] += 1
+        if len(selected) >= requested:
+            break
+    if len(selected) < requested:
+        selected_names = {str(row["name"]) for row in selected}
+        for row in ranked:
+            name = str(row["name"])
+            if name in selected_names:
+                continue
+            selected.append(row)
+            selected_names.add(name)
+            if len(selected) >= requested:
+                break
+
+    names = [str(row["name"]) for row in selected]
+    report["generated_count"] = len(names)
+    report["blocked_fragment_count"] = len(blocked_fragments)
+    report["min_score"] = min_score
+    report["pattern_counts"] = dict(Counter(str(row["pattern"]) for row in selected))
+    report["sample_scores"] = {str(row["name"]): int(row["score"]) for row in selected[:10]}
+    if not names:
+        report["warning"] = "rare_pronounceable_empty"
+    return names, report
+
+
+def _generate_wuggy_pseudowords(
+    *,
+    seed_words: list[str],
+    config: PseudowordConfig,
+) -> tuple[list[str], dict[str, object]]:
     language_plugins = _configured_language_plugins(config)
     report: dict[str, object] = {
-        "enabled": True,
         "engine": "wuggy",
         "language_plugin": language_plugins[0],
         "language_plugins": list(language_plugins),
@@ -163,6 +460,8 @@ def generate_pseudoword_pool(
         "plugin_reports": [],
         "warning": "",
     }
+    if int(config.seed_count) <= 0:
+        return [], report
     if not seed_words:
         report["warning"] = "no_seed_words"
         return [], report
@@ -286,10 +585,7 @@ def generate_pseudoword_pool(
     report["successful_seed_count"] = successful_seed_count
     report["dropped_seeds"] = dropped_seeds
     plugin_reports = report["plugin_reports"] if isinstance(report["plugin_reports"], list) else []
-    if any(
-        isinstance(item, dict) and bool(item.get("downloaded_plugin"))
-        for item in plugin_reports
-    ):
+    if any(isinstance(item, dict) and bool(item.get("downloaded_plugin")) for item in plugin_reports):
         report["downloaded_plugin"] = True
     if not names:
         if len(plugin_reports) == 1 and isinstance(plugin_reports[0], dict) and plugin_reports[0].get("warning"):
@@ -307,4 +603,74 @@ def generate_pseudoword_pool(
     elif len(names) < int(report["min_generated_count"]) or successful_seed_count < int(report["min_successful_seeds"]):
         report["warning"] = "insufficient_pseudoword_yield"
     report["generated_count"] = len(names)
+    return names, report
+
+
+def generate_pseudoword_pool(
+    *,
+    brief: Brief,
+    config: PseudowordConfig,
+    lexicon: LexiconBundle | None = None,
+) -> tuple[list[str], dict[str, object]]:
+    seed_words = derive_seed_words_from_lexicon(lexicon) if lexicon is not None else derive_seed_words(brief)
+    wuggy_names, wuggy_report = _generate_wuggy_pseudowords(seed_words=seed_words, config=config)
+    rare_names, rare_report = _generate_rare_pronounceable_pool(
+        brief=brief,
+        config=config,
+        lexicon=lexicon,
+        seed_words=seed_words,
+        seen=set(seed_words) | set(wuggy_names),
+    )
+    names: list[str] = []
+    seen: set[str] = set(seed_words)
+    engines: list[str] = []
+    for engine_name, batch in (
+        ("rare_pronounceable", rare_names),
+        ("wuggy", wuggy_names),
+    ):
+        if batch:
+            engines.append(engine_name)
+        for name in batch:
+            if name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+
+    requested_total = max(0, int(config.seed_count)) + max(0, int(config.rare_seed_count))
+    min_generated_count = 0
+    if requested_total > 0:
+        min_generated_count = min(
+            requested_total,
+            max(PSEUDOWORD_MIN_GENERATED, math.ceil(requested_total * 0.5)),
+        )
+    report: dict[str, object] = {
+        "enabled": True,
+        "engine": "+".join(engines) if engines else ("wuggy" if int(config.seed_count) > 0 else "rare_pronounceable"),
+        "engines": engines,
+        "language_plugin": str(wuggy_report.get("language_plugin") or config.language_plugin),
+        "language_plugins": list(wuggy_report.get("language_plugins") or _configured_language_plugins(config)),
+        "requested_count": requested_total,
+        "wuggy_requested_count": int(config.seed_count),
+        "rare_requested_count": int(config.rare_seed_count),
+        "seed_words": seed_words,
+        "generated_count": len(names),
+        "attempted_seed_count": int(wuggy_report.get("attempted_seed_count") or 0),
+        "successful_seed_count": int(wuggy_report.get("successful_seed_count") or 0),
+        "dropped_seeds": list(wuggy_report.get("dropped_seeds") or []),
+        "plugin_reports": list(wuggy_report.get("plugin_reports") or []),
+        "warning": "",
+        "min_generated_count": min_generated_count,
+        "wuggy": wuggy_report,
+        "rare_pronounceable": rare_report,
+    }
+    if wuggy_report.get("downloaded_plugin"):
+        report["downloaded_plugin"] = True
+    if not names:
+        report["warning"] = str(rare_report.get("warning") or wuggy_report.get("warning") or "no_pseudowords_generated")
+        for key in ("supported_plugins", "error_class", "error_message"):
+            if wuggy_report.get(key):
+                report[key] = wuggy_report[key]
+        return [], report
+    if min_generated_count > 0 and len(names) < min_generated_count:
+        report["warning"] = "insufficient_pseudoword_yield"
     return names, report

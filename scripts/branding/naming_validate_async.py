@@ -930,29 +930,96 @@ def resolve_shortlist_run_id(conn: sqlite3.Connection, preferred_run_id: int = 0
     return int(row[0])
 
 
+def _load_deduped_shortlist_rows(
+    conn: sqlite3.Connection,
+    shortlist_run_id: int,
+    *,
+    limit: int | None = None,
+) -> list[tuple[int, str, str, float, str, int, str, str]]:
+    if int(shortlist_run_id) <= 0:
+        return []
+    params: list[int] = [int(shortlist_run_id), int(shortlist_run_id)]
+    limit_sql = ''
+    if limit is not None:
+        params.append(max(1, int(limit)))
+        limit_sql = 'LIMIT ?'
+    rows = conn.execute(
+        f"""
+        WITH ranked_shortlist AS (
+          SELECT
+            sd.id AS shortlist_decision_id,
+            sd.candidate_id,
+            COALESCE(sd.shortlist_rank, 999999) AS shortlist_rank_sort,
+            ROW_NUMBER() OVER (
+              PARTITION BY sd.candidate_id
+              ORDER BY COALESCE(sd.shortlist_rank, 999999), sd.id DESC
+            ) AS shortlist_choice_rank
+          FROM shortlist_decisions sd
+          WHERE sd.run_id = ?
+            AND sd.selected = 1
+        ),
+        deduped_shortlist AS (
+          SELECT shortlist_decision_id, candidate_id, shortlist_rank_sort
+          FROM ranked_shortlist
+          WHERE shortlist_choice_rank = 1
+        ),
+        ranked_candidates AS (
+          SELECT
+            ds.candidate_id,
+            c.name_display,
+            c.state,
+            COALESCE(cs.total_score, c.current_score, c.score_total, 0.0) AS total_score,
+            COALESCE(cs.recommendation, c.current_recommendation, '') AS recommendation,
+            COALESCE(sd.shortlist_rank, 0) AS shortlist_rank,
+            COALESCE(sd.bucket_key, '') AS shortlist_bucket,
+            COALESCE(sd.reason, '') AS shortlist_reason,
+            ds.shortlist_rank_sort,
+            ROW_NUMBER() OVER (
+              PARTITION BY ds.candidate_id
+              ORDER BY cs.id DESC
+            ) AS score_choice_rank
+          FROM deduped_shortlist ds
+          JOIN shortlist_decisions sd ON sd.id = ds.shortlist_decision_id
+          JOIN candidates c ON c.id = ds.candidate_id
+          LEFT JOIN candidate_scores cs
+            ON cs.candidate_id = ds.candidate_id
+           AND cs.run_id = ?
+        )
+        SELECT
+          candidate_id,
+          name_display,
+          state,
+          total_score,
+          recommendation,
+          shortlist_rank,
+          shortlist_bucket,
+          shortlist_reason
+        FROM ranked_candidates
+        WHERE score_choice_rank = 1
+        ORDER BY shortlist_rank_sort, LOWER(name_display), candidate_id
+        {limit_sql}
+        """,
+        tuple(params),
+    ).fetchall()
+    return [
+        (
+            int(row[0]),
+            str(row[1]),
+            str(row[2]),
+            float(row[3] or 0.0),
+            str(row[4] or ''),
+            int(row[5] or 0),
+            str(row[6] or ''),
+            str(row[7] or ''),
+        )
+        for row in rows
+    ]
+
+
 def load_shortlist_candidates(conn: sqlite3.Connection, shortlist_run_id: int, limit: int) -> list[CandidateRow]:
     if int(shortlist_run_id) <= 0:
         return []
-    rows = conn.execute(
-        """
-        SELECT
-          c.id,
-          c.name_display,
-          c.state,
-          COALESCE(cs.total_score, c.current_score, c.score_total, 0.0) AS current_score,
-          COALESCE(cs.recommendation, c.current_recommendation, '') AS current_recommendation
-        FROM shortlist_decisions sd
-        JOIN candidates c ON c.id = sd.candidate_id
-        LEFT JOIN candidate_scores cs
-          ON cs.candidate_id = sd.candidate_id
-         AND cs.run_id = sd.run_id
-        WHERE sd.run_id = ?
-          AND sd.selected = 1
-        ORDER BY COALESCE(sd.shortlist_rank, 999999), LOWER(c.name_display), c.id
-        LIMIT ?
-        """,
-        (int(shortlist_run_id), max(1, int(limit))),
-    ).fetchall()
+    rows = _load_deduped_shortlist_rows(conn, int(shortlist_run_id), limit=max(1, int(limit)))
     return [
         CandidateRow(
             candidate_id=int(row[0]),
@@ -2225,6 +2292,11 @@ def _stringify_reason(check_type: str, status: str, reason: str) -> str:
     return ':'.join(part for part in parts if part)
 
 
+def _is_timeout_like_reason(reason: str) -> bool:
+    token = str(reason or '').strip().lower()
+    return 'timeout' in token
+
+
 def _run_config_dict(raw: object) -> dict[str, object]:
     if isinstance(raw, dict):
         return raw
@@ -2345,26 +2417,7 @@ def export_validation_publish_artifacts(
 ) -> dict[str, object]:
     publish_policy = resolve_publish_policy(conn, validation_run_id=run_id)
     source_run_id = resolve_publish_source_run_id(conn, validation_run_id=run_id)
-    shortlist_rows = conn.execute(
-        """
-        SELECT
-          c.id,
-          c.name_display,
-          COALESCE(cs.total_score, c.current_score, c.score_total, 0.0) AS total_score,
-          COALESCE(cs.recommendation, c.current_recommendation, '') AS recommendation,
-          COALESCE(sd.shortlist_rank, 0) AS shortlist_rank,
-          COALESCE(sd.bucket_key, '') AS shortlist_bucket,
-          COALESCE(sd.reason, '') AS shortlist_reason
-        FROM shortlist_decisions sd
-        JOIN candidates c ON c.id = sd.candidate_id
-        LEFT JOIN candidate_scores cs
-          ON cs.candidate_id = sd.candidate_id
-         AND cs.run_id = sd.run_id
-        WHERE sd.run_id = ? AND sd.selected = 1
-        ORDER BY COALESCE(sd.shortlist_rank, 999999), LOWER(c.name_display), c.id
-        """,
-        (source_run_id,),
-    ).fetchall()
+    shortlist_rows = _load_deduped_shortlist_rows(conn, source_run_id)
     shortlist_candidate_ids = [int(row[0]) for row in shortlist_rows]
     results_by_candidate: dict[int, list[tuple[str, str, str]]] = {}
     run_policy_cache: dict[int, tuple[str, str, dict[str, object]]] = {}
@@ -2434,10 +2487,20 @@ def export_validation_publish_artifacts(
     survivors: list[dict[str, str]] = []
     review_queue: list[dict[str, str]] = []
     rejected: list[dict[str, str]] = []
+    pending_coverage: list[dict[str, str]] = []
     missing_validation_count = 0
     missing_required_check_count = 0
 
-    for candidate_id, name_display, total_score, recommendation, shortlist_rank, shortlist_bucket, shortlist_reason in shortlist_rows:
+    for (
+        candidate_id,
+        name_display,
+        _candidate_state,
+        total_score,
+        recommendation,
+        shortlist_rank,
+        shortlist_bucket,
+        shortlist_reason,
+    ) in shortlist_rows:
         blocker_reasons: list[str] = []
         review_reasons: list[str] = []
         candidate_results = results_by_candidate.get(int(candidate_id), [])
@@ -2447,6 +2510,9 @@ def export_validation_publish_artifacts(
             if trusted_result:
                 seen_checks.add(check_type)
             reason_text = _stringify_reason(check_type, status, reason)
+            if status == 'error' and _is_timeout_like_reason(reason):
+                review_reasons.append(reason_text)
+                continue
             if status in {'fail', 'error'}:
                 blocker_reasons.append(reason_text)
                 continue
@@ -2472,7 +2538,10 @@ def export_validation_publish_artifacts(
             'blocker_reasons': ';'.join(blocker_reasons),
             'review_reasons': ';'.join(review_reasons),
         }
-        if blocker_reasons:
+        if not candidate_results:
+            row['publish_bucket'] = 'pending_coverage'
+            pending_coverage.append(row)
+        elif blocker_reasons:
             row['publish_bucket'] = 'rejected'
             rejected.append(row)
         elif review_reasons:
@@ -2487,6 +2556,7 @@ def export_validation_publish_artifacts(
     survivors_csv = postrank_dir / 'validated_survivors.csv'
     review_csv = postrank_dir / 'validated_review_queue.csv'
     rejected_csv = postrank_dir / 'validated_rejected.csv'
+    pending_csv = postrank_dir / 'validated_pending_coverage.csv'
     summary_json = postrank_dir / 'validated_publish_summary.json'
 
     def _write_csv(path: Path, items: list[dict[str, str]]) -> None:
@@ -2498,6 +2568,7 @@ def export_validation_publish_artifacts(
     _write_csv(survivors_csv, survivors)
     _write_csv(review_csv, review_queue)
     _write_csv(rejected_csv, rejected)
+    _write_csv(pending_csv, pending_coverage)
 
     summary = {
         'run_id': int(run_id),
@@ -2506,6 +2577,7 @@ def export_validation_publish_artifacts(
         'survivor_count': len(survivors),
         'review_count': len(review_queue),
         'rejected_count': len(rejected),
+        'pending_coverage_count': len(pending_coverage),
         'missing_validation_count': int(missing_validation_count),
         'missing_required_check_count': int(missing_required_check_count),
         'required_checks': list(publish_policy['required_checks']),
@@ -2513,9 +2585,11 @@ def export_validation_publish_artifacts(
         'survivors_csv': str(survivors_csv),
         'review_csv': str(review_csv),
         'rejected_csv': str(rejected_csv),
+        'pending_csv': str(pending_csv),
         'top_survivor_names': [str(row.get('name') or '') for row in survivors[:20]],
         'top_review_names': [str(row.get('name') or '') for row in review_queue[:20]],
         'top_rejected_names': [str(row.get('name') or '') for row in rejected[:20]],
+        'top_pending_coverage_names': [str(row.get('name') or '') for row in pending_coverage[:20]],
     }
     summary_json.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
     return summary
@@ -2907,7 +2981,13 @@ def demote_checked_candidates_with_validation_failures(
                 FROM validation_results vr
                 WHERE vr.candidate_id = c.id
                   AND vr.check_type IN ('domain', 'web', 'app_store', 'package', 'social')
-                  AND vr.status IN ('fail', 'error')
+                  AND (
+                    vr.status = 'fail'
+                    OR (
+                      vr.status = 'error'
+                      AND LOWER(COALESCE(vr.reason, '')) NOT LIKE '%timeout%'
+                    )
+                  )
             )
           )
         """

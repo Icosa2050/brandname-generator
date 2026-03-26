@@ -20,6 +20,7 @@ import datetime as dt
 import html
 import itertools
 import json
+import math
 import os
 import re
 import sqlite3
@@ -28,7 +29,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol
 from urllib import error, parse, request
 
 import path_config as bpaths
@@ -490,6 +491,8 @@ class Candidate:
     gibberish_flags: str = ''
     false_friend_risk: int = 0
     false_friend_hits: str = ''
+    novelty_penalty: int = 0
+    novelty_flags: str = ''
     shortlist_selected: bool = False
     shortlist_rank: int = 0
     shortlist_bucket: str = ''
@@ -983,6 +986,125 @@ def seed_base_atom(parts: Iterable[str], *, fallback_name: str = '') -> str:
     for atom in atoms:
         return atom
     return normalize_alpha(fallback_name)[:6]
+
+
+def _sanitize_diversity_counter_map(raw: Any, *, max_items: int, max_key_len: int = 16) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    items: list[tuple[str, int]] = []
+    for key, value in raw.items():
+        token = normalize_alpha(str(key or ''))[:max_key_len]
+        if not token:
+            continue
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        items.append((token, count))
+    items.sort(key=lambda item: (-item[1], item[0]))
+    return {key: value for key, value in items[: max(1, max_items)]}
+
+
+def load_diversity_memory(path: str) -> dict[str, Any]:
+    file_path = Path(str(path or '').strip()).expanduser()
+    if not str(path or '').strip() or not file_path.exists():
+        return {}
+    try:
+        payload = json.loads(file_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    recent_names = [normalize_alpha(str(item or '')) for item in payload.get('recent_names', []) if normalize_alpha(str(item or ''))]
+    avoid_names = [normalize_alpha(str(item or '')) for item in payload.get('avoid_names', []) if normalize_alpha(str(item or ''))]
+    return {
+        'recent_names': recent_names[:400],
+        'avoid_names': avoid_names[:160],
+        'prefix4_counts': _sanitize_diversity_counter_map(payload.get('prefix4_counts'), max_items=160, max_key_len=4),
+        'suffix3_counts': _sanitize_diversity_counter_map(payload.get('suffix3_counts'), max_items=160, max_key_len=3),
+        'phonetic_counts': _sanitize_diversity_counter_map(payload.get('phonetic_counts'), max_items=160, max_key_len=6),
+        'shape_counts': _sanitize_diversity_counter_map(payload.get('shape_counts'), max_items=96, max_key_len=12),
+        'primary_atom_counts': _sanitize_diversity_counter_map(payload.get('primary_atom_counts'), max_items=160, max_key_len=12),
+        'seed_base_counts': _sanitize_diversity_counter_map(payload.get('seed_base_counts'), max_items=160, max_key_len=12),
+    }
+
+
+def filter_generated_by_diversity_memory(
+    generated: list[GeneratedCandidate],
+    memory: dict[str, Any],
+) -> tuple[list[GeneratedCandidate], set[str]]:
+    blocked = {
+        normalize_alpha(name)
+        for name in list(memory.get('recent_names') or []) + list(memory.get('avoid_names') or [])
+        if normalize_alpha(name)
+    }
+    if not blocked:
+        return list(generated), set()
+    filtered: list[GeneratedCandidate] = []
+    skipped: set[str] = set()
+    for item in generated:
+        normalized = normalize_alpha(item.name)
+        if normalized and normalized in blocked:
+            skipped.add(normalized)
+            continue
+        filtered.append(item)
+    return filtered, skipped
+
+
+def apply_diversity_memory_penalties(candidates: list[Candidate], memory: dict[str, Any]) -> None:
+    prefix4_counts = dict(memory.get('prefix4_counts') or {})
+    suffix3_counts = dict(memory.get('suffix3_counts') or {})
+    phonetic_counts = dict(memory.get('phonetic_counts') or {})
+    shape_counts = dict(memory.get('shape_counts') or {})
+    primary_atom_counts = dict(memory.get('primary_atom_counts') or {})
+    seed_base_counts = dict(memory.get('seed_base_counts') or {})
+
+    for candidate in candidates:
+        penalty = 0
+        flags: list[str] = []
+        name = normalize_alpha(candidate.name)
+        prefix4 = name[:4]
+        suffix3 = name[-3:]
+        phonetic = phonetic_fingerprint(name)
+        shape = pattern_shape(name)[:8]
+        lineage_parts = lineage_atom_list(str(candidate.lineage_atoms or '').split(';'))
+        primary_atom = primary_diversity_atom(lineage_parts, fallback_name=name)
+        seed_base = seed_base_atom(lineage_parts, fallback_name=name) if candidate.generator_family == 'seed' else ''
+
+        prefix_count = int(prefix4_counts.get(prefix4, 0)) if len(prefix4) == 4 else 0
+        suffix_count = int(suffix3_counts.get(suffix3, 0)) if len(suffix3) == 3 else 0
+        phonetic_count = int(phonetic_counts.get(phonetic, 0)) if phonetic else 0
+        shape_count = int(shape_counts.get(shape, 0)) if shape else 0
+        primary_atom_count = int(primary_atom_counts.get(primary_atom, 0)) if primary_atom else 0
+        seed_base_count = int(seed_base_counts.get(seed_base, 0)) if seed_base else 0
+
+        if prefix_count >= 2:
+            penalty += min(14, 3 + prefix_count * 2)
+            flags.append(f'memory_prefix4:{prefix4}:{prefix_count}')
+        if suffix_count >= 3:
+            penalty += min(10, 2 + suffix_count)
+            flags.append(f'memory_suffix3:{suffix3}:{suffix_count}')
+        if phonetic_count >= 2:
+            penalty += min(16, 4 + phonetic_count * 3)
+            flags.append(f'memory_phonetic:{phonetic}:{phonetic_count}')
+        if shape_count >= 4:
+            penalty += min(8, shape_count)
+            flags.append(f'memory_shape:{shape}:{shape_count}')
+        if primary_atom_count >= 2:
+            penalty += min(14, 3 + primary_atom_count * 3)
+            flags.append(f'memory_atom:{primary_atom}:{primary_atom_count}')
+        if seed_base_count >= 2:
+            penalty += min(10, 2 + seed_base_count * 2)
+            flags.append(f'memory_seed:{seed_base}:{seed_base_count}')
+
+        candidate.novelty_penalty = penalty
+        candidate.novelty_flags = ';'.join(flags[:8])
+        if penalty <= 0:
+            continue
+        candidate.challenge_risk = min(100, candidate.challenge_risk + penalty)
+        candidate.total_score = max(0, min(100, candidate.total_score - int(math.ceil(penalty * 0.55))))
 
 
 def source_atom_role(atom: dict) -> str:
@@ -2894,6 +3016,8 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                 'gibberish_flags',
                 'false_friend_risk',
                 'false_friend_hits',
+                'novelty_penalty',
+                'novelty_flags',
                 'shortlist_selected',
                 'shortlist_rank',
                 'shortlist_bucket',
@@ -2959,6 +3083,8 @@ def write_csv(path: Path, scope: str, candidates: list[Candidate], gate: str) ->
                     c.gibberish_flags,
                     c.false_friend_risk,
                     c.false_friend_hits,
+                    c.novelty_penalty,
+                    c.novelty_flags,
                     c.shortlist_selected,
                     c.shortlist_rank,
                     c.shortlist_bucket,
@@ -3017,6 +3143,8 @@ def append_run_history(
                     'recommendation': rec,
                     'total_score': c.total_score,
                     'challenge_risk': c.challenge_risk,
+                    'novelty_penalty': c.novelty_penalty,
+                    'novelty_flags': c.novelty_flags,
                     'adversarial_risk': c.adversarial_risk,
                     'fail_reason': c.fail_reason,
                     'shortlist_rank': c.shortlist_rank,
@@ -3060,6 +3188,7 @@ def append_run_history(
         'llm_parse_attempts': int(args.llm_parse_attempts),
         'llm_parse_backoff_ms': int(args.llm_parse_backoff_ms),
         'llm_text_fallback': bool(args.llm_text_fallback),
+        'diversity_memory_file': args.diversity_memory_file,
         'degraded_network_mode': bool(args.degraded_network_mode),
         'store_check': bool(args.store_check),
         'domain_check': bool(args.domain_check),
@@ -3137,6 +3266,7 @@ def persist_to_db(
                 'llm_parse_attempts': int(args.llm_parse_attempts),
                 'llm_parse_backoff_ms': int(args.llm_parse_backoff_ms),
                 'llm_text_fallback': bool(args.llm_text_fallback),
+                'diversity_memory_file': args.diversity_memory_file,
                 'pipeline_version': flags.pipeline_version,
                 'v3_enabled': flags.v3_enabled,
                 'use_engine_interfaces': flags.use_engine_interfaces,
@@ -3542,6 +3672,11 @@ def parse_args() -> argparse.Namespace:
         action='store_false',
     )
     parser.add_argument(
+        '--diversity-memory-file',
+        default='',
+        help='Optional JSON diversity-memory file used to skip exact repeats and penalize crowded pattern families.',
+    )
+    parser.add_argument(
         '--run-log',
         default=str(bpaths.NAME_GENERATOR_RUNS_JSONL),
         help='Append run summary JSONL history to this path (set empty string to disable).',
@@ -3583,6 +3718,7 @@ def main() -> int:
     source_languages = parse_csv_set(args.source_languages)
     source_categories = parse_csv_set(args.source_categories)
     source_influence_share = clamp_share(float(args.source_influence_share))
+    diversity_memory = load_diversity_memory(args.diversity_memory_file)
     family_quotas = rebalance_family_quotas_for_source_influence(
         active_families=active_families,
         family_quotas=family_quotas,
@@ -3696,6 +3832,28 @@ def main() -> int:
                     f'sample={sample}',
                     flush=True,
                 )
+    diversity_memory_skipped = set()
+    if diversity_memory:
+        generated_items, diversity_memory_skipped = filter_generated_by_diversity_memory(
+            generated_items,
+            diversity_memory,
+        )
+        if diversity_memory_skipped:
+            sample = sorted(diversity_memory_skipped)[:20]
+            emit_stage_event(
+                args.stage_events,
+                'diversity_memory_skip',
+                phase='generated',
+                skipped_count=len(diversity_memory_skipped),
+                diversity_memory_file=str(args.diversity_memory_file or ''),
+                skipped_names_sample=sample,
+            )
+            if args.progress:
+                print(
+                    f'diversity_memory_skip_generated skipped={len(diversity_memory_skipped)} '
+                    f'file={args.diversity_memory_file} sample={sample}',
+                    flush=True,
+                )
     generation_latency_ms = int((time.monotonic() - generation_started) * 1000)
     family_generation_counts = dict(sorted(Counter(item.generator_family for item in generated_items).items()))
     emit_stage_event(
@@ -3756,6 +3914,23 @@ def main() -> int:
             quality_max_template_penalty=int(args.quality_max_template_penalty),
         )
     scoring_latency_ms = int((time.monotonic() - scoring_started) * 1000)
+    if diversity_memory:
+        apply_diversity_memory_penalties(evaluated, diversity_memory)
+        penalized = [candidate for candidate in evaluated if candidate.novelty_penalty > 0]
+        emit_stage_event(
+            args.stage_events,
+            'diversity_memory_penalty',
+            penalized_count=len(penalized),
+            diversity_memory_file=str(args.diversity_memory_file or ''),
+            sample=[f'{candidate.name}:{candidate.novelty_penalty}' for candidate in penalized[:12]],
+        )
+        if args.progress and penalized:
+            print(
+                f'diversity_memory_penalty penalized={len(penalized)} '
+                f'file={args.diversity_memory_file} '
+                f'sample={[f"{candidate.name}:{candidate.novelty_penalty}" for candidate in penalized[:12]]}',
+                flush=True,
+            )
 
     ranked_all = sorted(
         evaluated,

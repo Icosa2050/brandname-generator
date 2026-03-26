@@ -340,7 +340,22 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 status='checked',
                 rejection_reason='',
             )
-            conn.execute("UPDATE candidates SET state='checked' WHERE id IN (?, ?, ?)", (hard_fail_id, expensive_fail_id, keep_id))
+            timeout_id = ndb.upsert_candidate(
+                conn,
+                name_display='TimeoutName',
+                total_score=77.0,
+                risk_score=19.0,
+                recommendation='consider',
+                quality_score=80.0,
+                engine_id='explicit',
+                parent_ids='',
+                status='checked',
+                rejection_reason='',
+            )
+            conn.execute(
+                "UPDATE candidates SET state='checked' WHERE id IN (?, ?, ?, ?)",
+                (hard_fail_id, expensive_fail_id, keep_id, timeout_id),
+            )
             ndb.add_validation_result(
                 conn,
                 candidate_id=hard_fail_id,
@@ -374,6 +389,17 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 reason='',
                 evidence={},
             )
+            ndb.add_validation_result(
+                conn,
+                candidate_id=timeout_id,
+                run_id=run_id,
+                check_type='app_store',
+                status='error',
+                score_delta=0.0,
+                hard_fail=False,
+                reason='validator_execution_timeout',
+                evidence={},
+            )
             demoted = nva.demote_checked_candidates_with_validation_failures(
                 conn,
                 actor='test',
@@ -385,10 +411,10 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 """
                 SELECT id, state, status, rejection_reason, rejection_stage, rejection_reason_code, policy_version, query_fingerprint
                 FROM candidates
-                WHERE id IN (?, ?, ?)
+                WHERE id IN (?, ?, ?, ?)
                 ORDER BY id
                 """,
-                (hard_fail_id, expensive_fail_id, keep_id),
+                (hard_fail_id, expensive_fail_id, keep_id, timeout_id),
             ).fetchall()
             got = {
                 int(row[0]): (
@@ -427,6 +453,7 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 ),
             )
             self.assertEqual(got[keep_id], ('checked', 'checked', '', '', '', '', ''))
+            self.assertEqual(got[timeout_id], ('checked', 'checked', '', '', '', '', ''))
             transition_count = conn.execute(
                 """
                 SELECT COUNT(*)
@@ -691,6 +718,94 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
             self.assertEqual(rejected_rows[0]['publish_bucket'], 'rejected')
             self.assertIn('tmview_probe:fail:tmview_probe_exact_collision', rejected_rows[0]['blocker_reasons'])
 
+    def test_export_validation_publish_artifacts_downgrades_timeout_errors_to_review(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / 'validator.db'
+            out_dir = Path(td) / 'campaign'
+            with ndb.open_connection(db_path) as conn:
+                ndb.ensure_schema(conn)
+                run_id = ndb.create_run(
+                    conn,
+                    source_path=str(db_path),
+                    scope='global',
+                    gate_mode='strict',
+                    variation_profile='validator_async',
+                    status='running',
+                    config={
+                        'checks': ['company_cheap', 'domain', 'web_google_like', 'tm_registry_global', 'app_store'],
+                        'policy_version': 'collision_first_v1',
+                        'memory_policy_signature': 'publish_v1',
+                    },
+                    summary={},
+                )
+
+                candidate_id = ndb.upsert_candidate(
+                    conn,
+                    name_display='Timeoutora',
+                    total_score=84.0,
+                    risk_score=19.0,
+                    recommendation='strong',
+                    quality_score=81.0,
+                    status='checked',
+                )
+                ndb.add_score_snapshot(
+                    conn,
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    quality_score=81.0,
+                    risk_score=19.0,
+                    external_penalty=0.0,
+                    total_score=84.0,
+                    recommendation='strong',
+                    hard_fail=False,
+                    reason='',
+                )
+                ndb.add_shortlist_decision(
+                    conn,
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    selected=True,
+                    shortlist_rank=1,
+                    bucket_key='keep',
+                    reason='selected',
+                    score=84.0,
+                )
+                for check_type in ['company_cheap', 'domain', 'web_google_like', 'tm_registry_global']:
+                    ndb.add_validation_result(
+                        conn,
+                        candidate_id=candidate_id,
+                        run_id=run_id,
+                        check_type=check_type,
+                        status='pass',
+                        score_delta=0.0,
+                        hard_fail=False,
+                        reason='',
+                        evidence={},
+                    )
+                ndb.add_validation_result(
+                    conn,
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    check_type='app_store',
+                    status='error',
+                    score_delta=0.0,
+                    hard_fail=False,
+                    reason='validator_execution_timeout',
+                    evidence={},
+                )
+                conn.commit()
+
+                summary = nva.export_validation_publish_artifacts(conn, run_id=run_id, out_dir=out_dir)
+
+            self.assertEqual(summary['survivor_count'], 0)
+            self.assertEqual(summary['review_count'], 1)
+            self.assertEqual(summary['rejected_count'], 0)
+            review_csv = out_dir / 'postrank' / 'validated_review_queue.csv'
+            with review_csv.open('r', encoding='utf-8', newline='') as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row['name'] for row in rows], ['Timeoutora'])
+            self.assertIn('app_store:error:validator_execution_timeout', rows[0]['review_reasons'])
+
     def test_export_validation_publish_artifacts_uses_historical_results_and_reviews_missing_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / 'validator.db'
@@ -879,29 +994,134 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 summary = nva.export_validation_publish_artifacts(conn, run_id=current_run_id, out_dir=out_dir)
 
             self.assertEqual(summary['survivor_count'], 1)
-            self.assertEqual(summary['review_count'], 2)
+            self.assertEqual(summary['review_count'], 1)
             self.assertEqual(summary['rejected_count'], 1)
+            self.assertEqual(summary['pending_coverage_count'], 1)
             self.assertEqual(summary['missing_validation_count'], 1)
             self.assertEqual(summary['missing_required_check_count'], 1)
 
             review_csv = out_dir / 'postrank' / 'validated_review_queue.csv'
             rejected_csv = out_dir / 'postrank' / 'validated_rejected.csv'
             survivors_csv = out_dir / 'postrank' / 'validated_survivors.csv'
+            pending_csv = out_dir / 'postrank' / 'validated_pending_coverage.csv'
             with survivors_csv.open('r', encoding='utf-8', newline='') as handle:
                 survivors = list(csv.DictReader(handle))
             with review_csv.open('r', encoding='utf-8', newline='') as handle:
                 review_rows = list(csv.DictReader(handle))
             with rejected_csv.open('r', encoding='utf-8', newline='') as handle:
                 rejected_rows = list(csv.DictReader(handle))
+            with pending_csv.open('r', encoding='utf-8', newline='') as handle:
+                pending_rows = list(csv.DictReader(handle))
 
             self.assertEqual([row['name'] for row in survivors], ['HistoryPass'])
-            self.assertEqual([row['name'] for row in review_rows], ['HistoryReview', 'NoCoverage'])
+            self.assertEqual([row['name'] for row in review_rows], ['HistoryReview'])
             self.assertEqual([row['name'] for row in rejected_rows], ['HistoryReject'])
-            self.assertIn('validation:none', review_rows[1]['review_reasons'])
-            self.assertIn('company_cheap:missing', review_rows[1]['review_reasons'])
-            self.assertIn('web_google_like:missing', review_rows[1]['review_reasons'])
-            self.assertIn('tm_registry_global:missing', review_rows[1]['review_reasons'])
+            self.assertEqual([row['name'] for row in pending_rows], ['NoCoverage'])
+            self.assertEqual(pending_rows[0]['publish_bucket'], 'pending_coverage')
+            self.assertIn('validation:none', pending_rows[0]['review_reasons'])
+            self.assertIn('company_cheap:missing', pending_rows[0]['review_reasons'])
+            self.assertIn('web_google_like:missing', pending_rows[0]['review_reasons'])
+            self.assertIn('tm_registry_global:missing', pending_rows[0]['review_reasons'])
             self.assertIn('web_google_like:fail:web_google_exact_collision', rejected_rows[0]['blocker_reasons'])
+
+    def test_export_validation_publish_artifacts_dedupes_shortlist_rows_and_score_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / 'validator.db'
+            out_dir = Path(td) / 'campaign'
+            with ndb.open_connection(db_path) as conn:
+                ndb.ensure_schema(conn)
+                run_id = ndb.create_run(
+                    conn,
+                    source_path=str(db_path),
+                    scope='eu',
+                    gate_mode='strict',
+                    variation_profile='validator_async',
+                    status='completed',
+                    config={
+                        'checks': ['company_cheap', 'domain', 'web_google_like', 'tm_registry_global'],
+                        'policy_version': 'collision_first_v1',
+                        'memory_policy_signature': 'publish_v1',
+                    },
+                    summary={},
+                )
+                candidate_id = ndb.upsert_candidate(
+                    conn,
+                    name_display='Dupora',
+                    total_score=84.0,
+                    risk_score=19.0,
+                    recommendation='strong',
+                    quality_score=81.0,
+                    status='checked',
+                )
+                ndb.add_score_snapshot(
+                    conn,
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    quality_score=75.0,
+                    risk_score=22.0,
+                    external_penalty=0.0,
+                    total_score=78.0,
+                    recommendation='consider',
+                    hard_fail=False,
+                    reason='',
+                )
+                ndb.add_score_snapshot(
+                    conn,
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    quality_score=82.0,
+                    risk_score=18.0,
+                    external_penalty=0.0,
+                    total_score=88.0,
+                    recommendation='strong',
+                    hard_fail=False,
+                    reason='',
+                )
+                ndb.add_shortlist_decision(
+                    conn,
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    selected=True,
+                    shortlist_rank=4,
+                    bucket_key='test',
+                    reason='selected',
+                    score=78.0,
+                )
+                ndb.add_shortlist_decision(
+                    conn,
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    selected=True,
+                    shortlist_rank=1,
+                    bucket_key='test',
+                    reason='selected',
+                    score=88.0,
+                )
+                for check_type in ['company_cheap', 'domain', 'web_google_like', 'tm_registry_global']:
+                    ndb.add_validation_result(
+                        conn,
+                        candidate_id=candidate_id,
+                        run_id=run_id,
+                        check_type=check_type,
+                        status='pass',
+                        score_delta=0.0,
+                        hard_fail=False,
+                        reason='',
+                        evidence={},
+                    )
+                conn.commit()
+
+                summary = nva.export_validation_publish_artifacts(conn, run_id=run_id, out_dir=out_dir)
+
+            self.assertEqual(summary['shortlist_selected_count'], 1)
+            self.assertEqual(summary['survivor_count'], 1)
+            survivors_csv = out_dir / 'postrank' / 'validated_survivors.csv'
+            with survivors_csv.open('r', encoding='utf-8', newline='') as handle:
+                survivors = list(csv.DictReader(handle))
+            self.assertEqual(len(survivors), 1)
+            self.assertEqual(survivors[0]['name'], 'Dupora')
+            self.assertEqual(survivors[0]['shortlist_rank'], '1')
+            self.assertEqual(survivors[0]['total_score'], '88.00')
 
     def test_export_validation_publish_artifacts_derives_required_checks_from_run_config(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1294,6 +1514,18 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 hard_fail=False,
                 reason='',
             )
+            ndb.add_score_snapshot(
+                conn,
+                candidate_id=beta_id,
+                run_id=run_id,
+                quality_score=81.0,
+                risk_score=17.0,
+                external_penalty=0.0,
+                total_score=83.0,
+                recommendation='strong',
+                hard_fail=False,
+                reason='latest',
+            )
             ndb.add_shortlist_decision(
                 conn,
                 candidate_id=alpha_id,
@@ -1314,8 +1546,20 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
                 reason='selected',
                 score=82.0,
             )
+            ndb.add_shortlist_decision(
+                conn,
+                candidate_id=beta_id,
+                run_id=run_id,
+                selected=True,
+                shortlist_rank=5,
+                bucket_key='test',
+                reason='duplicate_selected',
+                score=81.0,
+            )
             rows = nva.load_shortlist_candidates(conn, run_id, 10)
             self.assertEqual([row.name_display for row in rows], ['Beta', 'Alpha'])
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0].current_score, 83.0)
 
     def test_run_single_job_uses_two_lock_acquisitions_on_success(self) -> None:
         with closing(sqlite3.connect(':memory:')) as conn:

@@ -191,16 +191,19 @@ Suggested pattern:
 - `test_outputs/branding/<brand>_<market>/...`
 
 ## More
-- Acceptance-tail automation (decision pack -> final survivors + legal precheck):
-  - `direnv exec . python3 scripts/branding/run_acceptance_tail.py --pack-dir <decision_pack_dir>`
-- Two-lane workflow (compact create lane -> manual review -> validation lane):
+- Recommended reviewed-shortlist workflow:
   - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.default.toml`
   - Review generated `review_unique_top120.csv` in the new decision pack (`keep/maybe/drop`).
   - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.default.toml --pack-dir <decision_pack_dir>`
-  - Tuned profiles:
-    - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.creative_hybrid.toml`
-    - Review generated `review_unique_top160.csv` in the tuned decision pack (`keep/maybe/drop`).
-    - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.legal_heavy.toml --pack-dir <decision_pack_dir>`
+  - Default validation workflow is now `dual`: acceptance-tail first, async publish validation second.
+- Legal-heavier variant:
+  - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.creative_hybrid.toml`
+  - Review generated `review_unique_top160.csv` in the tuned decision pack (`keep/maybe/drop`).
+  - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.legal_heavy.toml --pack-dir <decision_pack_dir>`
+- Low-level acceptance-tail only:
+  - `direnv exec . python3 scripts/branding/run_acceptance_tail.py --pack-dir <decision_pack_dir>`
+- Validation workflow explanation:
+  - `docs/branding/validation_workflow.md`
 - Full runner flags:
   - `python3 scripts/branding/naming_campaign_runner.py --help`
 - Branding docs index:

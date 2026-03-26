@@ -65,6 +65,8 @@ class PipelineTests(unittest.TestCase):
                     language_plugin = "orthographic_english"
                     language_plugins = ["orthographic_english", "orthographic_german"]
                     seed_count = 12
+                    rare_seed_count = 10
+                    rare_profile = "aggressive"
 
                     [validation]
                     checks = ""
@@ -102,6 +104,8 @@ class PipelineTests(unittest.TestCase):
             config.ideation.pseudoword.language_plugins,
             ("orthographic_english", "orthographic_german"),
         )
+        self.assertEqual(config.ideation.pseudoword.rare_seed_count, 10)
+        self.assertEqual(config.ideation.pseudoword.rare_profile, "aggressive")
         self.assertEqual(config.validation.parallel_workers, 5)
 
     def test_fixture_run_exports_ranked_csv(self) -> None:

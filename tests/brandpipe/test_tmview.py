@@ -15,6 +15,7 @@ if str(SRC_DIR) not in sys.path:
 
 from brandpipe.tmview import (
     TmviewProbeResult,
+    _parse_result_count,
     _title_exact_or_near,
     build_tmview_url,
     clone_tmview_runtime_profile,
@@ -34,8 +35,18 @@ class TmviewTests(unittest.TestCase):
         url = build_tmview_url("cordnix")
         self.assertIn("basicSearch=%20cordnix", url)
         self.assertIn("criteria=F", url)
-        self.assertIn("niceClass=9,OR,42,OR,EMPTY", url)
+        self.assertIn("niceClass=9,OR,42", url)
         self.assertIn("tmStatus=Filed,Registered", url)
+
+    def test_build_tmview_url_accepts_explicit_nice_class(self) -> None:
+        url = build_tmview_url("cordnix", nice_class="9,OR,42,OR,EMPTY")
+        self.assertIn("niceClass=9,OR,42,OR,EMPTY", url)
+
+    def test_parse_result_count_handles_tmview_summary_formats(self) -> None:
+        self.assertEqual(_parse_result_count("1-11 of 11"), 11)
+        self.assertEqual(_parse_result_count("Show all 16 results"), 16)
+        self.assertEqual(_parse_result_count("No rows found"), 0)
+        self.assertIsNone(_parse_result_count("<missing>"))
 
     def test_probe_names_normalizes_and_deduplicates(self) -> None:
         fake_results = [
@@ -58,6 +69,34 @@ class TmviewTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].name, "cordnix")
         probe.probe_name.assert_called_once_with("cordnix")
+
+    def test_probe_names_passes_explicit_nice_class_to_probe(self) -> None:
+        fake_results = [
+            TmviewProbeResult(
+                name="cordnix",
+                url="https://example.test",
+                query_ok=True,
+                source="tmview_playwright",
+                exact_hits=0,
+                near_hits=0,
+                result_count=0,
+                sample_text="",
+                query_nice_class="9,OR,42",
+            )
+        ]
+        with mock.patch("brandpipe.tmview.TmviewProbe") as probe_cls:
+            probe = probe_cls.return_value.__enter__.return_value
+            probe.probe_name.side_effect = list(fake_results)
+            results = probe_names(
+                names=["Cordnix"],
+                profile_dir="/tmp/tmview-profile",
+                nice_class="9,OR,42",
+            )
+
+        self.assertEqual(len(results), 1)
+        probe_cls.assert_called_once()
+        _, kwargs = probe_cls.call_args
+        self.assertEqual(kwargs["nice_class"], "9,OR,42")
 
     def test_title_exact_or_near_matches_tmview_fuzzy_neighbors(self) -> None:
         self.assertEqual(_title_exact_or_near("samistra", "SAWISTRA"), (False, True))

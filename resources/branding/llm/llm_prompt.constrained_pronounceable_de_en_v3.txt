@@ -10,8 +10,13 @@ Ideation controls:
 - Phonetic mode: {phonetic}
 - Morphology mode: {morphology}
 - Semantic mode: {semantic}
+- Round focus: {round_focus}
+- Creative directive: {creative_directive}
+- Novelty directive: {novelty_directive}
 - Banned tokens: {banned_tokens}
 - Banned prefixes: {banned_prefixes}
+- Banned suffixes: {banned_suffixes}
+- Avoid names: {avoid_names}
 
 Hard constraints:
 1. lowercase letters a-z only

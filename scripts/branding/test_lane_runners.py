@@ -112,6 +112,7 @@ class LaneRunnersTest(unittest.TestCase):
                 textwrap.dedent(
                     """
                     [validation]
+                    workflow = "dual"
                     mode = "keep_maybe"
                     keep_top_n = 12
                     maybe_top_n = 12
@@ -133,6 +134,8 @@ class LaneRunnersTest(unittest.TestCase):
                     swissreg_settle_ms = 2500
                     require_human_decisions = true
                     min_human_decisions = 1
+                    async_checks = "domain,web"
+                    async_concurrency = 3
                     python_bin = "python3"
                     dry_run = true
                     """
@@ -165,8 +168,53 @@ class LaneRunnersTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(ok_proc.returncode, 0, msg=ok_proc.stderr)
-            self.assertIn('run_acceptance_tail.py', ok_proc.stdout)
+            self.assertIn('run_review_validation_bundle.py', ok_proc.stdout)
+            self.assertIn('validation_workflow=dual', ok_proc.stdout)
             self.assertIn('validation_lane_done', ok_proc.stdout)
+
+            cfg_path.write_text(
+                textwrap.dedent(
+                    """
+                    [validation]
+                    workflow = "acceptance_only"
+                    mode = "keep_maybe"
+                    keep_top_n = 12
+                    maybe_top_n = 12
+                    final_top_n = 8
+                    recommended_top_n = 6
+                    scope = "global"
+                    gate = "strict"
+                    countries = "de,ch,it"
+                    skip_live_screening = true
+                    skip_legal_research = true
+                    registry_top_n = 8
+                    web_top_n = 8
+                    print_top = 12
+                    euipo_probe = false
+                    swissreg_ui_probe = false
+                    euipo_timeout_ms = 20000
+                    euipo_settle_ms = 2500
+                    swissreg_timeout_ms = 20000
+                    swissreg_settle_ms = 2500
+                    require_human_decisions = true
+                    min_human_decisions = 1
+                    python_bin = "python3"
+                    dry_run = true
+                    """
+                ).strip()
+                + '\n',
+                encoding='utf-8',
+            )
+
+            acceptance_only_proc = subprocess.run(
+                ['python3', str(script), '--config', str(cfg_path), '--pack-dir', str(pack_dir)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(acceptance_only_proc.returncode, 0, msg=acceptance_only_proc.stderr)
+            self.assertIn('run_acceptance_tail.py', acceptance_only_proc.stdout)
+            self.assertIn('validation_workflow=acceptance_only', acceptance_only_proc.stdout)
 
 
 if __name__ == '__main__':
