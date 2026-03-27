@@ -42,8 +42,10 @@ jobs:
 
       - name: Install Tooling
         run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
           python3 -m pip install --upgrade pip
-          python3 -m pip install ruff
+          python3 -m pip install ruff playwright
 
       - name: Python Syntax Check
         run: |
@@ -176,7 +178,7 @@ jobs:
       - name: Install Tooling
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install ruff
+          python3 -m pip install ruff playwright
 
       - name: Python Syntax Check
         run: |
