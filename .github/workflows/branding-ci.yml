@@ -5,9 +5,20 @@ on:
     branches: [main, develop]
     paths:
       - 'scripts/branding/**'
-      - 'docs/branding/**'
+      - 'src/brandpipe/**'
+      - 'tests/brandpipe/**'
+      - 'resources/branding/**'
+      - 'resources/brandpipe/**'
       - '.github/workflows/branding-ci.yml'
-      - '.github/workflows/branding-openrouter-canary.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/branding/**'
+      - 'src/brandpipe/**'
+      - 'tests/brandpipe/**'
+      - 'resources/branding/**'
+      - 'resources/brandpipe/**'
+      - '.github/workflows/branding-ci.yml'
   workflow_dispatch:
 
 concurrency:
@@ -40,16 +51,19 @@ jobs:
             scripts/branding/name_generator.py \
             scripts/branding/name_ideation_ingest.py \
             scripts/branding/naming_ideation_stage.py \
-            scripts/branding/naming_campaign_runner.py
+            scripts/branding/naming_campaign_runner.py \
+            scripts/branding/naming_validate_async.py \
+            scripts/branding/run_validation_lane.py \
+            scripts/branding/run_review_validation_bundle.py \
+            scripts/branding/run_brandpipe_attack.py
 
       - name: Ruff Check
         run: ruff check scripts/branding
 
-      - name: Ideation Stage Unit Tests
-        run: python3 scripts/branding/test_naming_ideation_stage.py
-
-      - name: Generator Unit Tests
-        run: python3 scripts/branding/test_name_generator.py
+      - name: Branding Unit Tests
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/scripts/branding" \
+            python3 -m unittest discover -s scripts/branding -p 'test_*.py'
 
       - name: Fixture Campaign Smoke
         run: |
@@ -144,3 +158,38 @@ jobs:
           path: /tmp/branding_ci_smoke
           if-no-files-found: ignore
           retention-days: 4
+
+  brandpipe_checks:
+    name: Brandpipe Deterministic Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install ruff
+
+      - name: Python Syntax Check
+        run: |
+          python3 -m py_compile \
+            scripts/branding/run_brandpipe_attack.py \
+            src/brandpipe/cli.py \
+            src/brandpipe/models.py \
+            src/brandpipe/pipeline.py \
+            src/brandpipe/pseudowords.py \
+            src/brandpipe/tmview.py
+
+      - name: Ruff Check
+        run: ruff check src/brandpipe tests/brandpipe
+
+      - name: Brandpipe Unit Tests
+        run: python3 -m unittest discover -s tests/brandpipe -p 'test_*.py'
