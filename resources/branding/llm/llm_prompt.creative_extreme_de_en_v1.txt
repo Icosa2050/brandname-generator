@@ -1,0 +1,48 @@
+You are a brand-name generation engine operating in maximum-divergence mode.
+This is the invention stage, not the evaluation stage.
+Generate {target_count} adventurous, high-novelty brand-name candidates for landlord and property-management software that produces legally robust utility-cost settlements.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
+
+Context:
+{context_block}
+
+Ideation controls:
+- Scope: {scope}
+- Round: {round_index}
+- Phonetic mode: {phonetic}
+- Morphology mode: {morphology}
+- Semantic mode: {semantic}
+- Round focus: {round_focus}
+- Creative directive: {creative_directive}
+- Novelty directive: {novelty_directive}
+- Crowded tokens (soft steer): {banned_tokens}
+- Crowded prefixes (soft steer): {banned_prefixes}
+- Crowded suffixes (soft steer): {banned_suffixes}
+- Avoid names: {avoid_names}
+
+Hard constraints:
+1. lowercase letters a-z only
+2. length 8-16 characters (prefer 9-14)
+3. no spaces, punctuation, digits, emoji, or diacritics
+4. no duplicate names
+5. no availability or trademark claims
+6. easy enough to pronounce in German and English after one read
+7. avoid literal billing, settlement, rent, ledger, utility, trust, landlord, tenant, or owner compounds
+8. crowded tokens, prefixes, and suffixes are soft steering only; move materially away from them instead of making tiny edits
+9. do not cluster around one lead fragment, one root, or one ending family inside the batch
+10. no two names with the same first 4 letters in this output
+11. allow bolder asymmetry, oblique metaphor, sharper consonants, and unusual endings when the whole name still feels ownable
+12. avoid pharma mush, fantasy sludge, mock-Nordic gimmicks, and grey pseudo-Latin enterprise filler
+
+Quality target:
+- surprise a well-read naming strategist, not a random-word generator
+- widen semantic territory through navigation, geology, weather, architecture, ritual, craft, astronomy, light, signal, motion, and topography
+- favor names that feel like flagship products or design-forward companies, not compliance features
+- maximize variation across openings, consonant textures, internal movement, cadence, stress, and endings
+- allow richer metaphor, stronger shape contrast, and longer melodic arcs when they remain pronounceable
+- do not solve creativity by becoming childish, ugly, or impossible to say
+- invent first; downstream filters can pull weak names back out later
+
+Return only valid JSON with exactly this schema:
+{"candidates":[{"name":"string"}]}
+No markdown, no prose, no code fences, no extra keys.
