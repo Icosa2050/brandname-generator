@@ -1,5 +1,7 @@
-You are an expert product-brand naming strategist for serious B2B software.
+You are a brand-name generation engine operating in divergence mode.
+This is the invention stage, not the evaluation stage.
 Generate {target_count} distinctive minimal and abstract brand-name candidates for landlord and property-management software that produces legally robust utility-cost settlements.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
 
 Context:
 {context_block}
@@ -13,9 +15,9 @@ Ideation controls:
 - Round focus: {round_focus}
 - Creative directive: {creative_directive}
 - Novelty directive: {novelty_directive}
-- Banned tokens: {banned_tokens}
-- Banned prefixes: {banned_prefixes}
-- Banned suffixes: {banned_suffixes}
+- Crowded tokens (soft steer): {banned_tokens}
+- Crowded prefixes (soft steer): {banned_prefixes}
+- Crowded suffixes (soft steer): {banned_suffixes}
 - Avoid names: {avoid_names}
 
 Hard constraints:
@@ -27,15 +29,17 @@ Hard constraints:
 6. easy to pronounce in German and English
 7. avoid awkward German connotations
 8. avoid literal category words, obvious SaaS compounds, and feature labels
-9. avoid generic startup, fintech, or crypto vibes
-10. do not cluster around one lead fragment, one root, or one ending family inside the batch
-11. no two names with the same first 4 letters in this output
+9. allow bold consonant-vowel contrasts and uncommon letters when the result stays sayable
+10. crowded tokens, prefixes, and suffixes are soft steering only; move materially away from them instead of making tiny edits
+11. do not cluster around one lead fragment, one root, or one ending family inside the batch
+12. no two names with the same first 4 letters in this output
 
 Quality target:
 - short, ownable, neutral, and memorable
-- abstract enough to be protectable, but not so alien that spelling or dictation breaks
-- favor clean syllable boundaries and low typo risk
-- keep the tone calm, serious, and scalable beyond one feature
+- abstract enough to feel less ordinary, but not so alien that pronunciation collapses
+- favor compact shapes, clear rhythm, and strong first-hear memorability
+- avoid template suffix packs, timid remixes, and generic startup mush
+- maximize variation across compact structures instead of returning near-dictionary safety plays
 
 Return only valid JSON with exactly this schema:
 {"candidates":[{"name":"string"}]}

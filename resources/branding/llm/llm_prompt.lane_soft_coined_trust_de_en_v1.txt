@@ -1,0 +1,50 @@
+You are a brand-name generation engine operating in divergence mode.
+This is the invention stage, not the evaluation stage.
+Generate {target_count} distinctive soft-coined brand-name candidates for landlord and property-management software that produces legally robust utility-cost settlements.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
+
+Context:
+{context_block}
+
+Ideation controls:
+- Scope: {scope}
+- Round: {round_index}
+- Phonetic mode: {phonetic}
+- Morphology mode: {morphology}
+- Semantic mode: {semantic}
+- Round focus: {round_focus}
+- Creative directive: {creative_directive}
+- Novelty directive: {novelty_directive}
+- Crowded tokens (soft steer): {banned_tokens}
+- Crowded prefixes (soft steer): {banned_prefixes}
+- Crowded suffixes (soft steer): {banned_suffixes}
+- Avoid names: {avoid_names}
+
+Hard constraints:
+1. lowercase letters a-z only
+2. length 7-11 characters
+3. no spaces, punctuation, digits, emoji, or diacritics
+4. no duplicate names
+5. no availability or trademark claims
+6. easy to pronounce in German and English
+7. prefer two-to-three smooth syllables with clear, low-friction transitions
+8. favor open syllables, rounded vowel harmony, doubled vowels, and soft landings when they feel natural
+9. allow endings such as -o, -u, -ou, -oo, -bo, -bu, -mo, or -lo when the full shape is memorable and not toy-like
+10. prefer softer consonant movement, but keep structural contrast across the batch
+11. avoid awkward German connotations, near-pharma mush, and literal billing or settlement compounds
+12. crowded tokens, prefixes, and suffixes are soft steering only; move materially away from them instead of making tiny edits
+13. do not cluster around one lead fragment, one root, or one ending family inside the batch
+14. no nursery-rhyme reduplication, plush-toy energy, or obvious category templating
+15. no two names with the same first 4 letters in this output
+
+Quality target:
+- sound unfamiliar but pronounceable
+- feel smooth, rounded, and memorable on first hear
+- use phonetic blending, abstraction, and sound symbolism rather than feature labels
+- vary openings, middles, endings, and cadence across the batch
+- avoid soft-latin sludge, timid remixes, and obvious category labels
+- invent first; downstream filters can pull weak names back out later
+
+Return only valid JSON with exactly this schema:
+{"candidates":[{"name":"string"}]}
+No markdown, no prose, no code fences, no extra keys.

@@ -7,7 +7,8 @@ from pathlib import Path
 from .batch import run_batch
 from .browser_profile import run_browser_profile_smoke, warm_browser_profile
 from . import db
-from .pipeline import export_ranked_csv, load_config, recheck_pending_web, recheck_tmview, run_pipeline
+from .pipeline import export_ranked_csv, load_config, recheck_pending_web, recheck_tmview, run_pipeline, run_shortlist_validation
+from .models import ValidationConfig
 from .tmview import probe_names as probe_tmview_names, write_results_json as write_tmview_results_json
 
 
@@ -69,6 +70,21 @@ def build_parser() -> argparse.ArgumentParser:
     run_batch_parser.add_argument("--briefs-file", required=True, help="Batch briefs file (.toml, .json, .jsonl)")
     run_batch_parser.add_argument("--batch-id", default="", help="Optional explicit batch id")
     run_batch_parser.add_argument("--stop-on-error", action="store_true", help="Stop the batch on the first failed brief")
+
+    validate_shortlist = sub.add_parser("validate-shortlist", help="Run queue-backed shortlist validation")
+    validate_shortlist.add_argument("--db", required=True, help="SQLite path")
+    validate_shortlist.add_argument("--names", required=True, help="Comma-separated shortlist names")
+    validate_shortlist.add_argument("--checks", default="domain,package,company,web,app_store,social,tm")
+    validate_shortlist.add_argument("--required-domain-tlds", default="")
+    validate_shortlist.add_argument("--store-countries", default="de,ch,us")
+    validate_shortlist.add_argument("--timeout-s", type=float, default=10.0)
+    validate_shortlist.add_argument("--company-top", type=int, default=8)
+    validate_shortlist.add_argument("--social-unavailable-fail-threshold", type=int, default=3)
+    validate_shortlist.add_argument("--web-search-order", default="brave,browser_google")
+    validate_shortlist.add_argument("--web-browser-profile-dir", default="")
+    validate_shortlist.add_argument("--web-browser-chrome-executable", default="")
+    validate_shortlist.add_argument("--tmview-profile-dir", default="")
+    validate_shortlist.add_argument("--tmview-chrome-executable", default="")
 
     status = sub.add_parser("status", help="Show run status")
     status.add_argument("--db", required=True, help="SQLite path")
@@ -165,6 +181,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"run_ids={','.join(str(item) for item in summary['run_ids'])}")
         if summary["failures"]:
             print(f"failures={json.dumps(summary['failures'], ensure_ascii=False)}")
+        return 0
+    if args.command == "validate-shortlist":
+        names = [part.strip() for part in str(args.names).split(",") if part.strip()]
+        summary = run_shortlist_validation(
+            db_path=Path(args.db).expanduser().resolve(),
+            candidate_names=names,
+            config=ValidationConfig(
+                checks=[part.strip() for part in str(args.checks).split(",") if part.strip()],
+                parallel_workers=1,
+                required_domain_tlds=str(args.required_domain_tlds or "").strip(),
+                store_countries=str(args.store_countries or "de,ch,us").strip(),
+                timeout_s=max(0.5, float(args.timeout_s)),
+                company_top=max(1, int(args.company_top)),
+                social_unavailable_fail_threshold=max(1, int(args.social_unavailable_fail_threshold)),
+                web_search_order=str(args.web_search_order or "brave,browser_google").strip(),
+                web_browser_profile_dir=str(args.web_browser_profile_dir or "").strip(),
+                web_browser_chrome_executable=str(args.web_browser_chrome_executable or "").strip(),
+                tmview_profile_dir=str(args.tmview_profile_dir or "").strip(),
+                tmview_chrome_executable=str(args.tmview_chrome_executable or "").strip(),
+            ),
+        )
+        print(f"run_id={summary['run_id']} fingerprint={summary['fingerprint']}")
+        print(f"job_counts={json.dumps(summary['job_counts'], ensure_ascii=False, sort_keys=True)}")
         return 0
     if args.command == "status":
         return _status_command(

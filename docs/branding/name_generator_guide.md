@@ -1,8 +1,8 @@
 # Name Generator Guide
 
-This is the current operational guide for naming runs and post-review validation.
+This is the current operational guide for the supported brandpipe flow.
 
-For the validation-lane rationale and output layout, see `docs/branding/validation_workflow.md`.
+For shortlist validation details and output semantics, see `docs/branding/validation_workflow.md`.
 
 ## Environment
 
@@ -13,87 +13,111 @@ direnv allow .
 direnv exec . env | rg OPENROUTER
 ```
 
-One-time browser setup for EUIPO and Swissreg probes:
+One-time browser setup for TMView, browser-backed web search, and App Store checks:
 
 ```zsh
 python3 -m playwright install chromium
 ```
 
-## Core entrypoints
+## Supported entrypoints
 
-- `scripts/branding/run_creation_lane.py`
-  - generate names and build a decision pack for manual review
-- `scripts/branding/run_validation_lane.py`
-  - recommended post-review wrapper
-  - default workflow is `dual`
-- `scripts/branding/run_acceptance_tail.py`
-  - low-level acceptance-tail only
-- `scripts/branding/naming_validate_async.py`
-  - low-level async publish validator
-- `scripts/branding/run_review_validation_bundle.py`
-  - low-level helper that chains both validation lanes on one reviewed CSV
+- `scripts/branding/run_brandpipe_attack.py`
+  - canonical shortlist generator
+  - default lanes are curated: `expressive,plosive,angular,balanced,crossmarket`
+  - experimental widening lanes are available through `--lanes all`
+- `scripts/branding/run_brandpipe_validate.py`
+  - canonical shortlist validator
+  - stable check set: `domain,package,company,web,app_store,social,tm`
+  - uses a blocking queue-backed flow with persisted state under `<out-dir>/validation_state/brandpipe.db`
+  - effective worker count is always `1`
+  - uses Brave-first web probing, browser-backed Google rechecks, direct TMView, and browser-only App Store probing
 
-## Standard reviewed-shortlist workflow
+## Standard generation workflow
 
-1. Create a decision pack:
-
-```zsh
-direnv exec . python3 scripts/branding/run_creation_lane.py \
-  --config resources/branding/configs/creation_lane.default.toml
-```
-
-2. Review the generated `keep/maybe/drop` CSV in the new decision pack.
-
-3. Run the validation lane:
+Generate a merged shortlist:
 
 ```zsh
-direnv exec . python3 scripts/branding/run_validation_lane.py \
-  --config resources/branding/configs/validation_lane.default.toml \
-  --pack-dir <decision_pack_dir>
+direnv exec . python3 scripts/branding/run_brandpipe_attack.py \
+  --briefs-file resources/brandpipe/example_batch_briefs.toml \
+  --lanes default \
+  --out-dir test_outputs/brandpipe/manual_run
 ```
 
-That now runs:
+Review the generated `merged_review_top*.csv`.
 
-- acceptance-tail live/legal screening
-- async publish validation
-- combined summary export
+Recommended lane guidance:
 
-## Legal-heavier workflow
+- `default`: curated production lanes
+- `all`: curated lanes plus experimental `short_recovery` and `short`
+- explicit CSV lane lists: use when you want to force a custom mix
 
-Use this when you want wider reviewed input plus stricter post-review narrowing:
+## Standard shortlist validation workflow
+
+Validate a reviewed shortlist CSV:
 
 ```zsh
-direnv exec . python3 scripts/branding/run_creation_lane.py \
-  --config resources/branding/configs/creation_lane.creative_hybrid.toml
-
-direnv exec . python3 scripts/branding/run_validation_lane.py \
-  --config resources/branding/configs/validation_lane.legal_heavy.toml \
-  --pack-dir <decision_pack_dir>
+direnv exec . python3 scripts/branding/run_brandpipe_validate.py \
+  --input-csv <review_csv> \
+  --mode keep_maybe \
+  --out-dir <validation_out_dir> \
+  --web-browser-profile-dir test_outputs/brandpipe/playwright-profile \
+  --tmview-profile-dir test_outputs/brandpipe/playwright-profile
 ```
 
-## Acceptance-only fallback
+This writes:
 
-If you explicitly want only the live/legal last-mile pass, either:
+- `validated_all.csv`
+- `validated_survivors.csv`
+- `validated_review_queue.csv`
+- `validated_rejected.csv`
+- `validated_publish_summary.json`
 
-- set `workflow = "acceptance_only"` in the validation config, then run `run_validation_lane.py`
-- or call `run_acceptance_tail.py` directly
+Rerunning the same command with the same shortlist and validation config resumes from the persisted queue state.
+If you intentionally want to discard that state for the same out-dir, add `--reset-state`.
 
-Direct command:
+## Manual name checks
+
+Validate a hand-picked shortlist without a review CSV:
 
 ```zsh
-direnv exec . python3 scripts/branding/run_acceptance_tail.py \
-  --pack-dir <decision_pack_dir>
+direnv exec . python3 scripts/branding/run_brandpipe_validate.py \
+  --names "orbiluna,scedaria,otarelan" \
+  --out-dir <validation_out_dir> \
+  --web-browser-profile-dir test_outputs/brandpipe/playwright-profile \
+  --tmview-profile-dir test_outputs/brandpipe/playwright-profile
 ```
 
-## Direct campaign runner
+You can also use `--names-file <path>` for newline-delimited inputs.
 
-Use the campaign runner for long-form generation and built-in async validation:
+## Browser-backed checks
+
+For reliable shortlist validation, reuse one persistent browser profile for:
+
+- `web`
+- `app_store`
+- `tm`
+
+Recommended pattern:
 
 ```zsh
-direnv exec . python3 scripts/branding/naming_campaign_runner.py --help
+--web-browser-profile-dir test_outputs/brandpipe/playwright-profile \
+--tmview-profile-dir test_outputs/brandpipe/playwright-profile
 ```
 
-## Hybrid shortcut commands
+If Chrome lives outside the default macOS path, also pass:
+
+```zsh
+--web-browser-chrome-executable <chrome_binary> \
+--tmview-chrome-executable <chrome_binary>
+```
+
+Compatibility note:
+
+- `--concurrency` is still accepted by `run_brandpipe_validate.py` so existing wrappers do not break, but it is clamped to `1`
+
+## Continuous / hybrid helpers
+
+These helpers are still valid for long-running ideation and local/remote mixes:
 
 ```zsh
 zsh scripts/branding/run_hybrid_lmstudio_mistral.sh
@@ -103,38 +127,16 @@ zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative
 zsh scripts/branding/run_hybrid_ollama_mistral.sh
 ```
 
-## Continuous supervisor
-
-Foreground:
-
-```zsh
-zsh scripts/branding/run_continuous_branding_supervisor.sh \
-  --out-dir test_outputs/branding/continuous_hybrid \
-  --backend auto \
-  --fallback-backend ollama \
-  --profile-plan fast,quality,creative \
-  --target-good 120 \
-  --target-strong 40
-```
-
-Progress summary:
-
-```zsh
-zsh scripts/branding/report_campaign_progress.sh \
-  --out-dir test_outputs/branding/continuous_hybrid \
-  --top-n 25
-```
-
 ## Common paths
 
 - active docs: `docs/branding/`
-- static inputs and configs: `resources/branding/`
-- runtime outputs and mutable DBs: `test_outputs/branding/`
+- static inputs and briefs: `resources/branding/`, `resources/brandpipe/`
+- runtime outputs and mutable DBs: `test_outputs/branding/`, `test_outputs/brandpipe/`
 - archived docs: `docs/archive/branding/2026/`
 - historical artifacts: `artifacts/branding/legacy/2026-02/`
 
 ## Notes
 
 - Run remote-dependent commands through `direnv exec .`.
-- After manual review, use `run_validation_lane.py` unless you intentionally want a lower-level script.
-- The previous large guide has been archived under `docs/archive/branding/2026/`.
+- Use `run_brandpipe_attack.py` and `run_brandpipe_validate.py` as the supported public surface.
+- The older lane wrappers and duplicated validation path are being retired from the active workflow.

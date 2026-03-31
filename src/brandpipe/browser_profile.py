@@ -106,6 +106,44 @@ def _extract_google_search_items(page) -> list[dict[str, str]]:
     return cleaned
 
 
+def _extract_app_store_search_items(page) -> list[dict[str, str]]:
+    rows = page.evaluate(
+        """() => {
+          const out = [];
+          const seen = new Set();
+          const anchors = Array.from(document.querySelectorAll('a[href*="/app/"]'));
+          for (const anchor of anchors) {
+            const href = (anchor.href || '').trim();
+            if (!href.includes('/app/')) continue;
+            if (seen.has(href)) continue;
+            const titleNode = anchor.querySelector('h1, h2, h3, h4');
+            const aria = (anchor.getAttribute('aria-label') || '').trim();
+            const text = (titleNode?.innerText || aria || anchor.innerText || '').trim();
+            const title = text.split('\\n').map((part) => part.trim()).filter(Boolean)[0] || '';
+            const slugMatch = href.match(/\\/app\\/([^/?#]+)\\/id\\d+/i);
+            const slug = slugMatch ? slugMatch[1].trim() : '';
+            seen.add(href);
+            out.push({ link: href, title, slug });
+            if (out.length >= 20) break;
+          }
+          return out;
+        }"""
+    )
+    if not isinstance(rows, list):
+        return []
+    cleaned: list[dict[str, str]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        link = str(item.get("link") or "").strip()
+        title = str(item.get("title") or "").strip()
+        slug = str(item.get("slug") or "").strip()
+        if not link:
+            continue
+        cleaned.append({"link": link, "title": title, "slug": slug})
+    return cleaned
+
+
 def run_browser_profile_smoke(
     *,
     profile_dir: str | Path | None = None,
@@ -137,6 +175,7 @@ def run_browser_profile_smoke(
             java_script_enabled=True,
         )
         try:
+            page = None
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=max(3000, int(timeout_ms)))
             _dismiss_cookie_banner(page)
@@ -197,6 +236,7 @@ def warm_browser_profile(
             java_script_enabled=True,
         )
         try:
+            page = None
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=max(3000, int(timeout_ms)))
             _dismiss_cookie_banner(page)
@@ -247,13 +287,23 @@ def browser_search_items(
 
     playwright = sync_playwright().start()
     try:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(resolved_profile_dir),
-            executable_path=str(browser_path),
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-            java_script_enabled=True,
-        )
+        try:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(resolved_profile_dir),
+                executable_path=str(browser_path),
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+                java_script_enabled=True,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "source": "browser_google",
+                "state": "browser_boot_failed",
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "final_url": "",
+                "title": "",
+            }
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=max(3000, int(timeout_ms)))
@@ -267,6 +317,7 @@ def browser_search_items(
                 return {
                     "ok": False,
                     "source": "browser_google",
+                    "state": "challenge",
                     "error": "browser_challenge",
                     "final_url": final_url,
                     "title": title,
@@ -278,6 +329,108 @@ def browser_search_items(
                 "engine": engine_key,
                 "items": items,
                 "result_count": len(items),
+                "final_url": final_url,
+                "title": title,
+                "state": "results" if items else "no_results",
+            }
+        except Exception as exc:
+            title = ""
+            final_url = ""
+            try:
+                title = page.title() if page is not None else ""
+            except Exception:
+                pass
+            try:
+                final_url = page.url if page is not None else ""
+            except Exception:
+                pass
+            state = "timeout" if "Timeout" in exc.__class__.__name__ else "page_error"
+            return {
+                "ok": False,
+                "source": "browser_google",
+                "state": state,
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "final_url": final_url,
+                "title": title,
+            }
+        finally:
+            context.close()
+    finally:
+        playwright.stop()
+
+
+def browser_app_store_items(
+    *,
+    query: str,
+    country: str,
+    profile_dir: str | Path | None = None,
+    chrome_executable: str | Path | None = None,
+    timeout_ms: int = 30000,
+    settle_ms: int = 1500,
+) -> dict[str, object]:
+    resolved_profile_dir = resolve_profile_dir(profile_dir)
+    browser_path = resolve_chrome_executable(chrome_executable)
+    encoded_query = parse.quote_plus(str(query or "").strip())
+    country_code = str(country or "").strip().lower() or "us"
+    target_url = f"https://apps.apple.com/{country_code}/search?term={encoded_query}"
+
+    playwright = sync_playwright().start()
+    try:
+        try:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(resolved_profile_dir),
+                executable_path=str(browser_path),
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+                java_script_enabled=True,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "source": "browser_app_store",
+                "country": country_code,
+                "state": "browser_boot_failed",
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "items": [],
+                "final_url": "",
+                "title": "",
+            }
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(target_url, wait_until="domcontentloaded", timeout=max(3000, int(timeout_ms)))
+            page.wait_for_timeout(max(0, int(settle_ms)))
+            title = page.title()
+            final_url = page.url
+            items = _extract_app_store_search_items(page)
+            return {
+                "ok": True,
+                "source": "browser_app_store",
+                "country": country_code,
+                "items": items,
+                "result_count": len(items),
+                "final_url": final_url,
+                "title": title,
+                "state": "results" if items else "no_results",
+            }
+        except Exception as exc:
+            title = ""
+            final_url = ""
+            try:
+                title = page.title() if page is not None else ""
+            except Exception:
+                pass
+            try:
+                final_url = page.url if page is not None else ""
+            except Exception:
+                pass
+            state = "timeout" if "Timeout" in exc.__class__.__name__ else "page_error"
+            return {
+                "ok": False,
+                "source": "browser_app_store",
+                "country": country_code,
+                "state": state,
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "items": [],
                 "final_url": final_url,
                 "title": title,
             }

@@ -1,13 +1,13 @@
 {
   "llm_context": {
-    "product_core": "Property settlement software that should feel credible but not trapped in billing language.",
+    "product_core": "Property settlement software that should feel ownable, memorable, and not trapped in billing language.",
     "target_users": [
       "property operators",
       "landlords",
       "management teams"
     ],
     "trust_signals": [
-      "credibility",
+      "memorability",
       "signal",
       "architectural order",
       "lightness without whimsy"
@@ -43,6 +43,6 @@
       "signal",
       "verge"
     ],
-    "notes": "Widen territory with architecture, shelter, craft, navigation, and light, but keep the commercial seriousness of a B2B admin product."
+    "notes": "Widen territory with architecture, shelter, craft, navigation, and light. Push for less ordinary sound-shapes instead of default B2B safety."
   }
 }

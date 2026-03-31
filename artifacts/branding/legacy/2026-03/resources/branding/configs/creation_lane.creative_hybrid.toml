@@ -34,9 +34,9 @@ generation_command = [
   "--generator-min-len", "7",
   "--generator-max-len", "13",
   "--llm-prompt-template-file", "{repo_root}/resources/branding/llm/llm_prompt.creative_longer_names_v1.txt",
-  "--validator-expensive-finalist-limit", "24",
-  "--validator-timeout-s", "14",
-  "--validator-max-concurrency", "16"
+  "--validator-expensive-finalist-limit", "80",
+  "--validator-timeout-s", "24",
+  "--validator-max-concurrency", "12"
 ]
 
 include_unchecked = false

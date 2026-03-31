@@ -1,98 +1,124 @@
 # Validation Workflow
 
-This repository has two valid post-review validation lanes because they answer different questions:
+The supported shortlist validation path is now a single runner:
 
-- Acceptance-tail lane:
-  - script: `scripts/branding/run_acceptance_tail.py`
-  - purpose: rerun strict live screening on manually reviewed `keep` and `maybe` names, merge survivors, and run legal/brand precheck
-  - best for: final human-triaged shortlist, live collision checks, and counsel handoff preparation
-- Async publish validator:
-  - script: `scripts/branding/naming_validate_async.py`
-  - purpose: bucket shortlist-selected names into `survivor`, `review`, `rejected`, and `pending_coverage`
-  - best for: scalable publish/readiness screening, coverage tracking, and wide shortlist filtering
+- `scripts/branding/run_brandpipe_validate.py`
 
-They are not duplicates.
+It replaces the old split between acceptance-tail and async publish validation on the active surface.
 
-- Acceptance-tail is a curated, human-in-the-loop last-mile filter.
-- Async validation is a broader publish-bucket pipeline that can run during campaign loops and on reviewed inputs.
+## What the runner does
 
-## Straight workflow
+`run_brandpipe_validate.py` reads either:
 
-Use `scripts/branding/run_validation_lane.py` as the stable entrypoint after manual review.
+- a reviewed shortlist CSV via `--input-csv`
+- a newline-delimited file via `--names-file`
+- inline names via `--names`
 
-Default behavior now:
+Then it runs the stable `src/brandpipe` validation stack and buckets each name into:
 
-- validate the reviewed CSV has real `keep/maybe/drop` decisions
-- run acceptance-tail first
-- run async publish validation second
-- write both result sets into one validation output directory
+- `survivor`
+- `review`
+- `rejected`
 
-Recommended command:
+The runner is blocking and reliability-first:
+
+- it stores durable queue state in `<out-dir>/validation_state/brandpipe.db`
+- it processes the shortlist serially
+- rerunning the same command against the same shortlist/config resumes from persisted state
+- if the shortlist/config fingerprint changes in the same out-dir, rerun with `--reset-state` or use a fresh out-dir
+
+## Canonical checks
+
+Default shortlist checks:
+
+- `domain`
+- `package`
+- `company`
+- `web`
+- `app_store`
+- `social`
+- `tm`
+
+Reliability posture:
+
+- `domain` and `package` are direct deterministic checks
+- `company` uses exact Companies House matching, not search-engine approximation
+- `web` uses Brave first, with browser-backed Google as the reliable recheck path
+- `app_store` is browser-only on the active surface
+- `tm` uses direct TMView Playwright probing
+- `social` is advisory, not a blocker
+
+Compatibility note:
+
+- `--concurrency` is still accepted for wrapper compatibility, but the effective worker count is always `1`
+
+## Recommended command
 
 ```zsh
-direnv exec . python3 scripts/branding/run_validation_lane.py \
-  --config resources/branding/configs/validation_lane.default.toml \
-  --pack-dir <decision_pack_dir>
+direnv exec . python3 scripts/branding/run_brandpipe_validate.py \
+  --input-csv <review_csv> \
+  --mode keep_maybe \
+  --out-dir <validation_out_dir> \
+  --web-browser-profile-dir test_outputs/brandpipe/playwright-profile \
+  --tmview-profile-dir test_outputs/brandpipe/playwright-profile
 ```
 
-Legal-heavier variant:
+Use `--mode keep` when you want only the manually approved names.
+
+If you need to discard the persisted queue state for an out-dir, add:
 
 ```zsh
-direnv exec . python3 scripts/branding/run_validation_lane.py \
-  --config resources/branding/configs/validation_lane.legal_heavy.toml \
-  --pack-dir <decision_pack_dir>
+--reset-state
 ```
-
-## Workflow modes
-
-Validation configs support `workflow`:
-
-- `dual`
-  - recommended
-  - runs `run_review_validation_bundle.py` underneath
-  - acceptance-tail first, async validation second
-- `acceptance_only`
-  - fallback mode when only the live/legal pass is wanted
-  - runs `run_acceptance_tail.py` directly
-
-The default configs now use `workflow = "dual"`.
 
 ## Outputs
 
-When `workflow = "dual"` and no explicit `validation_out_dir` is set, outputs stay in the decision pack directory:
+The runner writes:
 
-- `acceptance_tail/`
-- `postrank/`
-- `combined_validation_results.csv`
-- `combined_validation_summary.md`
-- `selected_review_names.txt`
-- `naming_campaign.db`
+- `validated_all.csv`
+- `validated_survivors.csv`
+- `validated_review_queue.csv`
+- `validated_rejected.csv`
+- `validated_publish_summary.json`
 
-This makes the reviewed CSV, live/legal results, async buckets, and combined summary live together.
+Interpretation:
 
-## Low-level entrypoints
+- `survivor`: all selected blocker checks passed
+- `review`: at least one selected check returned `warn`, `unavailable`, or `unsupported`
+- `rejected`: at least one blocker check failed
 
-Use the lower-level scripts only when you need to bypass the normal wrapper:
+## Browser profiles
 
-- `scripts/branding/run_acceptance_tail.py`
-  - manual acceptance-tail only
-- `scripts/branding/naming_validate_async.py`
-  - direct async publish validation against an existing DB/run
-- `scripts/branding/run_review_validation_bundle.py`
-  - direct dual-run helper when you already have a compatible reviewed CSV and want one-off control
+Use one persistent browser profile for browser-backed checks:
 
-## Why the old split felt confusing
+```zsh
+--web-browser-profile-dir test_outputs/brandpipe/playwright-profile \
+--tmview-profile-dir test_outputs/brandpipe/playwright-profile
+```
 
-Historically:
+That gives you a stable path for:
 
-- `run_validation_lane.py` sounded like the whole validation lane
-- but it only ran the acceptance-tail path
-- the actual dual-run helper existed separately
-- docs mostly pointed to the split command
+- browser Google
+- App Store search
+- TMView
 
-That mismatch is what caused the “do we have two validation lanes?” confusion.
+## Manual shortlist checks
 
-The current rule is:
+```zsh
+direnv exec . python3 scripts/branding/run_brandpipe_validate.py \
+  --names "orbiluna,scedaria,otarelan" \
+  --out-dir <validation_out_dir> \
+  --web-browser-profile-dir test_outputs/brandpipe/playwright-profile \
+  --tmview-profile-dir test_outputs/brandpipe/playwright-profile
+```
 
-- after manual review, run `run_validation_lane.py`
-- let the config decide whether that means `dual` or `acceptance_only`
+## Retired active surface
+
+The older wrapper/config path is no longer the supported entrypoint for shortlist validation:
+
+- `run_validation_lane.py`
+- `run_review_validation_bundle.py`
+- `run_acceptance_tail.py`
+- `naming_validate_async.py` as a user-facing shortlist command
+
+Those scripts may still exist in archived or migration contexts, but the supported operator flow is now `run_brandpipe_validate.py`.

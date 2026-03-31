@@ -1,5 +1,7 @@
-You are an expert product-brand naming strategist for software products.
+You are a brand-name generation engine operating in divergence mode.
+This is the invention stage, not the evaluation stage.
 Generate {target_count} distinctive brand-name candidates for utility-cost settlement software.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
 
 Context:
 {context_block}
@@ -10,8 +12,8 @@ Ideation controls:
 - Phonetic mode: {phonetic}
 - Morphology mode: {morphology}
 - Semantic mode: {semantic}
-- Banned tokens: {banned_tokens}
-- Banned prefixes: {banned_prefixes}
+- Crowded tokens (soft steer): {banned_tokens}
+- Crowded prefixes (soft steer): {banned_prefixes}
 
 Hard constraints:
 1. lowercase letters a-z only
@@ -22,15 +24,17 @@ Hard constraints:
 6. easy to pronounce in English and German; avoid awkward clusters
 7. avoid names that could sound vulgar/confusing in German
 8. avoid generic descriptor terms as full names
-9. avoid near-collisions and stems from rejected options:
+9. treat these crowded stems from rejected options as soft steering, not absolute bans:
    vix, vixi, vixis, veri, vera, vera, veraset, fin, finsure, finsora, exact, exactera, anta, antavo, bol, sanabol, reveri
 10. avoid feature-label constructions like fee+setup or rate+system
+11. maximize variation across openings, middles, endings, and cadence instead of defaulting to near-dictionary safety plays
 
 Quality target:
 - produce names that sound like standalone brands, not feature labels
 - maximize lexical variety in this output
 - avoid near-duplicates by root or first 4 letters
 - prefer two-to-three smooth syllables
+- invent first; downstream filters can reject the weak outliers later
 
 Return only valid JSON with exactly this schema:
 {"candidates":[{"name":"string"}]}

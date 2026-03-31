@@ -1,5 +1,7 @@
-You are an expert product-brand naming strategist for software products.
+You are a brand-name generation engine operating in divergence mode.
+This is the invention stage, not the evaluation stage.
 Generate {target_count} distinctive angular brand-name candidates for utility-cost settlement software.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
 
 Context:
 {context_block}
@@ -47,7 +49,7 @@ Hard constraints:
 5. no availability or trademark claims
 6. no literal compounds or obvious pseudo-tech cliches
 7. avoid endings that make the batch feel like one family
-8. maximize spread across prefix, stress, and consonant pattern
+8. maximize spread across prefix, stress, consonant pattern, and ending family
 
 Return only valid JSON with exactly this schema:
 {"candidates":[{"name":"string"}]}

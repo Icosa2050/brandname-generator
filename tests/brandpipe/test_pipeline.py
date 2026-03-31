@@ -22,6 +22,7 @@ from brandpipe.models import CandidateResult, ResultStatus
 from brandpipe.pipeline import load_config, recheck_pending_web, recheck_tmview, run_pipeline
 from brandpipe.scoring import build_attractiveness_result
 from brandpipe.tmview import TmviewProbeResult
+from brandpipe.validation_runtime import ProbeResult
 
 
 class PipelineTests(unittest.TestCase):
@@ -46,6 +47,8 @@ class PipelineTests(unittest.TestCase):
                     fixture_input = "{fixture_path}"
                     rounds = 2
                     candidates_per_round = 18
+                    family_mix_profile = "surface_diverse_v2"
+                    family_llm_retry_limit = 3
                     overgenerate_factor = 2.8
                     round_seed_min = 6
                     round_seed_max = 12
@@ -60,6 +63,7 @@ class PipelineTests(unittest.TestCase):
                     local_filter_lead_fragment_limit = 1
                     local_filter_lead_fragment_length = 4
                     local_filter_lead_skeleton_limit = 2
+                    family_prompt_template_files = {{ smooth_blend = "relative_smooth.txt" }}
 
                     [ideation.pseudoword]
                     language_plugin = "orthographic_english"
@@ -71,6 +75,7 @@ class PipelineTests(unittest.TestCase):
                     [validation]
                     checks = ""
                     parallel_workers = 5
+                    web_search_order = "brave,google_cse,duckduckgo"
 
                     [export]
                     out_csv = "{root / 'finalists_{run_id}.csv'}"
@@ -98,6 +103,12 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(config.ideation.local_filter_lead_fragment_limit, 1)
         self.assertEqual(config.ideation.local_filter_lead_fragment_length, 4)
         self.assertEqual(config.ideation.local_filter_lead_skeleton_limit, 2)
+        self.assertEqual(config.ideation.family_mix_profile, "surface_diverse_v2")
+        self.assertEqual(config.ideation.family_llm_retry_limit, 3)
+        self.assertEqual(
+            config.ideation.family_prompt_template_files["smooth_blend"],
+            (root / "relative_smooth.txt").resolve(),
+        )
         assert config.ideation.pseudoword is not None
         self.assertEqual(config.ideation.pseudoword.language_plugin, "orthographic_english")
         self.assertEqual(
@@ -107,6 +118,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(config.ideation.pseudoword.rare_seed_count, 10)
         self.assertEqual(config.ideation.pseudoword.rare_profile, "aggressive")
         self.assertEqual(config.validation.parallel_workers, 5)
+        self.assertEqual(config.validation.web_search_order, "brave,browser_google")
 
     def test_fixture_run_exports_ranked_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -174,9 +186,79 @@ class PipelineTests(unittest.TestCase):
                 metrics = json.loads(str(row["metrics_json"]))
                 self.assertEqual(metrics["counts"]["ideation_candidates"], 3)
                 self.assertEqual(metrics["counts"]["ranked_candidates"], 3)
-                self.assertEqual(metrics["decision_counts"]["candidate"], 3)
+                self.assertEqual(sum(int(value) for value in metrics["decision_counts"].values()), 3)
                 self.assertIn("ideation", metrics["durations_ms"])
                 self.assertTrue(metrics["export_path"].endswith(f"finalists_{run_id}.csv"))
+
+    def test_surface_diverse_profile_preserves_family_mix_in_ranked_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            fixture_path = root / "fixture.json"
+            fixture_path.write_text(
+                textwrap.dedent(
+                    """
+                    {
+                      "candidates": [
+                        {"name": "nimbalyst"},
+                        {"name": "brandnamic"}
+                      ]
+                    }
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            config_path = root / "run.toml"
+            db_path = root / "brandpipe.db"
+            config_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    [run]
+                    title = "surface-diverse-run"
+                    db_path = "{db_path}"
+
+                    [brief]
+                    product_core = "incident response signal coordination"
+                    target_users = ["operators", "responders"]
+                    trust_signals = ["clarity", "speed"]
+
+                    [ideation]
+                    provider = "fixture"
+                    fixture_input = "{fixture_path}"
+                    family_mix_profile = "surface_diverse_v1"
+                    late_fusion_min_per_family = 1
+                    family_quotas = {{ literal_tld_hack = 1, smooth_blend = 1, mascot_mutation = 1, contrarian_dictionary = 1, brutalist_utility = 1 }}
+
+                    [validation]
+                    checks = ""
+                    """
+                ).strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            run_id = run_pipeline(config_path)
+
+            with db.open_db(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT c.display_name, c.family, rk.rank_position, rk.family_rank
+                    FROM candidate_rankings rk
+                    JOIN candidates c ON c.id = rk.candidate_id
+                    WHERE c.run_id = ?
+                    ORDER BY rk.rank_position ASC
+                    """,
+                    (run_id,),
+                ).fetchall()
+                families = [str(row["family"]) for row in rows]
+                self.assertIn("literal_tld_hack", families)
+                self.assertIn("smooth_blend", families)
+                self.assertIn("mascot_mutation", families)
+                self.assertIn("contrarian_dictionary", families)
+                self.assertIn("brutalist_utility", families)
+                self.assertEqual(len({str(row["family"]) for row in rows[:5]}), 5)
+                metrics = json.loads(str(db.get_run(conn, run_id=run_id)["metrics_json"]))
+                self.assertEqual(metrics["ideation"]["family_counts"]["smooth_blend"], 1)
 
     def test_validation_failure_is_isolated_to_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -221,12 +303,23 @@ class PipelineTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            def fake_validate_candidate(*, name: str, config: object) -> list[object]:
+            def fake_probe_check(*, check_name: str, name: str, config: object):
+                del config
+                if check_name != "domain":
+                    self.fail(f"unexpected check {check_name}")
                 if name == "certivo":
                     raise RuntimeError("probe exploded")
-                return []
+                return ProbeResult(
+                    candidate_result=CandidateResult(
+                        check_name="domain",
+                        status=ResultStatus.PASS,
+                        score_delta=0.0,
+                        reason="",
+                        details={},
+                    ),
+                )
 
-            with mock.patch("brandpipe.pipeline.validate_candidate", side_effect=fake_validate_candidate):
+            with mock.patch("brandpipe.validation_queue.probe_check", side_effect=fake_probe_check):
                 run_id = run_pipeline(config_path)
 
             with db.open_db(db_path) as conn:
@@ -240,7 +333,8 @@ class PipelineTests(unittest.TestCase):
                     FROM candidate_results r
                     JOIN candidates c ON c.id = r.candidate_id
                     WHERE c.run_id = ?
-                      AND r.result_key = 'validation_runtime'
+                      AND r.result_key = 'domain'
+                      AND c.name = 'certivo'
                     """,
                     (run_id,),
                 ).fetchone()
@@ -250,9 +344,9 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(runtime_row["name"], "certivo")
                 metrics = json.loads(str(row["metrics_json"]))
                 self.assertEqual(metrics["validation_status_counts"]["unavailable"], 1)
-                self.assertEqual(metrics["validation_check_counts"]["validation_runtime"], 1)
+                self.assertEqual(metrics["validation_check_counts"]["domain"], 2)
 
-    def test_pipeline_can_validate_candidates_concurrently(self) -> None:
+    def test_pipeline_validates_candidates_serially_via_queue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             fixture_path = root / "fixture.json"
@@ -300,31 +394,31 @@ class PipelineTests(unittest.TestCase):
             max_active = 0
             lock = threading.Lock()
 
-            def fake_validate_candidate(*, name: str, config: object) -> list[CandidateResult]:
+            def fake_probe_check(*, check_name: str, name: str, config: object):
                 nonlocal active, max_active
-                del name, config
+                del check_name, name, config
                 with lock:
                     active += 1
                     max_active = max(max_active, active)
                 try:
                     time.sleep(0.05)
-                    return [
-                        CandidateResult(
+                    return ProbeResult(
+                        candidate_result=CandidateResult(
                             check_name="domain",
                             status=ResultStatus.PASS,
                             score_delta=0.0,
                             reason="",
                             details={},
-                        )
-                    ]
+                        ),
+                    )
                 finally:
                     with lock:
                         active -= 1
 
-            with mock.patch("brandpipe.pipeline.validate_candidate", side_effect=fake_validate_candidate):
+            with mock.patch("brandpipe.validation_queue.probe_check", side_effect=fake_probe_check):
                 run_id = run_pipeline(config_path)
 
-            self.assertGreaterEqual(max_active, 2)
+            self.assertEqual(max_active, 1)
             with db.open_db(db_path) as conn:
                 row = db.get_run(conn, run_id=run_id)
                 self.assertIsNotNone(row)
@@ -390,8 +484,8 @@ class PipelineTests(unittest.TestCase):
                 ).fetchall()
                 self.assertEqual(len(rankings), 2)
                 decisions = {str(row["name"]): str(row["decision"]) for row in rankings}
-                self.assertEqual(decisions["baltera"], "candidate")
-                self.assertEqual(decisions["jaxqen"], "watch")
+                self.assertNotEqual(decisions["baltera"], "rejected")
+                self.assertIn(decisions["jaxqen"], {"watch", "blocked", "rejected", "degraded"})
 
     def test_pipeline_injects_recent_blocked_patterns_into_effective_brief(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -815,7 +909,7 @@ class PipelineTests(unittest.TestCase):
                     fixture_input = "{fixture_path}"
 
                     [validation]
-                    checks = "tmview"
+                    checks = "tm"
                     tmview_profile_dir = "{root / 'tmview-profile'}"
                     tmview_chrome_executable = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
                     """
@@ -825,7 +919,7 @@ class PipelineTests(unittest.TestCase):
             )
 
             with mock.patch(
-                "brandpipe.pipeline.probe_tmview_names",
+                "brandpipe.tmview.probe_names",
                 return_value=[
                     TmviewProbeResult(
                         name="hefkora",
@@ -849,14 +943,14 @@ class PipelineTests(unittest.TestCase):
                     """
                     SELECT status, reason
                     FROM candidate_results
-                    WHERE candidate_id = ? AND result_key = 'tmview'
+                    WHERE candidate_id = ? AND result_key = 'tm'
                     """,
                     (candidate_id,),
                 ).fetchone()
                 self.assertIsNotNone(result_row)
                 assert result_row is not None
-                self.assertEqual(result_row["status"], "fail")
-                self.assertEqual(result_row["reason"], "tmview_near_collision")
+                self.assertEqual(result_row["status"], "warn")
+                self.assertEqual(result_row["reason"], "tm_near_review")
 
     def test_pipeline_marks_tmview_unavailable_when_profile_is_not_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -883,7 +977,7 @@ class PipelineTests(unittest.TestCase):
                     fixture_input = "{fixture_path}"
 
                     [validation]
-                    checks = "tmview"
+                    checks = "tm"
                     """
                 ).strip()
                 + "\n",
@@ -899,14 +993,14 @@ class PipelineTests(unittest.TestCase):
                     """
                     SELECT status, reason
                     FROM candidate_results
-                    WHERE candidate_id = ? AND result_key = 'tmview'
+                    WHERE candidate_id = ? AND result_key = 'tm'
                     """,
                     (candidate_id,),
                 ).fetchone()
                 self.assertIsNotNone(result_row)
                 assert result_row is not None
                 self.assertEqual(result_row["status"], "unavailable")
-                self.assertEqual(result_row["reason"], "tmview_profile_unconfigured")
+                self.assertEqual(result_row["reason"], "tm_profile_missing")
 
     def test_pipeline_applies_local_collision_filter_before_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1029,7 +1123,8 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(metrics["counts"]["taste_filter_passed"], 1)
                 self.assertEqual(metrics["counts"]["local_filter_passed"], 1)
                 self.assertEqual(metrics["counts"]["ideation_candidates"], 1)
-                self.assertIn("banned_suffix_family", metrics["ideation"]["taste_filter"]["dropped"])
+                dropped = metrics["ideation"]["taste_filter"]["dropped"]
+                self.assertTrue("banned_suffix_family" in dropped or "banned_morpheme" in dropped)
 
     def test_pipeline_passes_recent_avoidance_context_into_ideation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

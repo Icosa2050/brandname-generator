@@ -12,6 +12,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from brandpipe import db
+from brandpipe.models import NameFamily, SurfacePolicy, SurfacedCandidate
 from brandpipe.scoring import build_attractiveness_result
 
 
@@ -55,6 +56,53 @@ class DatabaseTests(unittest.TestCase):
                 conn.commit()
                 rows = db.list_candidates(conn, run_id=run_id)
                 self.assertEqual([row["name"] for row in rows], ["Certivo", "Vantora"])
+
+    def test_candidate_surfaces_preserve_display_and_comparison_forms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "brandpipe.db"
+            with db.open_db(db_path) as conn:
+                db.ensure_schema(conn)
+                run_id = db.create_run(
+                    conn,
+                    title="surface-run",
+                    brief={"product_core": "x"},
+                    config={"ideation": {"provider": "fixture", "family_mix_profile": "surface_diverse_v1"}},
+                )
+                db.add_candidate_surfaces(
+                    conn,
+                    run_id=run_id,
+                    candidates=[
+                        SurfacedCandidate(
+                            display_name="incident.io",
+                            name_normalized="incidentio",
+                            family=NameFamily.LITERAL_TLD_HACK,
+                            surface_policy=SurfacePolicy.DOTTED_LOWER,
+                        ),
+                        SurfacedCandidate(
+                            display_name="incident-io",
+                            name_normalized="incidentio",
+                            family=NameFamily.LITERAL_TLD_HACK,
+                            surface_policy=SurfacePolicy.HYPHENATED_LOWER,
+                        ),
+                        SurfacedCandidate(
+                            display_name="Royal TSX",
+                            name_normalized="royaltsx",
+                            family=NameFamily.BRUTALIST_UTILITY,
+                            surface_policy=SurfacePolicy.TITLE_SPACED_ACRONYM,
+                        ),
+                    ],
+                )
+                conn.commit()
+                rows = db.list_candidates(conn, run_id=run_id)
+                self.assertEqual(
+                    [str(row["display_name"]) for row in rows],
+                    ["Royal TSX", "incident-io", "incident.io"],
+                )
+                normalized = {str(row["display_name"]): str(row["name_normalized"]) for row in rows}
+                self.assertEqual(normalized["incident.io"], "incidentio")
+                self.assertEqual(normalized["incident-io"], "incidentio")
+                families = {str(row["display_name"]): str(row["family"]) for row in rows}
+                self.assertEqual(families["Royal TSX"], NameFamily.BRUTALIST_UTILITY.value)
 
     def test_recent_positive_feedback_only_returns_clean_validated_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

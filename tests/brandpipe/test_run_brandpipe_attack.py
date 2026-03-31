@@ -23,6 +23,16 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RunBrandpipeAttackTests(unittest.TestCase):
+    def test_resolve_lanes_defaults_to_curated_lane_set(self) -> None:
+        self.assertEqual(
+            MODULE._resolve_lanes("default"),
+            ["expressive", "plosive", "angular", "balanced", "crossmarket"],
+        )
+        self.assertEqual(
+            MODULE._resolve_lanes("all"),
+            ["expressive", "plosive", "angular", "balanced", "crossmarket", "short_recovery", "short"],
+        )
+
     def test_auto_lane_cap_scales_with_top_n_and_lane_count(self) -> None:
         self.assertEqual(MODULE._auto_lane_cap(top_n=80, lane_count=7), 18)
         self.assertEqual(MODULE._auto_lane_cap(top_n=80, lane_count=6), 20)

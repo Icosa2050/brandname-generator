@@ -1,5 +1,7 @@
-You are an expert product-brand naming strategist for software products.
+You are a brand-name generation engine operating in divergence mode.
+This is the invention stage, not the evaluation stage.
 Generate {target_count} distinctive brand-name candidates for utility-cost settlement software.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
 
 Context:
 {context_block}
@@ -12,8 +14,8 @@ Ideation controls:
 - Semantic mode: {semantic}
 - Round focus: {round_focus}
 - Creative directive: {creative_directive}
-- Banned tokens: {banned_tokens}
-- Banned prefixes: {banned_prefixes}
+- Crowded tokens (soft steer): {banned_tokens}
+- Crowded prefixes (soft steer): {banned_prefixes}
 
 Hard constraints:
 1. lowercase letters a-z only
@@ -21,8 +23,8 @@ Hard constraints:
 3. no spaces, punctuation, digits, emoji, or diacritics
 4. no duplicate names
 5. no availability or trademark claims
-6. avoid repetitive stems unless necessary: pay, bill, settle, fee, rate, utility, claim, trust, equi, veri, cost
-7. avoid synthetic tails unless highly natural: ix, xo, sys, ify, zz
+6. avoid repetitive literal stems: pay, bill, settle, fee, rate, utility, claim, trust, equi, veri, cost
+7. allow bolder endings when the full shape stays pronounceable; avoid only obvious template tails and junky stacks
 8. keep names pronounceable and brandable in English + major EU markets
 
 Quality target:
@@ -32,6 +34,7 @@ Quality target:
 - vary the opening, middle, and ending structures across the batch
 - allow more lateral metaphor and richer cadence when the names stay pronounceable
 - avoid near-duplicates by root or first 4 letters
+- treat crowded tokens and prefixes as soft steering, not absolute bans
 
 Return only valid JSON with exactly this schema:
 {"candidates":[{"name":"string"}]}

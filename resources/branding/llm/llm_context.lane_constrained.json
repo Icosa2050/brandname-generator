@@ -9,12 +9,12 @@
     "trust_signals": [
       "clarity",
       "accuracy",
-      "calmness",
+      "memorability",
       "administrative reliability"
     ],
     "forbidden_directions": [
       "fintech jargon",
-      "consumer app playfulness",
+      "nursery-brand playfulness",
       "sports nutrition",
       "crypto",
       "banking language"
@@ -42,6 +42,6 @@
       "meridian",
       "signal"
     ],
-    "notes": "Bias toward sober, neutral, non-descriptive names with low typo risk and low fintech drift."
+    "notes": "Bias toward neutral, non-descriptive names with strong phonetic structure and low fintech drift. Constraint should not collapse into boring enterprise safety."
   }
 }

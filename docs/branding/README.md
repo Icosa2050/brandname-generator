@@ -3,7 +3,8 @@
 This folder now contains only active documentation.
 
 ## Active documentation
-- `docs/branding/validation_workflow.md`: explains why both validation lanes exist and the current straight-through wrapper workflow.
+- `docs/branding/validation_workflow.md`: canonical shortlist validation flow based on `run_brandpipe_validate.py`.
+  - includes the queue-backed blocking validator behavior, resume model, and `--reset-state` handling
 - `docs/branding/local_remote_ai_workflow.md`: practical workflow for local-only, remote-only, and hybrid ideation modes.
 - `docs/branding/campaign_configuration_reference.md`: grouped configuration reference and high-impact runner options.
 - `docs/branding/background_daemon_setup.md`: cross-platform background daemon setup and operating guidance.
@@ -32,10 +33,6 @@ This folder now contains only active documentation.
   - `resources/branding/inputs/source_inputs_expansion_v3.csv`
   - `resources/branding/inputs/source_exclusions_seed_v1.txt`
   - `resources/branding/lexicon/naming_false_friend_lexicon_v1.md`
-  - `resources/branding/configs/creation_lane.default.toml`
-  - `resources/branding/configs/creation_lane.creative_hybrid.toml`
-  - `resources/branding/configs/validation_lane.default.toml`
-  - `resources/branding/configs/validation_lane.legal_heavy.toml`
   - `resources/branding/llm/llm_context.example.json`
   - `resources/branding/llm/llm_models.example.toml`
   - `resources/branding/llm/llm_prompt.utility_split_v1.txt`
@@ -45,7 +42,11 @@ This folder now contains only active documentation.
     - `resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
     - `resources/branding/llm/prompts/README.md`
   - `resources/branding/templates/naming_user_test_results.csv`
+- `resources/brandpipe/`: brandpipe briefs and lane inputs for the supported attack runner.
 - `scripts/branding/`: operational scripts.
+  - `scripts/branding/run_brandpipe_attack.py`
+  - `scripts/branding/run_brandpipe_validate.py`
+    - active shortlist validator with persisted queue state under each out-dir
   - `scripts/branding/build_corpus_strategy_baseline.py`
 - `test_outputs/branding/`: mutable run outputs and working DBs.
 - `artifacts/branding/legacy/2026-02/`: historical output artifacts moved out of docs.
@@ -55,3 +56,5 @@ This folder now contains only active documentation.
   - `docs/archive/branding/2026/`
 - Archived operational guide snapshot:
   - `docs/archive/branding/2026/name_generator_guide_legacy_pre_dual_validation_2026-03-26.md`
+- Archived legacy lane wrappers/configs:
+  - `artifacts/branding/legacy/2026-03/`

@@ -68,7 +68,7 @@ checks = "domain,package,web,social"
 parallel_workers = 4
 scope = "global"
 store_countries = "de,ch,it"
-web_search_order = "brave,google_cse,duckduckgo"
+web_search_order = "brave,browser_google"
 
 [export]
 out_csv = "../../test_outputs/brandpipe/attack_crossmarket/finalists_{run_id}.csv"

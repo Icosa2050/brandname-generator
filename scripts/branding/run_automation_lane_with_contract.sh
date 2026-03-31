@@ -29,7 +29,9 @@ WORKER_ID="${WORKER_ID//[^A-Za-z0-9_.-]/_}"
 ENV_BOOTSTRAP_MODE="${BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE:-none}"
 ENV_REQUIRE_DIRENV="${BRANDING_AUTOMATION_REQUIRE_DIRENV:-0}"
 ENV_DOTENV_FILE="${BRANDING_AUTOMATION_DOTENV_FILE:-.env}"
+ENV_DIRENV_BIN_OVERRIDE="${BRANDING_AUTOMATION_DIRENV_BIN:-}"
 ENV_LOADED_WITH_DIRENV=0
+DIRENV_BIN=""
 HEALTH_MIN_NEW_SHORTLIST_QUALITY="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST_QUALITY:-6}"
 HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY="${OPENROUTER_HEALTH_MIN_NEW_SHORTLIST_REMOTE_QUALITY:-10}"
 HEALTH_MIN_POSTRANK_STRONG_QUALITY="${OPENROUTER_HEALTH_MIN_POSTRANK_STRONG_QUALITY:-4}"
@@ -93,18 +95,42 @@ source_dotenv_file() {
   set +a
 }
 
+resolve_direnv_bin() {
+  if [[ -n "$DIRENV_BIN" && -x "$DIRENV_BIN" ]]; then
+    echo "$DIRENV_BIN"
+    return 0
+  fi
+  if [[ -n "$ENV_DIRENV_BIN_OVERRIDE" ]]; then
+    if [[ ! -x "$ENV_DIRENV_BIN_OVERRIDE" ]]; then
+      return 1
+    fi
+    DIRENV_BIN="$ENV_DIRENV_BIN_OVERRIDE"
+    echo "$DIRENV_BIN"
+    return 0
+  fi
+  # Bypass zsh direnv shell hooks so PATH-based overrides and tests stay deterministic.
+  local resolved_bin
+  resolved_bin="$(whence -p direnv 2>/dev/null || true)"
+  if [[ -z "$resolved_bin" || ! -x "$resolved_bin" ]]; then
+    return 1
+  fi
+  DIRENV_BIN="$resolved_bin"
+  echo "$DIRENV_BIN"
+}
+
 bootstrap_repo_env() {
+  local direnv_bin
   case "$ENV_BOOTSTRAP_MODE" in
     none)
       ENV_LOADED_WITH_DIRENV=0
       return 0
       ;;
     direnv)
-      if ! command -v direnv >/dev/null 2>&1; then
+      if ! direnv_bin="$(resolve_direnv_bin)"; then
         echo "missing required command: direnv (mode=direnv)" >&2
         return 1
       fi
-      direnv allow . >/dev/null
+      "$direnv_bin" allow . >/dev/null
       ENV_LOADED_WITH_DIRENV=1
       return 0
       ;;
@@ -114,8 +140,8 @@ bootstrap_repo_env() {
       return 0
       ;;
     auto)
-      if command -v direnv >/dev/null 2>&1; then
-        if direnv allow . >/dev/null 2>&1; then
+      if direnv_bin="$(resolve_direnv_bin)"; then
+        if "$direnv_bin" allow . >/dev/null 2>&1; then
           ENV_LOADED_WITH_DIRENV=1
           return 0
         fi
@@ -143,8 +169,13 @@ bootstrap_repo_env() {
 }
 
 run_in_repo_env() {
+  local direnv_bin
   if [[ "$ENV_LOADED_WITH_DIRENV" == "1" ]]; then
-    direnv exec . "$@"
+    if ! direnv_bin="$(resolve_direnv_bin)"; then
+      echo "missing required command: direnv (run_in_repo_env)" >&2
+      return 1
+    fi
+    "$direnv_bin" exec . "$@"
     return $?
   fi
   "$@"

@@ -40,6 +40,15 @@ RETARGET_ENDINGS: tuple[str, ...] = (
     "ien",
     "ine",
     "ora",
+    "o",
+    "u",
+    "ou",
+    "oo",
+    "io",
+    "is",
+    "on",
+    "or",
+    "um",
 )
 ROLEISH_TERMS = {
     "customer",
@@ -115,8 +124,10 @@ def _score_name(name: str, ingredients: tuple[str, ...]) -> float:
     score = 0.55
     if 6 <= len(normalized) <= 10:
         score += 0.15
-    if normalized[-1:] in {"a", "e", "n", "l", "r", "s"}:
+    if normalized[-1:] in {"a", "e", "n", "l", "r", "s", "o", "u", "m"}:
         score += 0.08
+    if normalized.endswith(("oo", "ou", "io", "um", "or")):
+        score += 0.05
     if len(re.findall(r"[aeiouy]+", normalized)) in {2, 3}:
         score += 0.12
     if len({part[:1] for part in ingredients if part}) > 1:

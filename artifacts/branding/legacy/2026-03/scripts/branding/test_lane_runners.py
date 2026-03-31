@@ -58,6 +58,51 @@ class LaneRunnersTest(unittest.TestCase):
             self.assertIn('build_decision_pack.py', proc.stdout)
             self.assertIn('creation_lane_done', proc.stdout)
 
+    def test_creation_lane_continues_when_generation_fails_but_db_exists(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = repo_root / 'scripts/branding/run_creation_lane.py'
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            out_dir = tmp / 'campaign_out'
+            out_dir.mkdir(parents=True, exist_ok=True)
+            db_path = out_dir / 'naming_campaign.db'
+            with ndb.open_connection(db_path) as conn:
+                ndb.ensure_schema(conn)
+                conn.commit()
+
+            cfg_path = tmp / 'creation.toml'
+            cfg_path.write_text(
+                textwrap.dedent(
+                    f"""
+                    [creation]
+                    out_dir = "{out_dir}"
+                    db = "{db_path}"
+                    pack_output_dir = "{tmp}/packs"
+                    pack_prefix = "decision_pack"
+                    review_tiers = "10,5"
+                    run_generation = true
+                    generation_command = ["python3", "-c", "import sys; raise SystemExit(3)"]
+                    include_unchecked = false
+                    python_bin = "python3"
+                    dry_run = false
+                    """
+                ).strip()
+                + '\n',
+                encoding='utf-8',
+            )
+
+            proc = subprocess.run(
+                ['python3', str(script), '--config', str(cfg_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            self.assertIn('creation_lane_warn generation_command_failed code=3', proc.stdout)
+            self.assertIn('creation_generation_exit_code=3', proc.stdout)
+            self.assertIn('creation_lane_done', proc.stdout)
+
     def test_validation_lane_requires_manual_decisions(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = repo_root / 'scripts/branding/run_validation_lane.py'

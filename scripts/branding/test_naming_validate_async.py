@@ -1837,6 +1837,21 @@ class NamingValidateAsyncMemoryTest(unittest.TestCase):
         self.assertTrue(got['hard_fail'])
         self.assertEqual(got['reason'], 'domain_unavailable_de')
 
+    def test_check_domain_preserves_digits_in_candidate_name(self) -> None:
+        args = _base_args()
+        seen_names: list[str] = []
+
+        def fake_rdap_available(name: str, tld: str) -> str:
+            seen_names.append(name)
+            return 'yes'
+
+        with mock.patch('naming_validate_async.ng.rdap_available', side_effect=fake_rdap_available):
+            got = nva.check_domain('set4you', args)
+
+        self.assertEqual(got['status'], 'pass')
+        self.assertTrue(seen_names)
+        self.assertTrue(all(name == 'set4you' for name in seen_names))
+
     def test_resolve_required_domain_tlds_uses_scope_defaults_when_unset(self) -> None:
         args = _base_args()
         args.scope = 'global'

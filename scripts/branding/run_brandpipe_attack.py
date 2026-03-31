@@ -33,6 +33,17 @@ LANE_CONFIGS = {
     "short_recovery": ROOT_DIR / "resources/brandpipe/openrouter_attack_short_recovery.toml",
     "short": ROOT_DIR / "resources/brandpipe/openrouter_attack_short.toml",
 }
+DEFAULT_LANES: tuple[str, ...] = (
+    "expressive",
+    "plosive",
+    "angular",
+    "balanced",
+    "crossmarket",
+)
+EXPERIMENTAL_LANES: tuple[str, ...] = (
+    "short_recovery",
+    "short",
+)
 ENDING_FAMILY_RULES: tuple[tuple[str, str], ...] = (
     ("aria", "aria"),
     ("eria", "eria"),
@@ -65,6 +76,19 @@ DECISION_ORDER = {"candidate": 0, "watch": 1, "blocked": 2}
 
 def _timestamp_local() -> str:
     return datetime.now().astimezone().strftime("%H:%M:%S")
+
+
+def _resolve_lanes(raw: str) -> list[str]:
+    token = str(raw or "").strip().lower()
+    if not token or token == "default":
+        return list(DEFAULT_LANES)
+    if token == "all":
+        return list(DEFAULT_LANES + EXPERIMENTAL_LANES)
+    lanes = [item.strip() for item in str(raw).split(",") if item.strip()]
+    unknown = [lane for lane in lanes if lane not in LANE_CONFIGS]
+    if unknown:
+        raise SystemExit(f"unknown lanes: {', '.join(unknown)}")
+    return lanes
 
 
 def _normalize_name(value: object) -> str:
@@ -815,8 +839,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--lanes",
-        default="all",
-        help="Comma-separated lane names or 'all'.",
+        default="default",
+        help="Comma-separated lane names, 'default', or 'all'.",
     )
     parser.add_argument(
         "--top-n",
@@ -890,13 +914,7 @@ def main() -> int:
     rare_profile = str(getattr(args, "pseudoword_rare_profile", "off") or "").strip().lower()
     if not rare_profile:
         rare_profile = "balanced" if rare_seed_count > 0 else "off"
-    if str(args.lanes).strip().lower() == "all":
-        lanes = list(LANE_CONFIGS.keys())
-    else:
-        lanes = [item.strip() for item in str(args.lanes).split(",") if item.strip()]
-    unknown = [lane for lane in lanes if lane not in LANE_CONFIGS]
-    if unknown:
-        raise SystemExit(f"unknown lanes: {', '.join(unknown)}")
+    lanes = _resolve_lanes(args.lanes)
 
     generated_at = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_out_dir = out_dir / generated_at

@@ -31,6 +31,14 @@ class TmviewProbeResult:
     active_exact_hits: int = 0
     inactive_exact_hits: int = 0
     unknown_exact_hits: int = 0
+    state: str = ""
+    query_name: str = ""
+    normalized_name: str = ""
+    query_sequence: str = ""
+    surface_exact_hits: int = 0
+    normalized_exact_hits: int = 0
+    surface_active_exact_hits: int = 0
+    normalized_active_exact_hits: int = 0
 
 
 ACTIVE_STATUS_PATTERNS = (
@@ -110,7 +118,11 @@ def _fold_ascii_letters(raw: str) -> str:
 
 def normalize_alpha(raw: str) -> str:
     folded = _fold_ascii_letters(raw).lower()
-    return "".join(ch for ch in folded if ch.isalpha())
+    return "".join(ch for ch in folded if ch.isalnum())
+
+
+def _normalize_surface_phrase(raw: str) -> str:
+    return re.sub(r"\s+", " ", _fold_ascii_letters(str(raw or "")).strip().lower())
 
 
 def build_tmview_url(name: str, *, nice_class: str | None = None) -> str:
@@ -145,31 +157,45 @@ def classify_tm_status(raw: str) -> str:
 
 
 def _title_exact_or_near(name: str, text: str) -> tuple[bool, bool]:
+    mode, near = _title_match_mode(name, normalize_alpha(name), text)
+    return (mode != "", near)
+
+
+def _title_match_mode(display_name: str, normalized_name: str, text: str) -> tuple[str, bool]:
     plain = re.sub(r"\s+", " ", _fold_ascii_letters(str(text or "")).strip().lower())
     if not plain:
-        return False, False
+        return "", False
+    display_plain = _normalize_surface_phrase(display_name)
     normalized = normalize_alpha(plain)
-    if normalized == name:
-        return True, False
-    if re.search(rf"(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)", plain):
-        return True, False
-    tokens = set(re.findall(r"[a-z]{4,}", plain))
+    if display_plain and (
+        plain == display_plain
+        or re.search(rf"(^|[^a-z0-9]){re.escape(display_plain)}([^a-z0-9]|$)", plain)
+    ):
+        return "surface_exact", False
+    if normalized == normalized_name:
+        return "normalized_exact", False
+    tokens = set(re.findall(r"[a-z0-9]{4,}", plain))
     for token in tokens:
-        if token == name:
+        if token == normalized_name:
             continue
-        ratio = SequenceMatcher(None, token, name).ratio()
+        ratio = SequenceMatcher(None, token, normalized_name).ratio()
         prefix_len = 0
-        for ch1, ch2 in zip(token, name):
+        for ch1, ch2 in zip(token, normalized_name):
             if ch1 != ch2:
                 break
             prefix_len += 1
-        if ratio >= 0.85 and abs(len(token) - len(name)) <= 2:
-            return False, True
-        if ratio >= 0.77 and abs(len(token) - len(name)) <= 2 and prefix_len >= 3 and token[-1:] == name[-1:]:
-            return False, True
-        if ratio >= 0.82 and abs(len(token) - len(name)) <= 1 and prefix_len >= 5:
-            return False, True
-    return False, False
+        if ratio >= 0.85 and abs(len(token) - len(normalized_name)) <= 2:
+            return "", True
+        if (
+            ratio >= 0.77
+            and abs(len(token) - len(normalized_name)) <= 2
+            and prefix_len >= 3
+            and token[-1:] == normalized_name[-1:]
+        ):
+            return "", True
+        if ratio >= 0.82 and abs(len(token) - len(normalized_name)) <= 1 and prefix_len >= 5:
+            return "", True
+    return "", False
 
 
 def _parse_result_count(text: str) -> int | None:
@@ -255,79 +281,83 @@ def clone_tmview_runtime_profile(profile_dir: str | Path) -> tuple[Path, Path]:
     return temp_root, runtime_dir
 
 
-def _probe_from_body_segments(name: str, body_text: str) -> tuple[int, int, list[str], list[str], int, int, int]:
-    exact_hits = 0
-    near_hits = 0
-    samples: list[str] = []
-    exact_samples: list[str] = []
-    active_exact_hits = 0
-    inactive_exact_hits = 0
-    unknown_exact_hits = 0
+def _empty_match_stats() -> dict[str, object]:
+    return {
+        "exact_hits": 0,
+        "near_hits": 0,
+        "samples": [],
+        "exact_samples": [],
+        "active_exact_hits": 0,
+        "inactive_exact_hits": 0,
+        "unknown_exact_hits": 0,
+        "surface_exact_hits": 0,
+        "normalized_exact_hits": 0,
+        "surface_active_exact_hits": 0,
+        "normalized_active_exact_hits": 0,
+    }
+
+
+def _probe_from_body_segments(display_name: str, normalized_name: str, body_text: str) -> dict[str, object]:
+    stats = _empty_match_stats()
     for segment in _body_result_segments(body_text):
         title = _segment_title(segment)
-        is_exact, is_near = _title_exact_or_near(name, title)
-        if is_exact:
-            exact_hits += 1
+        exact_mode, is_near = _title_match_mode(display_name, normalized_name, title)
+        if exact_mode:
+            stats["exact_hits"] = int(stats["exact_hits"]) + 1
+            if exact_mode == "surface_exact":
+                stats["surface_exact_hits"] = int(stats["surface_exact_hits"]) + 1
+            else:
+                stats["normalized_exact_hits"] = int(stats["normalized_exact_hits"]) + 1
             status = classify_tm_status(segment)
             if status == "active":
-                active_exact_hits += 1
+                stats["active_exact_hits"] = int(stats["active_exact_hits"]) + 1
+                if exact_mode == "surface_exact":
+                    stats["surface_active_exact_hits"] = int(stats["surface_active_exact_hits"]) + 1
+                else:
+                    stats["normalized_active_exact_hits"] = int(stats["normalized_active_exact_hits"]) + 1
             elif status == "inactive":
-                inactive_exact_hits += 1
+                stats["inactive_exact_hits"] = int(stats["inactive_exact_hits"]) + 1
             else:
-                unknown_exact_hits += 1
-            if len(exact_samples) < 3:
-                exact_samples.append(segment[:180])
+                stats["unknown_exact_hits"] = int(stats["unknown_exact_hits"]) + 1
+            if len(stats["exact_samples"]) < 3:
+                stats["exact_samples"].append(segment[:180])
         elif is_near:
-            near_hits += 1
-        if len(samples) < 2 and (is_exact or is_near):
-            samples.append(segment[:180])
-    return (
-        exact_hits,
-        near_hits,
-        samples,
-        exact_samples,
-        active_exact_hits,
-        inactive_exact_hits,
-        unknown_exact_hits,
-    )
+            stats["near_hits"] = int(stats["near_hits"]) + 1
+        if len(stats["samples"]) < 2 and (exact_mode or is_near):
+            stats["samples"].append(segment[:180])
+    return stats
 
 
-def _probe_from_grid_rows(name: str, rows: list[dict[str, str]]) -> tuple[int, int, list[str], list[str], int, int, int]:
-    exact_hits = 0
-    near_hits = 0
-    samples: list[str] = []
-    exact_samples: list[str] = []
-    active_exact_hits = 0
-    inactive_exact_hits = 0
-    unknown_exact_hits = 0
+def _probe_from_grid_rows(display_name: str, normalized_name: str, rows: list[dict[str, str]]) -> dict[str, object]:
+    stats = _empty_match_stats()
     for row in rows:
         title = str(row.get("title") or "")
         full_text = str(row.get("text") or title)
-        is_exact, is_near = _title_exact_or_near(name, title)
-        if is_exact:
-            exact_hits += 1
+        exact_mode, is_near = _title_match_mode(display_name, normalized_name, title)
+        if exact_mode:
+            stats["exact_hits"] = int(stats["exact_hits"]) + 1
+            if exact_mode == "surface_exact":
+                stats["surface_exact_hits"] = int(stats["surface_exact_hits"]) + 1
+            else:
+                stats["normalized_exact_hits"] = int(stats["normalized_exact_hits"]) + 1
             status = classify_tm_status(full_text)
             if status == "active":
-                active_exact_hits += 1
+                stats["active_exact_hits"] = int(stats["active_exact_hits"]) + 1
+                if exact_mode == "surface_exact":
+                    stats["surface_active_exact_hits"] = int(stats["surface_active_exact_hits"]) + 1
+                else:
+                    stats["normalized_active_exact_hits"] = int(stats["normalized_active_exact_hits"]) + 1
             elif status == "inactive":
-                inactive_exact_hits += 1
+                stats["inactive_exact_hits"] = int(stats["inactive_exact_hits"]) + 1
             else:
-                unknown_exact_hits += 1
-            if len(exact_samples) < 3:
-                exact_samples.append(full_text[:180])
+                stats["unknown_exact_hits"] = int(stats["unknown_exact_hits"]) + 1
+            if len(stats["exact_samples"]) < 3:
+                stats["exact_samples"].append(full_text[:180])
         elif is_near:
-            near_hits += 1
-        if len(samples) < 2 and (is_exact or is_near):
-            samples.append(full_text[:180])
-    return (
-        exact_hits,
-        near_hits,
-        samples,
-        exact_samples,
-        active_exact_hits,
-        inactive_exact_hits,
-        unknown_exact_hits,
-    )
+            stats["near_hits"] = int(stats["near_hits"]) + 1
+        if len(stats["samples"]) < 2 and (exact_mode or is_near):
+            stats["samples"].append(full_text[:180])
+    return stats
 
 
 class TmviewProbe:
@@ -407,12 +437,13 @@ class TmviewProbe:
     def available(self) -> bool:
         return bool(self._context is not None and not self._import_error)
 
-    def probe_name(self, name: str) -> TmviewProbeResult:
-        normalized = normalize_alpha(name)
-        url = build_tmview_url(normalized, nice_class=self.nice_class)
+    def _probe_query(self, *, query_name: str, display_name: str, normalized_name: str) -> TmviewProbeResult:
+        query = str(query_name or "").strip()
+        normalized = normalize_alpha(normalized_name or display_name)
+        url = build_tmview_url(query, nice_class=self.nice_class)
         if not normalized:
             return TmviewProbeResult(
-                name="",
+                name=display_name,
                 url=url,
                 query_ok=False,
                 source="tmview_playwright",
@@ -422,10 +453,13 @@ class TmviewProbe:
                 sample_text="",
                 query_nice_class=self.nice_class,
                 error="invalid_name",
+                state="invalid_name",
+                query_name=query,
+                normalized_name=normalized,
             )
         if not self.available():
             return TmviewProbeResult(
-                name=normalized,
+                name=display_name,
                 url=url,
                 query_ok=False,
                 source="tmview_playwright",
@@ -435,6 +469,9 @@ class TmviewProbe:
                 sample_text="",
                 query_nice_class=self.nice_class,
                 error=self._import_error or "playwright_unavailable",
+                state="browser_unavailable",
+                query_name=query,
+                normalized_name=normalized,
             )
 
         page = None
@@ -537,46 +574,39 @@ class TmviewProbe:
             if result_count < 0:
                 result_count = len(rows)
 
-            (
-                exact_hits,
-                near_hits,
-                samples,
-                exact_samples,
-                active_exact_hits,
-                inactive_exact_hits,
-                unknown_exact_hits,
-            ) = _probe_from_grid_rows(normalized, rows)
+            stats = _probe_from_grid_rows(display_name, normalized, rows)
 
-            if exact_hits == 0 and near_hits == 0 and result_count > 0:
-                (
-                    exact_hits,
-                    near_hits,
-                    samples,
-                    exact_samples,
-                    active_exact_hits,
-                    inactive_exact_hits,
-                    unknown_exact_hits,
-                ) = _probe_from_body_segments(normalized, body_text)
+            if int(stats["exact_hits"]) == 0 and int(stats["near_hits"]) == 0 and result_count > 0:
+                stats = _probe_from_body_segments(display_name, normalized, body_text)
 
             return TmviewProbeResult(
-                name=normalized,
+                name=display_name,
                 url=url,
                 query_ok=True,
                 source="tmview_playwright",
-                exact_hits=exact_hits,
-                near_hits=near_hits,
+                exact_hits=int(stats["exact_hits"]),
+                near_hits=int(stats["near_hits"]),
                 result_count=result_count,
-                sample_text=" || ".join(samples),
+                sample_text=" || ".join(stats["samples"]),
                 query_nice_class=self.nice_class,
-                exact_sample_text=" || ".join(exact_samples),
-                active_exact_hits=active_exact_hits,
-                inactive_exact_hits=inactive_exact_hits,
-                unknown_exact_hits=unknown_exact_hits,
+                exact_sample_text=" || ".join(stats["exact_samples"]),
+                active_exact_hits=int(stats["active_exact_hits"]),
+                inactive_exact_hits=int(stats["inactive_exact_hits"]),
+                unknown_exact_hits=int(stats["unknown_exact_hits"]),
                 error="",
+                state="results" if result_count != 0 else "no_results",
+                query_name=query,
+                normalized_name=normalized,
+                query_sequence=query,
+                surface_exact_hits=int(stats["surface_exact_hits"]),
+                normalized_exact_hits=int(stats["normalized_exact_hits"]),
+                surface_active_exact_hits=int(stats["surface_active_exact_hits"]),
+                normalized_active_exact_hits=int(stats["normalized_active_exact_hits"]),
             )
         except Exception as exc:  # pragma: no cover - env-dependent
+            state = "timeout" if "Timeout" in exc.__class__.__name__ else "page_error"
             return TmviewProbeResult(
-                name=normalized,
+                name=display_name,
                 url=url,
                 query_ok=False,
                 source="tmview_playwright",
@@ -586,6 +616,10 @@ class TmviewProbe:
                 sample_text="",
                 query_nice_class=self.nice_class,
                 error=f"page_error:{exc.__class__.__name__}",
+                state=state,
+                query_name=query,
+                normalized_name=normalized,
+                query_sequence=query,
             )
         finally:
             try:
@@ -594,10 +628,74 @@ class TmviewProbe:
             except Exception:
                 pass
 
+    def probe_name(self, name: str, normalized_name: str | None = None) -> TmviewProbeResult:
+        display_name = str(name or "").strip()
+        normalized = normalize_alpha(normalized_name or display_name)
+        surface_result = self._probe_query(
+            query_name=display_name or normalized,
+            display_name=display_name or normalized,
+            normalized_name=normalized,
+        )
+        normalized_query = normalized
+        if (
+            not surface_result.query_ok
+            or not normalized_query
+            or normalized_query == (display_name or normalized)
+            or surface_result.exact_hits > 0
+            or surface_result.near_hits > 0
+        ):
+            return surface_result
+        normalized_result = self._probe_query(
+            query_name=normalized_query,
+            display_name=display_name or normalized_query,
+            normalized_name=normalized,
+        )
+        if not normalized_result.query_ok:
+            return TmviewProbeResult(
+                **{
+                    **surface_result.__dict__,
+                    "query_sequence": ",".join(
+                        value for value in (surface_result.query_name, normalized_result.query_name) if value
+                    ),
+                    "error": normalized_result.error or surface_result.error,
+                }
+            )
+        samples = [value for value in (surface_result.sample_text, normalized_result.sample_text) if value]
+        exact_samples = [value for value in (surface_result.exact_sample_text, normalized_result.exact_sample_text) if value]
+        return TmviewProbeResult(
+            name=surface_result.name,
+            url=normalized_result.url or surface_result.url,
+            query_ok=True,
+            source=surface_result.source,
+            exact_hits=surface_result.exact_hits + normalized_result.exact_hits,
+            near_hits=surface_result.near_hits + normalized_result.near_hits,
+            result_count=max(surface_result.result_count, normalized_result.result_count),
+            sample_text=" || ".join(dict.fromkeys(samples)),
+            query_nice_class=self.nice_class,
+            error="",
+            exact_sample_text=" || ".join(dict.fromkeys(exact_samples)),
+            active_exact_hits=surface_result.active_exact_hits + normalized_result.active_exact_hits,
+            inactive_exact_hits=surface_result.inactive_exact_hits + normalized_result.inactive_exact_hits,
+            unknown_exact_hits=surface_result.unknown_exact_hits + normalized_result.unknown_exact_hits,
+            state="results"
+            if max(surface_result.result_count, normalized_result.result_count) > 0
+            else "no_results",
+            query_name=surface_result.query_name,
+            normalized_name=normalized,
+            query_sequence=",".join(
+                value for value in (surface_result.query_name, normalized_result.query_name) if value
+            ),
+            surface_exact_hits=surface_result.surface_exact_hits + normalized_result.surface_exact_hits,
+            normalized_exact_hits=surface_result.normalized_exact_hits + normalized_result.normalized_exact_hits,
+            surface_active_exact_hits=surface_result.surface_active_exact_hits + normalized_result.surface_active_exact_hits,
+            normalized_active_exact_hits=surface_result.normalized_active_exact_hits + normalized_result.normalized_active_exact_hits,
+        )
+
 
 def probe_names(
     *,
     names: list[str],
+    normalized_names: list[str] | None = None,
     profile_dir: str | Path | None = None,
     chrome_executable: str | Path | None = None,
     nice_class: str | None = None,
@@ -605,14 +703,17 @@ def probe_names(
     settle_ms: int = 2500,
     headless: bool = True,
 ) -> list[TmviewProbeResult]:
-    normalized_names: list[str] = []
+    prepared_names: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for token in names:
-        name = normalize_alpha(token)
-        if not name or name in seen:
+    raw_normalized = list(normalized_names or [])
+    for index, token in enumerate(names):
+        display_name = str(token or "").strip()
+        normalized = normalize_alpha(raw_normalized[index] if index < len(raw_normalized) else display_name)
+        dedupe_key = f"{display_name.casefold()}::{normalized}"
+        if not normalized or dedupe_key in seen:
             continue
-        seen.add(name)
-        normalized_names.append(name)
+        seen.add(dedupe_key)
+        prepared_names.append((display_name or normalized, normalized))
     results: list[TmviewProbeResult] = []
     with TmviewProbe(
         timeout_ms=timeout_ms,
@@ -622,8 +723,8 @@ def probe_names(
         chrome_executable=chrome_executable,
         nice_class=nice_class,
     ) as probe:
-        for name in normalized_names:
-            results.append(probe.probe_name(name))
+        for display_name, normalized in prepared_names:
+            results.append(probe.probe_name(display_name, normalized_name=normalized))
     return results
 
 

@@ -4,7 +4,7 @@
 Execution order per run:
 1) (optional) active LLM ideation stage -> artifact for --llm-input
 2) v3 generator run
-3) async validator run (unless --ideation-only)
+3) queue-backed validator run (unless --ideation-only)
 4) contract assertion + novelty tracking + reporting
 """
 
@@ -52,19 +52,21 @@ DEFAULT_GENERATOR_FAMILIES = [
     'lattice',
 ]
 DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS = [
-    'adversarial',
-    'psych',
-    'descriptive',
-    'tm_cheap',
-    'company_cheap',
     'domain',
-    'web',
-    'web_google_like',
-    'tm_registry_global',
-    'app_store',
     'package',
+    'company',
+    'web',
+    'app_store',
     'social',
+    'tm',
 ]
+BRANDPIPE_VALIDATOR_CHECK_ALIASES = {
+    'company_cheap': 'company',
+    'tm_cheap': 'tm',
+    'tm_registry_global': 'tm',
+    'web_google_like': 'web',
+    'duckduckgo': 'web',
+}
 SweepCombo = tuple[float, str, str, str]
 
 
@@ -77,8 +79,10 @@ def ensure_collision_first_validator_checks(raw_checks: str) -> str:
     ordered: list[str] = []
     seen: set[str] = set()
     for check in DEFAULT_COLLISION_FIRST_VALIDATOR_CHECKS + requested:
-        token = str(check or '').strip()
+        token = BRANDPIPE_VALIDATOR_CHECK_ALIASES.get(str(check or '').strip(), str(check or '').strip())
         if not token or token in seen:
+            continue
+        if token not in {'domain', 'package', 'company', 'web', 'app_store', 'social', 'tm'}:
             continue
         ordered.append(token)
         seen.add(token)
@@ -1995,8 +1999,8 @@ def parse_args() -> argparse.Namespace:
         '--generator-quality-first',
         dest='generator_quality_first',
         action='store_true',
-        default=True,
-        help='Enable generator quality-first gates (default on).',
+        default=False,
+        help='Enable generator quality-first gates (default off).',
     )
     parser.add_argument('--no-generator-quality-first', dest='generator_quality_first', action='store_false')
     parser.add_argument(
@@ -2048,25 +2052,25 @@ def parse_args() -> argparse.Namespace:
         '--validator-concurrency',
         type=int,
         default=10,
-        help='Validator concurrency.',
+        help='Compatibility flag for validator concurrency; the brandpipe shortlist validator runs serially.',
     )
     parser.add_argument(
         '--validator-min-concurrency',
         type=int,
         default=2,
-        help='Lower bound for adaptive validator concurrency.',
+        help='Compatibility lower bound for validator concurrency; kept for wrapper stability.',
     )
     parser.add_argument(
         '--validator-max-concurrency',
         type=int,
         default=24,
-        help='Upper bound for adaptive validator concurrency.',
+        help='Compatibility upper bound for validator concurrency; kept for wrapper stability.',
     )
     parser.add_argument(
         '--validator-timeout-s',
         type=float,
         default=8.0,
-        help='Per-check timeout seconds passed to async validator.',
+        help='Per-check timeout seconds passed to the queue-backed brandpipe validator.',
     )
     parser.add_argument(
         '--validator-state-filter',
@@ -2706,7 +2710,7 @@ def main() -> int:
         str(root / 'scripts' / 'branding' / 'naming_db.py'),
         str(root / 'scripts' / 'branding' / 'name_ideation_ingest.py'),
         str(root / 'scripts' / 'branding' / 'name_input_ingest.py'),
-        str(root / 'scripts' / 'branding' / 'naming_validate_async.py'),
+        str(root / 'scripts' / 'branding' / 'run_brandpipe_validate.py'),
         str(root / 'scripts' / 'branding' / 'naming_ideation_stage.py'),
         str(root / 'scripts' / 'branding' / 'naming_campaign_runner.py'),
     ]
@@ -2723,7 +2727,7 @@ def main() -> int:
             str(root / 'scripts' / 'branding' / 'naming_db.py'),
             str(root / 'scripts' / 'branding' / 'name_ideation_ingest.py'),
             str(root / 'scripts' / 'branding' / 'name_input_ingest.py'),
-            str(root / 'scripts' / 'branding' / 'naming_validate_async.py'),
+            str(root / 'scripts' / 'branding' / 'run_brandpipe_validate.py'),
             str(root / 'scripts' / 'branding' / 'naming_ideation_stage.py'),
             str(root / 'scripts' / 'branding' / 'naming_campaign_runner.py'),
         ]
@@ -3241,41 +3245,26 @@ def main() -> int:
             requested_max_concurrency=int(args.validator_max_concurrency),
             requested_timeout_s=float(args.validator_timeout_s),
         )
+        validation_out_dir = out_dir / 'validation' / f'run_{run_id}'
+        browser_profile_dir = out_dir / 'playwright-profile'
         validator_cmd = [
             'python3',
-            str(root / 'scripts' / 'branding' / 'naming_validate_async.py'),
-            '--db',
-            str(db_path_worker),
-            '--pipeline-version=v3',
-            '--enable-v3',
-            f'--state-filter={args.validator_state_filter}',
-            f'--scope={scope}',
-            f'--gate={gate}',
-            f'--expensive-finalist-limit={max(1, int(args.validator_expensive_finalist_limit))}',
-            '--finalist-recommendations=strong,consider',
+            str(root / 'scripts' / 'branding' / 'run_brandpipe_validate.py'),
+            '--input-csv',
+            str(run_csv),
+            '--mode',
+            'all',
+            '--out-dir',
+            str(validation_out_dir),
             f'--checks={args.validator_checks}',
-            f'--policy-version={str(args.collision_policy_version or "").strip() or "collision_first_v1"}',
-            f'--class-profile={str(args.collision_class_profile or "").strip() or "9,42"}',
-            f'--market-scope={str(args.collision_market_scope or "").strip() or "eu,ch"}',
-            f'--validation-tier={args.validator_tier}',
-            f'--candidate-limit={max(1, int(args.validator_candidate_limit))}',
             f'--concurrency={int(validator_runtime["concurrency"])}',
-            f'--min-concurrency={int(validator_runtime["min_concurrency"])}',
-            f'--max-concurrency={int(validator_runtime["max_concurrency"])}',
             f'--timeout-s={float(validator_runtime["timeout_s"]):.2f}',
-            f'--memory-ttl-days={max(1, int(args.validator_memory_ttl_days))}',
+            f'--store-countries={args.generator_store_countries}',
+            '--web-browser-profile-dir',
+            str(browser_profile_dir),
+            '--tmview-profile-dir',
+            str(browser_profile_dir),
         ]
-        blocklist_file = str(args.validator_cheap_trademark_blocklist_file or '').strip()
-        if blocklist_file:
-            validator_cmd.append(f'--cheap-trademark-blocklist-file={blocklist_file}')
-        if str(args.validator_memory_db).strip():
-            validator_cmd.append(f'--memory-db={str(args.validator_memory_db).strip()}')
-        if bool(args.validator_tmview_probe_enabled):
-            validator_cmd.append('--tmview-probe-enabled')
-        if bool(args.validator_tm_registry_unknown_hard_fail):
-            validator_cmd.append('--tm-registry-unknown-hard-fail')
-        if bool(args.validator_tm_registry_require_tmview_ok):
-            validator_cmd.append('--tm-registry-require-tmview-ok')
         code = run_cmd(
             validator_cmd,
             cwd=root,

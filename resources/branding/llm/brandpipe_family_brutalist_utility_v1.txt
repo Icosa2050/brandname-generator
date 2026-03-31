@@ -1,0 +1,29 @@
+Generate exactly {target_count} brand candidates in the `brutalist_utility` family.
+
+Product core: {product_core}
+Target users: {target_users}
+Trust signals: {trust_signals}
+Market: {language_market}
+Notes: {notes}
+Creative angle: {role_name}
+Role guidance: {role_instructions}
+
+Positive anchors:
+{positive_anchor_block}
+
+Avoidance context:
+{avoidance_block}
+
+Retry feedback:
+{retry_feedback_block}
+
+Style rules:
+- name like a tool, client, console utility, or industrial product
+- allow spaces, title case, mixed case, and acronym endings
+- favor technical cadence, not friendliness
+- examples of shape, not names to copy: `Royal TSX`, `XnView MP`
+- reject marketing polish, startup softness, and faux-creativity
+- vary structure across the batch: some spaced, some mixed-case, some acronym-led
+
+Return JSON only with this schema:
+{"candidates":[{"display_name":"Royal TSX"}]}

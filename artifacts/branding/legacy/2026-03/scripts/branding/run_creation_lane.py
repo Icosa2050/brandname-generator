@@ -106,10 +106,23 @@ def main() -> int:
     generation_timeout_s = int(cfg.get('generation_timeout_s', 0) or 0)
     generation_cmd = _prepare_cmd(cfg.get('generation_command', []), out_dir=out_dir, db_path=db_path)
 
+    generation_failure_code = 0
     if run_generation:
         if not generation_cmd:
             raise SystemExit('run_generation=true but no generation_command set in config')
-        _run(generation_cmd, timeout_s=generation_timeout_s, dry_run=dry_run)
+        try:
+            _run(generation_cmd, timeout_s=generation_timeout_s, dry_run=dry_run)
+        except subprocess.CalledProcessError as exc:
+            generation_failure_code = int(exc.returncode or 1)
+            if not db_path.exists():
+                raise SystemExit(
+                    f'generation command failed with code {generation_failure_code} and db not found: {db_path}'
+                ) from exc
+            print(
+                'creation_lane_warn '
+                f'generation_command_failed code={generation_failure_code} '
+                f'db_present=1 proceeding_with_pack_build=1'
+            )
 
     if not db_path.exists():
         if run_generation:
@@ -145,6 +158,8 @@ def main() -> int:
     _run(cmd, timeout_s=0, dry_run=dry_run)
 
     print('creation_lane_done')
+    if generation_failure_code:
+        print(f'creation_generation_exit_code={generation_failure_code}')
     print(f'creation_out_dir={out_dir}')
     print(f'creation_db={db_path}')
     print(f'creation_pack_output_dir={pack_output}')

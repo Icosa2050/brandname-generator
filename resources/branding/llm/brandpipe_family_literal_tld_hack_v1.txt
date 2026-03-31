@@ -1,0 +1,29 @@
+Generate exactly {target_count} brand candidates in the `literal_tld_hack` family.
+
+Product core: {product_core}
+Target users: {target_users}
+Trust signals: {trust_signals}
+Market: {language_market}
+Notes: {notes}
+Creative angle: {role_name}
+Role guidance: {role_instructions}
+
+Positive anchors:
+{positive_anchor_block}
+
+Avoidance context:
+{avoidance_block}
+
+Retry feedback:
+{retry_feedback_block}
+
+Style rules:
+- keep the lexical root clear and ordinary; let the namespace twist carry the distinctiveness
+- allow dotted or hyphenated endings like `.io`, `.app`, `.hq`, `.cloud`, `-io`, `-hq`
+- favor exact nouns, operational words, or plain concepts over invented syllable soup
+- do not emit more than one namespace marker per candidate
+- do not generate safe corporate junk like `solutions`, `cloudcore`, `connecthub`, `nexus*`, `*flow`
+- make the batch internally varied; do not output tiny edits of the same root
+
+Return JSON only with this schema:
+{"candidates":[{"display_name":"incident.io"}]}

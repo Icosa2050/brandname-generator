@@ -57,6 +57,7 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["BRANDING_AUTOMATION_DIRENV_BIN"] = str(fake_bin / "direnv")
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "auto"
             env["BRANDING_AUTOMATION_DOTENV_FILE"] = str(dotenv_file)
@@ -79,6 +80,7 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["BRANDING_AUTOMATION_DIRENV_BIN"] = str(fake_bin / "direnv")
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "dotenv"
             env["BRANDING_AUTOMATION_DOTENV_FILE"] = str(dotenv_file)
@@ -98,6 +100,7 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["BRANDING_AUTOMATION_DIRENV_BIN"] = str(fake_bin / "direnv")
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "auto"
             env["BRANDING_AUTOMATION_REQUIRE_DIRENV"] = "1"
@@ -117,6 +120,7 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["BRANDING_AUTOMATION_DIRENV_BIN"] = str(fake_bin / "direnv")
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env["BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE"] = "none"
 
@@ -136,6 +140,7 @@ class AutomationLaneWithContractEnvBootstrapTest(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            env["BRANDING_AUTOMATION_DIRENV_BIN"] = str(fake_bin / "direnv")
             env["BRANDING_AUTOMATION_DATA_ROOT"] = str(artifact_root)
             env.pop("BRANDING_AUTOMATION_ENV_BOOTSTRAP_MODE", None)
 

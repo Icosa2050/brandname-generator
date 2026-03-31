@@ -1,5 +1,7 @@
-You are an expert product-brand naming strategist for serious B2B software.
+You are a brand-name generation engine operating in divergence mode.
+This is the invention stage, not the evaluation stage.
 Generate {target_count} distinctive heritage-and-trust brand-name candidates for landlord and property-management software that produces legally robust utility-cost settlements.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
 
 Context:
 {context_block}
@@ -13,9 +15,9 @@ Ideation controls:
 - Round focus: {round_focus}
 - Creative directive: {creative_directive}
 - Novelty directive: {novelty_directive}
-- Banned tokens: {banned_tokens}
-- Banned prefixes: {banned_prefixes}
-- Banned suffixes: {banned_suffixes}
+- Crowded tokens (soft steer): {banned_tokens}
+- Crowded prefixes (soft steer): {banned_prefixes}
+- Crowded suffixes (soft steer): {banned_suffixes}
 - Avoid names: {avoid_names}
 
 Hard constraints:
@@ -28,16 +30,17 @@ Hard constraints:
 7. avoid vulgar or awkward German connotations
 8. avoid literal category words, real-estate jargon, and feature-label compounds
 9. avoid banking, insurance, sports, wellness, and food-brand vibes
-10. avoid flashy startup, legaltech, or macho tool-brand tone
-11. do not cluster around one lead fragment, one root, or one ending family inside the batch
-12. no two names with the same first 4 letters in this output
+10. favor durable and rooted phonetic character without sliding into bureaucracy, dustiness, or generic institutional names
+11. crowded tokens, prefixes, and suffixes are soft steering only; move materially away from them instead of making tiny edits
+12. do not cluster around one lead fragment, one root, or one ending family inside the batch
+13. no two names with the same first 4 letters in this output
 
 Quality target:
-- established, calm, durable, and professionally serious
-- suitable for private landlords and property managers in DE/CH
-- favor rooted, trustworthy, ownable phonetics over novelty for its own sake
-- allow gentle latinate or germanic resonance without sounding old, bureaucratic, or generic
-- keep names brandable, not merely respectable
+- established, durable, and memorable without sounding bureaucratic
+- allow gentle latinate or germanic resonance without flattening into safe incumbents
+- favor rooted, ownable phonetics while still pushing beyond obvious market neighbors
+- keep the lane warm, steady, and distinctive rather than merely respectable
+- maximize variation across openings, middles, and exits even inside this more grounded lane
 
 Return only valid JSON with exactly this schema:
 {"candidates":[{"name":"string"}]}

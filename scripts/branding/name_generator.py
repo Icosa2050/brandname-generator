@@ -1895,35 +1895,40 @@ def adversarial_similarity_signal(name: str) -> tuple[int, str]:
 
 def psych_spelling_risk(name: str) -> int:
     risk = 0
-    if any(ch in name for ch in ('q', 'x', 'y')):
-        risk += 8
-    if 'ph' in name:
-        risk += 6
+    if 'q' in name and 'qu' not in name:
+        risk += 4
+    if re.search(r'[^aeiouy]x[^aeiouy]', name):
+        risk += 4
+    if 'ph' in name and len(name) <= 7:
+        risk += 4
     if 'sch' in name and len(name) <= 7:
         risk += 4
     if any(token in name for token in ('ck', 'tz', 'th', 'gh')):
-        risk += 4
+        risk += 3
     if re.search(r'[aeiou]{3,}', name):
-        risk += 6
+        risk += 4
     if re.search(r'[^aeiou]{4,}', name):
         risk += 6
     if name.startswith(('c', 'k')) and 'c' in name and 'k' in name:
-        risk += 6
+        risk += 4
     return min(100, risk)
 
 
 def psych_trust_proxy_score(name: str) -> int:
-    score = 70
-    if len(name) < 6 or len(name) > 11:
+    score = 68
+    if len(name) < 5 or len(name) > 12:
         score -= 10
     ratio = vowel_ratio(name)
-    if ratio < 0.28 or ratio > 0.62:
+    if ratio < 0.25 or ratio > 0.68:
         score -= 10
-    if any(token in name for token in ('easy', 'smart', 'cheap', 'quick', 'fun')):
-        score -= 14
-    if any(token in name for token in ('audit', 'legal', 'cert', 'secure', 'trust')):
-        score += 6
-    score -= int(psych_spelling_risk(name) * 0.4)
+    syllable_count = len(re.findall(r'[aeiouy]+', name))
+    if syllable_count not in {2, 3, 4}:
+        score -= 6
+    if re.search(r'(.)\1\1', name):
+        score -= 12
+    if name.endswith(('o', 'u', 'a', 'e', 'el', 'en', 'or', 'um')):
+        score += 4
+    score -= int(psych_spelling_risk(name) * 0.45)
     return max(0, min(100, score))
 
 
@@ -1951,17 +1956,9 @@ def gibberish_signal(name: str) -> tuple[int, str]:
         penalty += 22
         flags.append('repeated_trigram')
 
-    if re.search(r'(aa|ee|ii|oo|uu|yyy)', name):
-        penalty += 12
-        flags.append('double_vowel_repeat')
-
     if re.search(r'([a-z]{2})\1', name):
         penalty += 14
         flags.append('repeated_bigram')
-
-    if name.endswith(('oon', 'oto')):
-        penalty += 16
-        flags.append('synthetic_suffix')
 
     unique_ratio = len(set(name)) / max(1, len(name))
     if unique_ratio < 0.45:
@@ -2039,9 +2036,6 @@ def template_likeness_signal(name: str) -> tuple[int, str]:
     if has_artifact_ngram:
         penalty += 24
         flags.append('artifact_ngram')
-    if re.search(r'(via|rio|neo)$', name) and len(name) >= 8:
-        penalty += 6
-        flags.append('factory_suffix_long')
     if re.search(r'(.)\1{2,}', name):
         penalty += 8
         flags.append('triple_repeat')

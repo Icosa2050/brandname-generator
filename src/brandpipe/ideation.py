@@ -27,58 +27,58 @@ ROUND_SCHEMES: tuple[dict[str, str], ...] = (
         "phonetic": "smooth",
         "morphology": "blend",
         "semantic": "trust",
-        "label": "open-a",
-        "preferred_endings": "a, an, el",
-        "structure": "2-3 syllables, liquid consonants, calm vowel flow",
+        "label": "rounded-open",
+        "preferred_endings": "a, o, u, oo, el",
+        "structure": "2-3 syllables, open endings, rounded vowels, liquid consonants",
     },
     {
         "phonetic": "crisp",
         "morphology": "coined",
         "semantic": "precision",
-        "label": "ledger-e",
-        "preferred_endings": "e, en, el, et",
-        "structure": "harder stops, tighter rhythm, ledger-tool feeling",
+        "label": "stop-spark",
+        "preferred_endings": "e, o, um, et, ix",
+        "structure": "firmer stops, contrasty rhythm, less default enterprise polish",
     },
     {
         "phonetic": "bright",
         "morphology": "hybrid",
         "semantic": "clarity",
-        "label": "signal-i",
-        "preferred_endings": "al, il, en, ar",
-        "structure": "clean stems, light vowels, elegant bright finish",
+        "label": "bright-lilt",
+        "preferred_endings": "i, o, ar, il, en",
+        "structure": "clean stems, light vowels, sharper finish, wider ending range",
     },
     {
         "phonetic": "grounded",
         "morphology": "coined",
         "semantic": "stability",
-        "label": "near-real",
-        "preferred_endings": "a, en, el, ar",
-        "structure": "near-real-word feel, gentle terminal consonant only if elegant",
+        "label": "odd-familiar",
+        "preferred_endings": "o, a, er, um, en",
+        "structure": "almost-familiar forms, asymmetry welcome, avoid obvious dictionary drift",
     },
     {
         "phonetic": "balanced",
         "morphology": "blend",
         "semantic": "fairness",
-        "label": "latin-ledger",
-        "preferred_endings": "el, ar, an, al",
-        "structure": "subtle latin flavor, calmer cadence, practical but graceful tone",
+        "label": "cross-current",
+        "preferred_endings": "al, or, ou, ar, el",
+        "structure": "mixed cadences, less latinate sameness, push opening diversity",
     },
     {
         "phonetic": "resonant",
         "morphology": "hybrid",
         "semantic": "lift",
-        "label": "clean-lilt",
-        "preferred_endings": "a, el, en, al",
-        "structure": "lighter cadence, softer consonants, no q/x/z/j/v unless unavoidable",
+        "label": "wildcard-open",
+        "preferred_endings": "a, o, u, is, on",
+        "structure": "surprising phonetic turns, rounded or clipped exits, pronounceability retained",
     },
 )
 ROLE_HINTS: dict[str, str] = {
-    "creative_divergence": "Push for non-obvious sound-shapes and broader semantic jumps while keeping the names pronounceable.",
-    "recombinator": "Use the seed pool and morphemes to recombine, splice, and refine stronger brandable forms.",
-    "contrarian": "Avoid the most literal naming path and search for angled, unexpected, but still commercially usable directions.",
-    "phonetic_explorer": "Search for fresh openings, rhythm shifts, and less crowded sound-shapes while staying sayable in English and major EU markets.",
+    "creative_divergence": "Push away from the existing-company center of gravity; favor non-obvious sound-shapes and structural variety while staying pronounceable.",
+    "recombinator": "Use the seed pool and morphemes as launch points, then splice and mutate them into less ordinary phonetic territory.",
+    "contrarian": "Refuse the most literal naming path and search for angled, unexpected directions instead of safe B2B polish.",
+    "phonetic_explorer": "Search for fresh openings, rhythm shifts, and less crowded sound-shapes without defaulting to near-real dictionary comfort.",
     "morpheme_hybridizer": "Fuse lexicon atoms into names that feel ownable and less namespace-crowded than direct near-real-word transmutations.",
-    "ending_diversifier": "Actively explore endings and cadences that widen the batch instead of returning another soft-latin family remix.",
+    "ending_diversifier": "Actively explore endings and cadences that widen the batch instead of returning another safe enterprise family remix.",
 }
 ROLE_SCHEME_OFFSETS: dict[str, int] = {
     "creative_divergence": 5,
@@ -196,11 +196,11 @@ def format_avoidance_block(avoidance_context: dict[str, object] | None) -> str:
         return ""
 
     lines = [
-        "Avoidance feedback:",
-        "Recent names failed because they were too close to existing namespaces. Move away from these phonetic neighborhoods, not just the exact strings.",
+        "Crowded neighborhoods from recent collisions:",
+        "Treat these as soft steering away from overused phonetic neighborhoods, not absolute bans. Move farther than a tiny prefix or suffix tweak.",
     ]
     if isinstance(local_examples, list) and local_examples:
-        lines.append("Must avoid local collision neighborhoods:")
+        lines.append("Recent local collision neighborhoods:")
         for item in local_examples[:6]:
             if not isinstance(item, dict):
                 continue
@@ -213,13 +213,13 @@ def format_avoidance_block(avoidance_context: dict[str, object] | None) -> str:
         prefixes = [str(value).strip() for value in (local_patterns.get("prefixes") or []) if str(value).strip()]
         suffixes = [str(value).strip() for value in (local_patterns.get("suffixes") or []) if str(value).strip()]
         if prefixes or suffixes:
-            lines.append("Pattern-level steering from recent local collisions:")
+            lines.append("Local collision patterns worth moving away from:")
             if prefixes:
-                lines.append("- avoid locally crowded opening clusters: " + ", ".join(f"{prefix}-" for prefix in prefixes[:4]))
+                lines.append("- move away from locally crowded opening clusters: " + ", ".join(f"{prefix}-" for prefix in prefixes[:4]))
             if suffixes:
-                lines.append("- avoid locally crowded ending families: " + ", ".join(f"-{suffix}" for suffix in suffixes[:4]))
+                lines.append("- move away from locally crowded ending families: " + ", ".join(f"-{suffix}" for suffix in suffixes[:4]))
     if isinstance(external_failures, dict) and external_failures:
-        lines.append("Prefer to avoid recent external failure neighborhoods:")
+        lines.append("Recent external failure neighborhoods:")
         for reason, examples in list(external_failures.items())[:4]:
             if not isinstance(examples, list):
                 continue
@@ -253,31 +253,31 @@ def format_avoidance_block(avoidance_context: dict[str, object] | None) -> str:
         prefixes = [str(value).strip() for value in (external_patterns.get("prefixes") or []) if str(value).strip()]
         suffixes = [str(value).strip() for value in (external_patterns.get("suffixes") or []) if str(value).strip()]
         if prefixes or suffixes:
-            lines.append("Pattern-level steering from recent external failures:")
+            lines.append("External collision patterns worth moving away from:")
             if prefixes:
-                lines.append("- avoid crowded opening clusters: " + ", ".join(f"{prefix}-" for prefix in prefixes[:4]))
+                lines.append("- move away from crowded opening clusters: " + ", ".join(f"{prefix}-" for prefix in prefixes[:4]))
             if suffixes:
-                lines.append("- avoid crowded terminal families: " + ", ".join(f"-{suffix}" for suffix in suffixes[:4]))
+                lines.append("- move away from crowded terminal families: " + ", ".join(f"-{suffix}" for suffix in suffixes[:4]))
     if isinstance(external_terminal_families, list):
         terminal_families = [str(value).strip() for value in external_terminal_families if str(value).strip()]
         if terminal_families:
-            lines.append("- avoid crowded soft terminal families: " + ", ".join(f"-{family}" for family in terminal_families[:4]))
+            lines.append("- move away from crowded terminal families: " + ", ".join(f"-{family}" for family in terminal_families[:4]))
     if isinstance(external_lead_hints, list):
         lead_hints = [str(value).strip() for value in external_lead_hints if str(value).strip()]
         if lead_hints:
-            lines.append("Avoid recently crowded lead fragments:")
+            lines.append("Recently crowded lead fragments:")
             lines.append("- " + ", ".join(f"{fragment}-" for fragment in lead_hints[:6]))
     if isinstance(external_tail_hints, list):
         tail_hints = [str(value).strip() for value in external_tail_hints if str(value).strip()]
         if tail_hints:
-            lines.append("Avoid recently crowded tail fragments:")
+            lines.append("Recently crowded tail fragments:")
             lines.append("- " + ", ".join(f"-{fragment}" for fragment in tail_hints[:6]))
     if isinstance(external_fragment_hints, list):
         fragment_hints = [str(value).strip() for value in external_fragment_hints if str(value).strip()]
         if fragment_hints and not (external_lead_hints or external_tail_hints):
-            lines.append("Avoid recently crowded lead fragments:")
+            lines.append("Recently crowded lead fragments:")
             lines.append("- " + ", ".join(f"{fragment}-" for fragment in fragment_hints[:6]))
-    lines.append("Do not rhyme with, echo, or lightly mutate the names above. Avoid one-syllable swaps, tiny prefix changes, and tiny ending changes.")
+    lines.append("Do not solve this with rhymes, echoes, or tiny mutations. Move materially away from these neighborhoods instead of changing one syllable or one ending.")
     return "\n".join(lines)
 
 
@@ -296,8 +296,7 @@ def format_positive_anchor_block(success_context: dict[str, object] | None) -> s
         lines.append("- recent keepers: " + ", ".join(names[:4]))
     if endings:
         lines.append("- rarer terminal shapes worth echoing in spirit: " + ", ".join(f"-{ending}" for ending in endings[:4]))
-    lines.append("Prefer 8-10 character shapes with a less generic final trigram than default startup-tech endings.")
-    lines.append("Do not copy, rhyme with, or lightly mutate these names.")
+    lines.append("Treat these as proof that less generic phonetic territory can work; do not copy, rhyme with, or lightly mutate them.")
     return "\n".join(lines)
 
 
@@ -709,7 +708,9 @@ def build_prompt(
         return prompt.strip(), mode
 
     prompt = (
+        "This is the divergence phase for brand naming, not the evaluation phase.\n"
         "Generate app brand names for utility-cost settlement software.\n"
+        "Invent first. Do not optimize for professionalism, enterprise caution, domain safety, or trademark comfort in this step. Those checks happen later.\n"
         f"Scope: {scope}\n"
         f"Round: {round_index + 1}\n"
         f"Creative lens: {role_name}\n"
@@ -730,17 +731,14 @@ def build_prompt(
         "Rules:\n"
         "- lowercase latin letters only, 6-14 chars\n"
         "- no spaces, punctuation, digits\n"
-        "- do not end any name with the letter o\n"
-        "- de-prioritize saturated soft-latin tails like -ia, -ea, -aria, -eria, -thea unless the shape is unusually distinct\n"
-        "- avoid harsh synthetic fragments like vex, xen, trix, trex, splint, kest anywhere in the name\n"
-        "- avoid q, x, z, j, and heavy v unless the shape is exceptionally elegant and still easy to say aloud\n"
-        "- avoid literal trust/business stems like clar-, civic, trust, legal, secure, ledger\n"
-        "- avoid generic-safe openings like pre-, prec-, prim-, cora-, stati- that make names feel assembled or enterprise-generic\n"
-        "- use a spread of endings; avoid returning a whole batch with the same final sound\n"
-        "- if seed shapes are provided, mutate them or borrow their sound pattern; do not echo them unchanged\n"
+        "- invent first, validate later; prioritize phonetic novelty over category fit\n"
+        "- allow rounded endings, open syllables, uncommon letters, and unexpected sound-shapes when they remain pronounceable\n"
+        "- maximize variation across openings, middles, endings, cadence, and stress; do not collapse into one ending family\n"
+        "- treat crowded-neighborhood hints as soft steering, not absolute bans; move materially away from them instead of making tiny edits\n"
         "- do not clip literal business/source words into name fragments like priv-, parc-, ledg-, rent-, util-, settl-\n"
-        "- prefer calmer near-real-word shapes over aggressive pseudo-tech invention\n"
-        "- align with context packet priorities when provided\n"
+        "- avoid default corporate templates, near-dictionary safety moves, and obvious category compounds\n"
+        "- if seed shapes are provided, mutate beyond them or invert their rhythm; do not echo them unchanged\n"
+        "- align with context packet priorities when provided, but do not let seriousness flatten the phonetics\n"
         "- no availability claims (domain/store/trademark/social)\n"
         '- return JSON only with schema: {"candidates":[{"name":"string"}]}\n'
         "- no markdown, no prose, no additional keys\n"

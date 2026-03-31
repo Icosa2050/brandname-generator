@@ -31,57 +31,57 @@ MODE_SPECS: tuple[dict[str, str], ...] = (
         'phonetic': 'smooth',
         'morphology': 'blend',
         'semantic': 'trust',
-        'round_focus': 'calm signal + shelter',
-        'creative_directive': 'lean on shelter, beacon, and signal metaphors instead of billing language',
+        'round_focus': 'rounded shelter + signal',
+        'creative_directive': 'favor open syllables, rounded vowels, and soft landings; do not self-censor toward default B2B polish',
     },
     {
         'phonetic': 'crisp',
         'morphology': 'coined',
         'semantic': 'precision',
-        'round_focus': 'angular coined control',
-        'creative_directive': 'prefer asymmetry, sharper openings, and confident endings over soft latin clones',
+        'round_focus': 'angular coined contrast',
+        'creative_directive': 'prefer asymmetry, harder pivots, and non-template endings over near-real enterprise clones',
     },
     {
         'phonetic': 'balanced',
         'morphology': 'hybrid',
         'semantic': 'clarity',
-        'round_focus': 'navigation + measurement',
-        'creative_directive': 'use route, axis, measure, and surface cues rather than explicit utility words',
+        'round_focus': 'navigation + refraction',
+        'creative_directive': 'use route, axis, measure, and surface cues only as abstract sparks; avoid literal compounds',
     },
     {
         'phonetic': 'open',
         'morphology': 'lattice',
         'semantic': 'evocative',
         'round_focus': 'lateral metaphor',
-        'creative_directive': 'pull from landscape, motion, craft, and light to widen semantic territory',
+        'creative_directive': 'pull from landscape, motion, craft, and light to widen phonetic and semantic territory',
     },
     {
         'phonetic': 'bright',
         'morphology': 'compound',
         'semantic': 'elevated',
-        'round_focus': 'light + architecture',
-        'creative_directive': 'favor brighter vowel movement with structural cues from facets, frames, and alignment',
+        'round_focus': 'light + frame tension',
+        'creative_directive': 'favor brighter vowel movement, bolder contrasts, and endings that do not all resolve the same way',
     },
     {
         'phonetic': 'grounded',
         'morphology': 'hybrid',
         'semantic': 'stability',
-        'round_focus': 'anchor + foundation',
-        'creative_directive': 'aim for steady, ownable forms that imply anchoring without literal finance language',
+        'round_focus': 'anchor + lift',
+        'creative_directive': 'aim for durable but less ordinary forms; grounded does not mean generic or near-dictionary',
     },
     {
         'phonetic': 'smooth',
         'morphology': 'coined',
         'semantic': 'lateral',
         'round_focus': 'cadence + current',
-        'creative_directive': 'make the batch feel more musical and flowing while preserving clean pronunciation',
+        'creative_directive': 'make the batch musical, rounded, and structurally varied instead of copycat-soft',
     },
     {
         'phonetic': 'crisp',
         'morphology': 'lattice',
         'semantic': 'trust',
-        'round_focus': 'hard-stop confidence',
-        'creative_directive': 'introduce firmer consonant stops and more contrast in openings, middles, and endings',
+        'round_focus': 'stop + release',
+        'creative_directive': 'introduce firmer openings and more contrast in middles and endings without collapsing into tool-brand cliches',
     },
 )
 MODE_TRIPLETS: tuple[tuple[str, str, str], ...] = tuple(
@@ -779,12 +779,12 @@ def compute_dynamic_constraints(
 
     novelty_parts: list[str] = []
     if final_prefixes:
-        novelty_parts.append(f'avoid recycled opening families like {", ".join(final_prefixes[:6])}')
+        novelty_parts.append(f'steer away from crowded opening families like {", ".join(final_prefixes[:6])}')
     if final_suffixes:
-        novelty_parts.append(f'avoid repeated ending families like {", ".join(final_suffixes[:6])}')
+        novelty_parts.append(f'steer away from crowded ending families like {", ".join(final_suffixes[:6])}')
     if final_tokens:
-        novelty_parts.append(f'do not reuse crowded root fragments like {", ".join(final_tokens[:6])}')
-    novelty_directive = '; '.join(novelty_parts) if novelty_parts else 'push into fresh opening, middle, and ending patterns'
+        novelty_parts.append(f'move past crowded root fragments like {", ".join(final_tokens[:6])}')
+    novelty_directive = '; '.join(novelty_parts) if novelty_parts else 'push into fresh opening, middle, and ending patterns; treat crowded patterns as soft steering'
 
     return {
         'window_runs': int(max(1, window_runs)),
@@ -821,7 +821,7 @@ def build_prompt(
     banned_prefixes = ','.join((constraints or {}).get('banned_prefixes', [])[:20]) or 'none'
     banned_suffixes = ','.join((constraints or {}).get('banned_suffixes', [])[:16]) or 'none'
     avoid_names = ','.join((constraints or {}).get('avoid_names', [])[:12]) or 'none'
-    novelty_directive = str((constraints or {}).get('novelty_directive') or 'push into fresh opening, middle, and ending patterns')
+    novelty_directive = str((constraints or {}).get('novelty_directive') or 'push into fresh opening, middle, and ending patterns; treat crowded patterns as soft steering')
     context_lines = render_context_lines(context_packet or {})
     context_block = ''
     if context_lines:
@@ -851,7 +851,9 @@ def build_prompt(
         prompt = prompt.strip()
     else:
         prompt = (
+            'This is the divergence phase for brand naming, not the evaluation phase.\n'
             'Generate app brand names for utility-cost settlement software.\n'
+            'Invent first. Do not optimize for professionalism, enterprise caution, domain safety, or trademark comfort in this step. Those checks happen later.\n'
             f'Scope: {scope}\n'
             f'Round: {round_index + 1}\n'
             f'Target candidates: {max(1, int(target_count))}\n'
@@ -861,16 +863,20 @@ def build_prompt(
             f'Round focus: {round_focus}\n'
             f'Creative directive: {creative_directive}\n'
             f'Novelty directive: {novelty_directive}\n'
-            f'Banned tokens: {banned_tokens}\n'
-            f'Banned prefixes: {banned_prefixes}\n'
-            f'Banned suffixes: {banned_suffixes}\n'
+            f'Crowded tokens (soft steer): {banned_tokens}\n'
+            f'Crowded prefixes (soft steer): {banned_prefixes}\n'
+            f'Crowded suffixes (soft steer): {banned_suffixes}\n'
             f'Avoid names: {avoid_names}\n'
             f'{context_block}'
             'Rules:\n'
             '- lowercase latin letters only, 6-14 chars\n'
             '- no spaces, punctuation, digits\n'
-            '- align with context packet priorities when provided\n'
+            '- invent first, validate later; prioritize phonetic novelty over category fit\n'
+            '- allow rounded endings, uncommon letters, open syllables, and unexpected sound-shapes when they remain pronounceable\n'
+            '- maximize variation across openings, middles, endings, cadence, and stress; do not collapse into one family\n'
+            '- use crowded tokens, prefixes, and suffixes as soft steering only; move materially away from them instead of making tiny edits\n'
             '- widen semantic territory through lateral metaphors before reusing category language\n'
+            '- align with context packet priorities when provided, but do not let seriousness flatten the phonetics\n'
             '- no availability claims (domain/store/trademark/social)\n'
             '- no duplicate names\n'
             '- no two names with same first 4 letters in this output\n'

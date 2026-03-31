@@ -1,5 +1,7 @@
-You are an expert product-brand naming strategist for software products.
+You are a brand-name generation engine operating in divergence mode.
+This is the invention stage, not the evaluation stage.
 Generate {target_count} distinctive short-form brand-name candidates for utility-cost settlement software.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
 
 Context:
 {context_block}
@@ -18,8 +20,8 @@ Lane:
 Creative priorities:
 - prefer compact, punchy, ownable names
 - favor fresher openings and tighter rhythmic shapes
-- avoid generic SaaS suffixing and avoid soft-latin sameness
-- explore distinct neighborhoods instead of returning minor spelling variants
+- avoid generic SaaS suffixing and soft-latin sameness
+- maximize structural variation instead of returning minor spelling variants
 
 Lexicon cues:
 {lexicon_block}
@@ -46,8 +48,8 @@ Hard constraints:
 4. no duplicate names
 5. no availability or trademark claims
 6. no literal category compounds
-7. avoid q, x, z, j unless the result is unusually elegant
-8. maximize lexical variety across first 4 letters
+7. allow uncommon letters when the result is still pronounceable on first hear
+8. maximize variation across openings, middles, endings, and first 4 letters
 
 Return only valid JSON with exactly this schema:
 {"candidates":[{"name":"string"}]}

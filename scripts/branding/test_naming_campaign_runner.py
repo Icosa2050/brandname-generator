@@ -12,6 +12,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+SCRIPT_DIR = Path(__file__).resolve().parent
+for candidate in (SCRIPT_DIR, ROOT_DIR):
+    if str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
 import naming_campaign_runner as ncr
 
 
@@ -352,14 +358,16 @@ class NamingCampaignRunnerValidatorRuntimeTest(unittest.TestCase):
         self.assertEqual(args.prefix_audit_csv, 'test_outputs/branding/prefix_collision_audit/latest_prefix_audit.csv')
         self.assertEqual(args.prefix_audit_top_n, 15)
 
-    def test_ensure_collision_first_validator_checks_includes_company_cheap(self) -> None:
+    def test_ensure_collision_first_validator_checks_normalizes_to_brandpipe_surface(self) -> None:
         got = ncr.ensure_collision_first_validator_checks('web,app_store')
         checks = [part.strip() for part in got.split(',') if part.strip()]
-        self.assertIn('tm_cheap', checks)
-        self.assertIn('company_cheap', checks)
+        self.assertIn('domain', checks)
+        self.assertIn('package', checks)
+        self.assertIn('company', checks)
         self.assertIn('web', checks)
-        self.assertIn('web_google_like', checks)
-        self.assertIn('tm_registry_global', checks)
+        self.assertIn('app_store', checks)
+        self.assertIn('social', checks)
+        self.assertIn('tm', checks)
         self.assertEqual(len(checks), len(set(checks)))
 
     def test_load_prefixes_from_audit_csv_filters_by_risk_and_pronounceability(self) -> None:

@@ -24,6 +24,7 @@ import os
 import re
 import sqlite3
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,19 @@ class ProgressState:
     success_jobs: int = 0
     failed_jobs: int = 0
     last_report_monotonic: float = 0.0
+
+
+def normalize_candidate_token(raw: str) -> str:
+    folded = unicodedata.normalize('NFKD', str(raw or ''))
+    plain = ''.join(ch for ch in folded if not unicodedata.combining(ch)).lower()
+    return re.sub(r'[^a-z0-9]+', '', plain)
+
+
+def candidate_domain_label(domain: str) -> str:
+    token = str(domain or '').strip().lower()
+    if not token:
+        return ''
+    return normalize_candidate_token(token.split('.', 1)[0])
 
 
 class InstrumentedLock:
@@ -1136,7 +1150,7 @@ def load_cheap_trademark_blocklist(path: str) -> tuple[int, str]:
 def _looks_company_result(title_lc: str, domain: str) -> bool:
     if any(hint in title_lc for hint in COMPANY_ENTITY_HINTS):
         return True
-    token = ng.domain_label(domain)
+    token = candidate_domain_label(domain)
     if not token:
         return False
     if token in {'linkedin', 'wikipedia', 'facebook', 'instagram', 'x', 'twitter'}:
@@ -1147,7 +1161,7 @@ def _looks_company_result(title_lc: str, domain: str) -> bool:
 def _normalize_company_entity_name(text: str) -> str:
     tokens = re.findall(r'[a-z0-9]+', str(text or '').lower())
     filtered = [token for token in tokens if token not in COMPANY_LEGAL_SUFFIX_TOKENS]
-    return ng.normalize_alpha(' '.join(filtered))
+    return normalize_candidate_token(' '.join(filtered))
 
 
 def company_house_company_signal(name: str, args: argparse.Namespace) -> dict[str, object]:
@@ -1244,8 +1258,8 @@ def company_collision_signal(name: str, top_n: int) -> tuple[int, int, int, str,
             continue
         title = re.sub(r'<[^>]+>', ' ', str(raw_title or ''))
         title_lc = title.lower()
-        title_norm = ng.normalize_alpha(title)
-        domain_norm = ng.domain_label(domain)
+        title_norm = normalize_candidate_token(title)
+        domain_norm = candidate_domain_label(domain)
         title_exact = title_norm == name or bool(re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title_lc))
         domain_exact = domain_norm == name
         if (title_exact or domain_exact) and _looks_company_result(title_lc, domain):
@@ -1262,7 +1276,7 @@ def company_collision_signal(name: str, top_n: int) -> tuple[int, int, int, str,
         title_lc = title.lower()
         if not _looks_company_result(title_lc, domain):
             continue
-        tokens = set(re.findall(r'[a-z]{4,}', title_lc))
+        tokens = set(re.findall(r'[a-z0-9]{4,}', title_lc))
         near_found = False
         for token in tokens:
             if token == name:
@@ -1272,7 +1286,7 @@ def company_collision_signal(name: str, top_n: int) -> tuple[int, int, int, str,
                 near_found = True
                 break
         if not near_found:
-            domain_norm = ng.domain_label(domain)
+            domain_norm = candidate_domain_label(domain)
             if domain_norm and domain_norm != name:
                 ratio = ng.similarity_with_prefix_boost(domain_norm, name)
                 if ratio >= 0.90 and abs(len(domain_norm) - len(name)) <= 2:
@@ -1337,7 +1351,7 @@ def _full_token_in_url(name: str, href: str) -> bool:
         parsed = parse.urlparse(str(href or ''))
     except Exception:
         return False
-    url_norm = ng.normalize_alpha(f'{parsed.netloc}{parsed.path}')
+    url_norm = normalize_candidate_token(f'{parsed.netloc}{parsed.path}')
     return bool(url_norm and token in url_norm)
 
 
@@ -1422,8 +1436,8 @@ def web_google_like_signal(name: str, args: argparse.Namespace) -> dict[str, obj
             continue
         title = re.sub(r'<[^>]+>', ' ', str(raw_title or ''))
         title_lc = title.lower()
-        title_norm = ng.normalize_alpha(title)
-        domain_norm = ng.domain_label(domain)
+        title_norm = normalize_candidate_token(title)
+        domain_norm = candidate_domain_label(domain)
         title_exact = title_norm == name or bool(re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title_lc))
         domain_exact = domain_norm == name
         url_exact = _full_token_in_url(name, str(href or ''))
@@ -1439,7 +1453,7 @@ def web_google_like_signal(name: str, args: argparse.Namespace) -> dict[str, obj
             continue
         title = re.sub(r'<[^>]+>', ' ', str(raw_title or ''))
         title_lc = title.lower()
-        tokens = set(re.findall(r'[a-z]{4,}', title_lc))
+        tokens = set(re.findall(r'[a-z0-9]{4,}', title_lc))
         near_found = False
         for token in tokens:
             if token == name:
@@ -1449,7 +1463,7 @@ def web_google_like_signal(name: str, args: argparse.Namespace) -> dict[str, obj
                 near_found = True
                 break
         if not near_found:
-            domain_norm = ng.domain_label(domain)
+            domain_norm = candidate_domain_label(domain)
             if domain_norm and domain_norm != name:
                 ratio = ng.similarity_with_prefix_boost(domain_norm, name)
                 if ratio >= 0.90 and abs(len(domain_norm) - len(name)) <= 3:
@@ -1497,14 +1511,14 @@ def tm_registry_global_signal(name: str, args: argparse.Namespace) -> dict[str, 
         seen_domains: set[str] = set()
         for href, raw_title in matches[:top_n]:
             title = re.sub(r'<[^>]+>', ' ', str(raw_title or '')).strip().lower()
-            title_norm = ng.normalize_alpha(title)
+            title_norm = normalize_candidate_token(title)
             is_exact = bool(
                 title_norm == name
                 or re.search(rf'(^|[^a-z0-9]){re.escape(name)}([^a-z0-9]|$)', title)
             )
             is_near = False
             if not is_exact:
-                tokens = set(re.findall(r'[a-z]{4,}', title))
+                tokens = set(re.findall(r'[a-z0-9]{4,}', title))
                 for token in tokens:
                     if token == name:
                         continue
@@ -1565,7 +1579,7 @@ def cheap_trademark_similarity_signal(name: str) -> tuple[int, str]:
 
 
 def check_adversarial(name: str, args: argparse.Namespace) -> dict:
-    normalized = ng.normalize_alpha(name)
+    normalized = normalize_candidate_token(name)
     risk, hits = ng.adversarial_similarity_signal(normalized)
     if risk >= args.adversarial_fail_threshold:
         return {
@@ -1593,7 +1607,7 @@ def check_adversarial(name: str, args: argparse.Namespace) -> dict:
 
 
 def check_psych(name: str, args: argparse.Namespace) -> dict:
-    normalized = ng.normalize_alpha(name)
+    normalized = normalize_candidate_token(name)
     spelling_risk = ng.psych_spelling_risk(normalized)
     trust_proxy = ng.psych_trust_proxy_score(normalized)
 
@@ -1623,7 +1637,7 @@ def check_psych(name: str, args: argparse.Namespace) -> dict:
 
 
 def check_descriptive(name: str, args: argparse.Namespace) -> dict:
-    normalized = ng.normalize_alpha(name)
+    normalized = normalize_candidate_token(name)
     risk = ng.descriptive_risk(normalized)
     if risk >= args.descriptive_fail_threshold:
         return {
@@ -1651,7 +1665,7 @@ def check_descriptive(name: str, args: argparse.Namespace) -> dict:
 
 
 def check_trademark_cheap(name: str, args: argparse.Namespace) -> dict:
-    normalized = ng.normalize_alpha(name)
+    normalized = normalize_candidate_token(name)
     if not getattr(args, 'cheap_trademark_screen', True):
         return {
             'status': 'pass',
@@ -1703,7 +1717,7 @@ def check_trademark_cheap(name: str, args: argparse.Namespace) -> dict:
 
 
 def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
-    normalized = ng.normalize_alpha(name)
+    normalized = normalize_candidate_token(name)
     if not getattr(args, 'company_cheap_screen', True):
         return {
             'status': 'pass',
@@ -1805,7 +1819,7 @@ def check_company_cheap(name: str, args: argparse.Namespace) -> dict:
 
 
 def normalized_or_fail(name: str) -> str:
-    normalized = ng.normalize_alpha(name)
+    normalized = normalize_candidate_token(name)
     if not normalized:
         raise ValueError(f'Invalid candidate name for check: {name!r}')
     return normalized

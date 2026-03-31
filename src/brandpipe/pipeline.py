@@ -7,7 +7,6 @@ import tempfile
 import time
 import tomllib
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -28,11 +27,18 @@ from .models import (
     RunStatus,
     ValidationConfig,
 )
-from .ranking import group_results, rank_candidates
+from .ranking import group_results, rank_candidate_surfaces, rank_candidates
 from .scoring import build_attractiveness_result
+from .surface_ideation import generate_candidate_surfaces
 from .taste import build_blocked_fragments, filter_names as filter_names_by_taste
 from .tmview import normalize_alpha as normalize_tmview_name, probe_names as probe_tmview_names
 from .validation import validate_candidate
+from .validation_queue import (
+    detect_state_mismatch,
+    prepare_shortlist_run,
+    run_validation_jobs,
+    shortlist_fingerprint,
+)
 from .diversity import filter_local_collisions
 from .scoring import score_name_attractiveness
 
@@ -85,6 +91,59 @@ def _cfg_bool(raw: object, default: bool) -> bool:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return bool(raw)
+
+
+def _cfg_int_map(raw: object) -> dict[str, int]:
+    if isinstance(raw, dict):
+        parsed: dict[str, int] = {}
+        for key, value in raw.items():
+            token = str(key).strip()
+            if not token:
+                continue
+            parsed[token] = max(0, int(value))
+        return parsed
+    if isinstance(raw, str):
+        parsed = {}
+        for part in raw.split(","):
+            token = str(part).strip()
+            if not token or ":" not in token:
+                continue
+            key, value = token.split(":", 1)
+            key = key.strip()
+            if not key:
+                continue
+            parsed[key] = max(0, int(value.strip() or "0"))
+        return parsed
+    return {}
+
+
+def _cfg_path_map(base_dir: Path, raw: object) -> dict[str, Path]:
+    if not isinstance(raw, dict):
+        return {}
+    parsed: dict[str, Path] = {}
+    for key, value in raw.items():
+        token = str(key or "").strip()
+        raw_path = str(value or "").strip()
+        if not token or not raw_path:
+            continue
+        parsed[token] = _resolve_path(base_dir, raw_path)
+    return parsed
+
+
+def _canonical_web_search_order(raw: object, default: str = "brave,browser_google") -> str:
+    aliases = {
+        "google_cse": "browser_google",
+        "duckduckgo": "browser_google",
+    }
+    order: list[str] = []
+    tokens = [part.strip().lower() for part in _cfg_str(raw, default).split(",") if part.strip()]
+    for token in tokens:
+        normalized = aliases.get(token, token)
+        if normalized in {"brave", "browser_google"} and normalized not in order:
+            order.append(normalized)
+    if not order:
+        return default
+    return ",".join(order)
 
 
 def load_config(config_path: Path) -> RunConfig:
@@ -173,6 +232,11 @@ def load_config(config_path: Path) -> RunConfig:
         output_price_per_1k=_cfg_float(ideation_cfg.get("output_price_per_1k"), 0.0),
         pseudoword=pseudoword,
         roles=roles,
+        family_mix_profile=_cfg_str(ideation_cfg.get("family_mix_profile"), "legacy_alpha"),
+        family_prompt_template_files=_cfg_path_map(base_dir, ideation_cfg.get("family_prompt_template_files")),
+        family_llm_retry_limit=_cfg_int(ideation_cfg.get("family_llm_retry_limit"), 2, minimum=0),
+        family_quotas=_cfg_int_map(ideation_cfg.get("family_quotas")),
+        late_fusion_min_per_family=_cfg_int(ideation_cfg.get("late_fusion_min_per_family"), 1, minimum=0),
     )
     validation = ValidationConfig(
         checks=_list_of_strings(validation_cfg.get("checks")),
@@ -183,7 +247,7 @@ def load_config(config_path: Path) -> RunConfig:
         timeout_s=_cfg_float(validation_cfg.get("timeout_s"), 8.0, minimum=0.1),
         company_top=_cfg_int(validation_cfg.get("company_top"), 8, minimum=1),
         social_unavailable_fail_threshold=_cfg_int(validation_cfg.get("social_unavailable_fail_threshold"), 3, minimum=1),
-        web_search_order=_cfg_str(validation_cfg.get("web_search_order"), "brave,google_cse,duckduckgo"),
+        web_search_order=_canonical_web_search_order(validation_cfg.get("web_search_order")),
         web_brave_top=_cfg_int(validation_cfg.get("web_brave_top"), 8, minimum=1),
         web_brave_api_env=_cfg_str(validation_cfg.get("web_brave_api_env"), "BRAVE_API_KEY"),
         web_brave_country=_cfg_str(validation_cfg.get("web_brave_country"), "DE"),
@@ -269,7 +333,11 @@ def export_ranked_csv(*, conn, run_id: int, out_path: Path, limit: int) -> Path:
                 fieldnames=[
                     "rank",
                     "name",
+                    "family",
+                    "surface_policy",
                     "total_score",
+                    "family_score",
+                    "family_rank",
                     "attractiveness_score",
                     "attractiveness_status",
                     "attractiveness_reasons",
@@ -282,12 +350,17 @@ def export_ranked_csv(*, conn, run_id: int, out_path: Path, limit: int) -> Path:
             )
             writer.writeheader()
             for rank, row in enumerate(rows, start=1):
-                attractiveness = score_name_attractiveness(str(row["name"]))
+                display_name = str(row["display_name"] or row["name"])
+                attractiveness = score_name_attractiveness(display_name)
                 writer.writerow(
                     {
                         "rank": rank,
-                    "name": _sanitize_csv_value(row["name"]),
+                    "name": _sanitize_csv_value(display_name),
+                    "family": _sanitize_csv_value(row["family"]),
+                    "surface_policy": _sanitize_csv_value(row["surface_policy"]),
                     "total_score": row["total_score"],
+                    "family_score": row["family_score"],
+                    "family_rank": row["family_rank"],
                     "attractiveness_score": attractiveness.score_delta,
                     "attractiveness_status": attractiveness.status,
                     "attractiveness_reasons": _sanitize_csv_value(",".join(attractiveness.reasons)),
@@ -423,7 +496,7 @@ def _validation_config_from_payload(raw: object) -> ValidationConfig:
         timeout_s=_cfg_float(payload.get("timeout_s"), 8.0, minimum=0.1),
         company_top=_cfg_int(payload.get("company_top"), 8, minimum=1),
         social_unavailable_fail_threshold=_cfg_int(payload.get("social_unavailable_fail_threshold"), 3, minimum=1),
-        web_search_order=_cfg_str(payload.get("web_search_order"), "brave,google_cse,duckduckgo"),
+        web_search_order=_canonical_web_search_order(payload.get("web_search_order")),
         web_brave_top=_cfg_int(payload.get("web_brave_top"), 8, minimum=1),
         web_brave_api_env=_cfg_str(payload.get("web_brave_api_env"), "BRAVE_API_KEY"),
         web_brave_country=_cfg_str(payload.get("web_brave_country"), "DE"),
@@ -441,6 +514,45 @@ def _validation_config_from_payload(raw: object) -> ValidationConfig:
         tmview_profile_dir=_cfg_str(payload.get("tmview_profile_dir"), ""),
         tmview_chrome_executable=_cfg_str(payload.get("tmview_chrome_executable"), ""),
     )
+
+
+def run_shortlist_validation(
+    *,
+    db_path: Path,
+    candidate_names: list[str],
+    config: ValidationConfig,
+) -> dict[str, object]:
+    normalized_names = [str(name).strip() for name in candidate_names if str(name).strip()]
+    fingerprint = shortlist_fingerprint(names=normalized_names, config=config)
+    with db.open_db(db_path) as conn:
+        db.ensure_schema(conn)
+        if detect_state_mismatch(conn, fingerprint=fingerprint):
+            raise RuntimeError("validation_state_mismatch")
+        run_id, created_new = prepare_shortlist_run(
+            conn,
+            candidate_names=normalized_names,
+            config=replace(config, parallel_workers=1),
+            fingerprint=fingerprint,
+        )
+        queue_summary = run_validation_jobs(
+            conn,
+            run_id=run_id,
+            config=replace(config, parallel_workers=1),
+            mark_run_complete=True,
+        )
+        validation_status_counts: Counter[str] = Counter()
+        validation_check_counts: Counter[str] = Counter()
+        for row in db.fetch_results_for_run(conn, run_id=run_id):
+            validation_status_counts[str(row["status"])] += 1
+            validation_check_counts[str(row["result_key"])] += 1
+        return {
+            "run_id": run_id,
+            "fingerprint": fingerprint,
+            "created_new": created_new,
+            "job_counts": dict(queue_summary["job_counts"]),
+            "validation_status_counts": dict(sorted(validation_status_counts.items())),
+            "validation_check_counts": dict(sorted(validation_check_counts.items())),
+        }
 
 
 def _refresh_run_metrics_after_recheck(
@@ -461,7 +573,7 @@ def _refresh_run_metrics_after_recheck(
 
     ranked_rows = db.fetch_ranked_rows(conn, run_id=int(run_row["id"]), limit=9999)
     decision_counts: Counter[str] = Counter(str(row["decision"]) for row in ranked_rows)
-    top_names = [str(row["name"]) for row in ranked_rows[:5]]
+    top_names = [str(row["display_name"] or row["name"]) for row in ranked_rows[:5]]
     export_path_raw = str(current_metrics.get("export_path") or "").strip()
     export_path = Path(export_path_raw).resolve() if export_path_raw else None
     counts = dict(current_metrics.get("counts") or {})
@@ -483,7 +595,11 @@ def _refresh_run_metrics_after_recheck(
 
 def rerank_run(conn, *, run_id: int):
     candidate_rows = db.list_candidates(conn, run_id=run_id)
-    candidate_lookup = {str(row["name"]): int(row["id"]) for row in candidate_rows}
+    candidate_lookup = {str(row["display_name"] or row["name"]): int(row["id"]) for row in candidate_rows}
+    run_row = db.get_run(conn, run_id=run_id)
+    config_payload = json.loads(str(run_row["config_json"] or "{}")) if run_row is not None else {}
+    ideation_payload = config_payload.get("ideation") or {}
+    family_mix_profile = _cfg_str(ideation_payload.get("family_mix_profile"), "legacy_alpha")
     for candidate_name, candidate_id in candidate_lookup.items():
         attractiveness = build_attractiveness_result(candidate_name)
         db.upsert_result(
@@ -497,15 +613,25 @@ def rerank_run(conn, *, run_id: int):
         )
     grouped_rows: list[tuple[str, CandidateResult]] = []
     for row in db.fetch_results_for_run(conn, run_id=run_id):
-        grouped_rows.append((str(row["name"]), _candidate_results_from_rows([row])[0]))
+        grouped_rows.append((str(row["display_name"] or row["name"]), _candidate_results_from_rows([row])[0]))
     grouped_results = group_results(grouped_rows)
-    rankings = rank_candidates(grouped_results)
+    if family_mix_profile == "legacy_alpha":
+        rankings = rank_candidates(grouped_results)
+    else:
+        rankings = rank_candidate_surfaces(
+            candidates=[dict(row) for row in candidate_rows],
+            results_by_name=grouped_results,
+            min_per_family=_cfg_int(ideation_payload.get("late_fusion_min_per_family"), 1, minimum=0),
+        )
     db.upsert_rankings(
         conn,
         rows=[
             (
                 candidate_lookup[item.name],
                 item.total_score,
+                item.family_score,
+                item.family_rank,
+                item.rank_position,
                 item.blocker_count,
                 item.unavailable_count,
                 item.unsupported_count,
@@ -926,7 +1052,7 @@ def _build_run_metrics(
     export_path: Path | None,
 ) -> dict[str, object]:
     decision_counts = Counter(item.decision for item in rankings)
-    top_names = [item.name for item in rankings[:5]]
+    top_names = [item.display_name or item.name for item in rankings[:5]]
     return {
         "version": 1,
         "batch_id": batch_id,
@@ -949,6 +1075,8 @@ def _build_run_metrics(
             "cost_usd": float(ideation_report.get("cost_usd") or 0.0),
             "seed_diversity": ideation_report.get("seed_diversity") or {},
             "name_diversity": ideation_report.get("name_diversity") or {},
+            "family_reports": ideation_report.get("family_reports") or {},
+            "family_counts": ideation_report.get("family_counts") or {},
             "feedback": ideation_report.get("feedback") or {},
             "success_context": ideation_report.get("success_context") or {},
             "avoidance_context": ideation_report.get("avoidance_context") or {},
@@ -1006,52 +1134,71 @@ def run_loaded_config(
             success_context = db.recent_positive_feedback(conn, exclude_batch_id=batch_id)
             avoidance_context = db.recent_avoidance_feedback(conn, exclude_batch_id=batch_id)
             high_signal_avoidance = _high_signal_avoidance_terms(avoidance_context)
-            names, ideation_report = generate_candidates(
-                brief=effective_config.brief,
-                config=effective_config.ideation,
-                success_context=success_context,
-                avoidance_context=avoidance_context,
-            )
-            ideation_report["feedback"] = feedback_report
-            recent_corpus = db.recent_ranked_name_corpus(conn, exclude_batch_id=batch_id)
-            recent_corpus.extend(db.recent_external_fail_name_corpus(conn, exclude_batch_id=batch_id))
-            normalized_names = _normalize_names(names)
-            taste_bundle, _taste_lexicon_report = build_lexicon(effective_config.brief)
-            taste_blocked_fragments = build_blocked_fragments(
-                taste_bundle,
-                extra_fragments=tuple(
-                    str(value).strip()
-                    for value in (avoidance_context.get("external_fragment_hints") or [])
-                    if str(value).strip()
-                ),
-            )
-            normalized_names, taste_filter_report = filter_names_by_taste(
-                normalized_names,
-                blocked_fragments=taste_blocked_fragments,
-            )
-            ideation_report["taste_filter"] = taste_filter_report
-            if not normalized_names:
-                raise RuntimeError("taste filter rejected all candidates")
-            normalized_names, local_filter_report = filter_local_collisions(
-                normalized_names,
-                recent_corpus=recent_corpus,
-                terminal_bigram_quota=max(2, max(1, len(normalized_names) // 3)),
-                avoid_lead_fragments=high_signal_avoidance["lead_hints"],
-                avoid_lead_skeletons=high_signal_avoidance["lead_skeletons"],
-                avoid_tail_fragments=high_signal_avoidance["tail_hints"],
-                crowded_terminal_families=tuple(avoidance_context.get("external_terminal_families") or ()),
-                crowded_terminal_skeletons=tuple(avoidance_context.get("external_terminal_skeletons") or ()),
-            )
-            ideation_report["local_filter"] = local_filter_report
-            if not normalized_names:
-                raise RuntimeError("local collision filter rejected all candidates")
-            db.add_candidates(
-                conn,
-                run_id=run_id,
-                names=normalized_names,
-                source_kind="ideation",
-                source_detail=_json_string(ideation_report),
-            )
+            ideation_candidate_count = 0
+            if effective_config.ideation.family_mix_profile == "legacy_alpha":
+                names, ideation_report = generate_candidates(
+                    brief=effective_config.brief,
+                    config=effective_config.ideation,
+                    success_context=success_context,
+                    avoidance_context=avoidance_context,
+                )
+                ideation_report["feedback"] = feedback_report
+                recent_corpus = db.recent_ranked_name_corpus(conn, exclude_batch_id=batch_id)
+                recent_corpus.extend(db.recent_external_fail_name_corpus(conn, exclude_batch_id=batch_id))
+                normalized_names = _normalize_names(names)
+                taste_bundle, _taste_lexicon_report = build_lexicon(effective_config.brief)
+                taste_blocked_fragments = build_blocked_fragments(
+                    taste_bundle,
+                    extra_fragments=tuple(
+                        str(value).strip()
+                        for value in (avoidance_context.get("external_fragment_hints") or [])
+                        if str(value).strip()
+                    ),
+                )
+                normalized_names, taste_filter_report = filter_names_by_taste(
+                    normalized_names,
+                    blocked_fragments=taste_blocked_fragments,
+                )
+                ideation_report["taste_filter"] = taste_filter_report
+                if not normalized_names:
+                    raise RuntimeError("taste filter rejected all candidates")
+                normalized_names, local_filter_report = filter_local_collisions(
+                    normalized_names,
+                    recent_corpus=recent_corpus,
+                    terminal_bigram_quota=max(2, max(1, len(normalized_names) // 3)),
+                    avoid_lead_fragments=high_signal_avoidance["lead_hints"],
+                    avoid_lead_skeletons=high_signal_avoidance["lead_skeletons"],
+                    avoid_tail_fragments=high_signal_avoidance["tail_hints"],
+                    crowded_terminal_families=tuple(avoidance_context.get("external_terminal_families") or ()),
+                    crowded_terminal_skeletons=tuple(avoidance_context.get("external_terminal_skeletons") or ()),
+                )
+                ideation_report["local_filter"] = local_filter_report
+                if not normalized_names:
+                    raise RuntimeError("local collision filter rejected all candidates")
+                db.add_candidates(
+                    conn,
+                    run_id=run_id,
+                    names=normalized_names,
+                    source_kind="ideation",
+                    source_detail=_json_string(ideation_report),
+                )
+                ideation_candidate_count = len(normalized_names)
+            else:
+                surfaced_candidates, ideation_report = generate_candidate_surfaces(
+                    brief=effective_config.brief,
+                    config=effective_config.ideation,
+                    success_context=success_context,
+                    avoidance_context=avoidance_context,
+                )
+                ideation_report["feedback"] = feedback_report
+                if not surfaced_candidates:
+                    raise RuntimeError("surface ideation produced no candidates")
+                db.add_candidate_surfaces(
+                    conn,
+                    run_id=run_id,
+                    candidates=surfaced_candidates,
+                )
+                ideation_candidate_count = len(surfaced_candidates)
             ideation_duration_ms = int((time.perf_counter() - ideation_started) * 1000)
             db.set_run_state(conn, run_id=run_id, status=RunStatus.RUNNING.value, current_step="validation")
             conn.commit()
@@ -1061,11 +1208,8 @@ def run_loaded_config(
             validation_status_counts: Counter[str] = Counter()
             validation_check_counts: Counter[str] = Counter()
             validation_started = time.perf_counter()
-            inline_checks = [item for item in config.validation.checks if str(item).strip().lower() != "tmview"]
-            inline_validation_config = replace(config.validation, checks=inline_checks)
-            validation_inputs: list[tuple[int, str]] = []
             for row in candidate_rows:
-                name = row["name"]
+                name = row["display_name"] or row["name"]
                 if name is None:
                     continue
                 candidate_name = str(name).strip()
@@ -1073,144 +1217,22 @@ def run_loaded_config(
                     continue
                 candidate_id = int(row["id"])
                 candidate_lookup[candidate_name] = candidate_id
-                validation_inputs.append((candidate_id, candidate_name))
-
-            validation_workers = _validation_worker_count(
-                config=inline_validation_config,
-                candidate_count=len(validation_inputs),
+            db.ensure_validation_jobs(
+                conn,
+                run_id=run_id,
+                ordered_candidate_ids=[int(row["id"]) for row in candidate_rows],
+                shortlist_fingerprint=f"pipeline:{run_id}",
             )
-            pending_commit_count = 0
-            if validation_workers <= 1:
-                for candidate_id, candidate_name in validation_inputs:
-                    results = _validate_candidate_safe(
-                        candidate_name=candidate_name,
-                        config=inline_validation_config,
-                    )
-                    for result in results:
-                        validation_status_counts[result.status.value] += 1
-                        validation_check_counts[result.check_name] += 1
-                        db.upsert_result(
-                            conn,
-                            candidate_id=candidate_id,
-                            result_key=result.check_name,
-                            status=result.status.value,
-                            score_delta=result.score_delta,
-                            reason=result.reason,
-                            details=result.details,
-                        )
-                    conn.commit()
-            else:
-                with ThreadPoolExecutor(max_workers=validation_workers) as executor:
-                    futures = {
-                        executor.submit(
-                            _validate_candidate_safe,
-                            candidate_name=candidate_name,
-                            config=inline_validation_config,
-                        ): candidate_id
-                        for candidate_id, candidate_name in validation_inputs
-                    }
-                    for future in as_completed(futures):
-                        candidate_id = futures[future]
-                        results = future.result()
-                        for result in results:
-                            validation_status_counts[result.status.value] += 1
-                            validation_check_counts[result.check_name] += 1
-                            db.upsert_result(
-                                conn,
-                                candidate_id=candidate_id,
-                                result_key=result.check_name,
-                                status=result.status.value,
-                                score_delta=result.score_delta,
-                                reason=result.reason,
-                                details=result.details,
-                            )
-                        pending_commit_count += 1
-                        if pending_commit_count >= validation_workers:
-                            conn.commit()
-                            pending_commit_count = 0
-                if pending_commit_count > 0:
-                    conn.commit()
-            if any(str(item).strip().lower() == "tmview" for item in config.validation.checks):
-                tmview_names = [name for name in candidate_lookup if name]
-                tmview_results: list[CandidateResult] = []
-                if not str(config.validation.tmview_profile_dir or "").strip():
-                    tmview_results = [
-                        CandidateResult(
-                            check_name="tmview",
-                            status=ResultStatus.UNAVAILABLE,
-                            score_delta=0.0,
-                            reason="tmview_profile_unconfigured",
-                            details={
-                                "source": "tmview_playwright",
-                                "query_ok": False,
-                                "result_count": -1,
-                                "exact_hits": -1,
-                                "near_hits": -1,
-                                "sample_text": "",
-                                "exact_sample_text": "",
-                                "active_exact_hits": 0,
-                                "inactive_exact_hits": 0,
-                                "unknown_exact_hits": 0,
-                                "error": "tmview_profile_unconfigured",
-                                "url": "",
-                            },
-                        )
-                        for _ in tmview_names
-                    ]
-                else:
-                    probe_results = probe_tmview_names(
-                        names=tmview_names,
-                        profile_dir=config.validation.tmview_profile_dir,
-                        chrome_executable=(
-                            config.validation.tmview_chrome_executable
-                            if str(config.validation.tmview_chrome_executable or "").strip()
-                            else None
-                        ),
-                    )
-                    tmview_lookup = {item.name: item for item in probe_results}
-                    for candidate_name in tmview_names:
-                        probe_result = tmview_lookup.get(normalize_tmview_name(candidate_name))
-                        if probe_result is None:
-                            tmview_results.append(
-                                CandidateResult(
-                                    check_name="tmview",
-                                    status=ResultStatus.UNAVAILABLE,
-                                    score_delta=0.0,
-                                    reason="tmview_probe_missing",
-                                    details={
-                                        "source": "tmview_playwright",
-                                        "query_ok": False,
-                                        "result_count": -1,
-                                        "exact_hits": -1,
-                                        "near_hits": -1,
-                                        "sample_text": "",
-                                        "exact_sample_text": "",
-                                        "active_exact_hits": 0,
-                                        "inactive_exact_hits": 0,
-                                        "unknown_exact_hits": 0,
-                                        "error": "tmview_probe_missing",
-                                        "url": "",
-                                    },
-                                )
-                            )
-                            continue
-                        tmview_results.append(_tmview_result_from_probe(probe_result))
-                for candidate_name, tmview_result in zip(tmview_names, tmview_results):
-                    candidate_id = candidate_lookup.get(candidate_name)
-                    if candidate_id is None:
-                        continue
-                    validation_status_counts[tmview_result.status.value] += 1
-                    validation_check_counts[tmview_result.check_name] += 1
-                    db.upsert_result(
-                        conn,
-                        candidate_id=candidate_id,
-                        result_key=tmview_result.check_name,
-                        status=tmview_result.status.value,
-                        score_delta=tmview_result.score_delta,
-                        reason=tmview_result.reason,
-                        details=tmview_result.details,
-                    )
-                conn.commit()
+            conn.commit()
+            run_validation_jobs(
+                conn,
+                run_id=run_id,
+                config=replace(config.validation, parallel_workers=1),
+                mark_run_complete=False,
+            )
+            for row in db.fetch_results_for_run(conn, run_id=run_id):
+                validation_status_counts[str(row["status"])] += 1
+                validation_check_counts[str(row["result_key"])] += 1
             validation_duration_ms = int((time.perf_counter() - validation_started) * 1000)
 
             db.set_run_state(conn, run_id=run_id, status=RunStatus.RUNNING.value, current_step="ranking")
@@ -1230,7 +1252,7 @@ def run_loaded_config(
             for row in db.fetch_results_for_run(conn, run_id=run_id):
                 persisted_results.append(
                     (
-                        str(row["name"]).strip(),
+                        str(row["display_name"] or row["name"]).strip(),
                         CandidateResult(
                             check_name=str(row["result_key"]),
                             status=ResultStatus(str(row["status"])),
@@ -1241,7 +1263,14 @@ def run_loaded_config(
                     )
                 )
             grouped_results = group_results(persisted_results)
-            rankings = rank_candidates(grouped_results)
+            if effective_config.ideation.family_mix_profile == "legacy_alpha":
+                rankings = rank_candidates(grouped_results)
+            else:
+                rankings = rank_candidate_surfaces(
+                    candidates=[dict(row) for row in candidate_rows],
+                    results_by_name=grouped_results,
+                    min_per_family=max(0, int(effective_config.ideation.late_fusion_min_per_family)),
+                )
             ranking_rows = []
             for ranking in rankings:
                 candidate_id = candidate_lookup.get(ranking.name)
@@ -1251,6 +1280,9 @@ def run_loaded_config(
                     (
                         candidate_id,
                         ranking.total_score,
+                        ranking.family_score,
+                        ranking.family_rank,
+                        ranking.rank_position,
                         ranking.blocker_count,
                         ranking.unavailable_count,
                         ranking.unsupported_count,
@@ -1275,7 +1307,7 @@ def run_loaded_config(
                 config=config,
                 batch_id=batch_id,
                 batch_index=batch_index,
-                ideation_candidate_count=len(normalized_names),
+                ideation_candidate_count=ideation_candidate_count,
                 ideation_report=ideation_report,
                 validation_status_counts=validation_status_counts,
                 validation_check_counts=validation_check_counts,

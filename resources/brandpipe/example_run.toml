@@ -24,7 +24,7 @@ candidates_per_round = 12
 checks = ""
 scope = "global"
 store_countries = "de,ch,it"
-web_search_order = "brave,google_cse,duckduckgo"
+web_search_order = "brave,browser_google"
 
 [export]
 out_csv = "../../test_outputs/brandpipe/finalists_{run_id}.csv"

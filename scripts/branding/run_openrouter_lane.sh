@@ -19,11 +19,11 @@ POOL_SIZE=400
 CHECK_LIMIT=80
 VALIDATOR_CANDIDATE_LIMIT=40
 VALIDATOR_EXPENSIVE_FINALIST_LIMIT=20
-VALIDATOR_CONCURRENCY=8
-VALIDATOR_MIN_CONCURRENCY=4
-VALIDATOR_MAX_CONCURRENCY=12
+VALIDATOR_CONCURRENCY=1
+VALIDATOR_MIN_CONCURRENCY=1
+VALIDATOR_MAX_CONCURRENCY=1
 VALIDATOR_TIMEOUT_S=6
-VALIDATOR_CHECKS="${OPENROUTER_VALIDATOR_CHECKS:-adversarial,psych,descriptive,tm_cheap,company_cheap,domain,web,web_google_like,tm_registry_global,app_store,package,social}"
+VALIDATOR_CHECKS="${OPENROUTER_VALIDATOR_CHECKS:-domain,package,company,web,app_store,social,tm}"
 LLM_ROUNDS=1
 LLM_CANDIDATES_PER_ROUND=10
 LLM_TEMPERATURE="${OPENROUTER_LLM_TEMPERATURE:-0.8}"
@@ -41,7 +41,7 @@ POST_RANK_TOP_N="${OPENROUTER_POST_RANK_TOP_N:-40}"
 POST_RANK_INCLUDE_NON_SHORTLIST=0
 PUBLISH_COVERAGE=1
 PUBLISH_COVERAGE_LIMIT="${OPENROUTER_PUBLISH_COVERAGE_LIMIT:-60}"
-PUBLISH_COVERAGE_CHECKS="${OPENROUTER_PUBLISH_COVERAGE_CHECKS:-company_cheap,domain,web_google_like,tm_registry_global}"
+PUBLISH_COVERAGE_CHECKS="${OPENROUTER_PUBLISH_COVERAGE_CHECKS:-domain,package,company,web,app_store,social,tm}"
 PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS="${OPENROUTER_PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS:-}"
 PUBLISH_NO_SURVIVORS_FAIL=1
 HEALTH_CHECK=1
@@ -98,9 +98,9 @@ Options:
   --check-limit <n>                  Generator check limit (default: 80)
   --validator-candidate-limit <n>    Validator candidate limit (default: 36 via profile=quality)
   --validator-expensive-limit <n>    Expensive finalist limit (default: 16 via profile=quality)
-  --validator-concurrency <n>        Initial validator concurrency (default: 6 via profile=quality)
-  --validator-min-concurrency <n>    Validator adaptive min concurrency (default: 3 via profile=quality)
-  --validator-max-concurrency <n>    Validator adaptive max concurrency (default: 8 via profile=quality)
+  --validator-concurrency <n>        Compatibility flag; effective validator concurrency is 1
+  --validator-min-concurrency <n>    Compatibility lower bound retained for wrapper stability
+  --validator-max-concurrency <n>    Compatibility upper bound retained for wrapper stability
   --validator-timeout-s <seconds>    Validator per-check timeout (default: 30 via profile=quality)
   --validator-checks <csv>           Explicit validator checks list
   --llm-rounds <n>                   LLM rounds per run (default: 1)
@@ -119,7 +119,7 @@ Options:
   --publish-coverage                 Run dedicated publish-coverage pass on shortlisted names (default: on)
   --no-publish-coverage              Skip dedicated publish-coverage pass
   --publish-coverage-limit <n>       Max shortlisted names checked for publish coverage (default: 60)
-  --publish-coverage-checks <csv>    Checks used for publish coverage (default: company_cheap,domain,web_google_like,tm_registry_global)
+  --publish-coverage-checks <csv>    Checks used for publish coverage (default: domain,package,company,web,app_store,social,tm)
   --publish-coverage-required-domain-tlds <csv>
                                     Required domain TLDs for publish coverage (default: scope-derived)
   --publish-no-survivors-fail        Fail lane when publish survivor count is zero (default: on)
@@ -733,74 +733,21 @@ if (( RUN_RC == 0 && PUBLISH_COVERAGE )); then
     echo "publish_coverage_warn reason=db_not_found path=$COVERAGE_DB"
     RUN_RC=4
   else
-    COVERAGE_CONTEXT="$(
-      python3 - "$COVERAGE_DB" <<'PY'
-import json
-import sqlite3
-import sys
-
-db_path = sys.argv[1]
-conn = sqlite3.connect(db_path)
-try:
-    row = conn.execute(
-        """
-        SELECT scope, gate_mode, config_json
-        FROM naming_runs
-        WHERE variation_profile = 'validator_async'
-        ORDER BY id DESC
-        LIMIT 1
-        """
-    ).fetchone()
-finally:
-    conn.close()
-
-payload = {
-    "scope": "eu",
-    "gate": "strict",
-    "policy_version": "collision_first_v1",
-    "class_profile": "9,42",
-    "market_scope": "eu,ch",
-}
-if row:
-    payload["scope"] = str(row[0] or payload["scope"]).strip() or payload["scope"]
-    payload["gate"] = str(row[1] or payload["gate"]).strip() or payload["gate"]
-    try:
-        config = json.loads(row[2] or "{}")
-    except json.JSONDecodeError:
-        config = {}
-    if isinstance(config, dict):
-        payload["policy_version"] = str(config.get("policy_version") or payload["policy_version"]).strip() or payload["policy_version"]
-        payload["class_profile"] = str(config.get("class_profile") or payload["class_profile"]).strip() or payload["class_profile"]
-        payload["market_scope"] = str(config.get("market_scope") or payload["market_scope"]).strip() or payload["market_scope"]
-print(json.dumps(payload, ensure_ascii=True))
-PY
-    )"
-    COVERAGE_SCOPE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["scope"])' "$COVERAGE_CONTEXT")"
-    COVERAGE_GATE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["gate"])' "$COVERAGE_CONTEXT")"
-    COVERAGE_POLICY_VERSION="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["policy_version"])' "$COVERAGE_CONTEXT")"
-    COVERAGE_CLASS_PROFILE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["class_profile"])' "$COVERAGE_CONTEXT")"
-    COVERAGE_MARKET_SCOPE="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["market_scope"])' "$COVERAGE_CONTEXT")"
+    LATEST_RUN_CSV="$(ls -1t "$OUT_DIR"/runs/run_*.csv 2>/dev/null | head -n 1 || true)"
+    if [[ -z "$LATEST_RUN_CSV" ]]; then
+      echo "publish_coverage_warn reason=run_csv_missing out_dir=$OUT_DIR/runs"
+      RUN_RC=4
+    else
     COVERAGE_CMD=(
-      python3 "$ROOT_DIR/scripts/branding/naming_validate_async.py"
-      --db "$COVERAGE_DB"
-      --pipeline-version=v3
-      --enable-v3
-      --candidate-source shortlist_selected
-      --candidate-limit "$PUBLISH_COVERAGE_LIMIT"
-      --shortlist-source-run-id 0
-      --state-filter new,checked
-      --scope "$COVERAGE_SCOPE"
-      --gate "$COVERAGE_GATE"
-      --expensive-finalist-limit "$PUBLISH_COVERAGE_LIMIT"
+      python3 "$ROOT_DIR/scripts/branding/run_brandpipe_validate.py"
+      --input-csv "$LATEST_RUN_CSV"
+      --mode all
+      --out-dir "$OUT_DIR/postrank"
       --checks "$PUBLISH_COVERAGE_CHECKS"
-      --policy-version "$COVERAGE_POLICY_VERSION"
-      --class-profile "$COVERAGE_CLASS_PROFILE"
-      --market-scope "$COVERAGE_MARKET_SCOPE"
-      --validation-tier all
       --concurrency "$VALIDATOR_CONCURRENCY"
-      --min-concurrency "$VALIDATOR_MIN_CONCURRENCY"
-      --max-concurrency "$VALIDATOR_MAX_CONCURRENCY"
       --timeout-s "$VALIDATOR_TIMEOUT_S"
+      --web-browser-profile-dir "$OUT_DIR/playwright-profile"
+      --tmview-profile-dir "$OUT_DIR/playwright-profile"
     )
     if [[ -n "$PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS" ]]; then
       COVERAGE_CMD+=(--required-domain-tlds "$PUBLISH_COVERAGE_REQUIRED_DOMAIN_TLDS")
@@ -851,6 +798,7 @@ PY
           RUN_RC=4
         fi
       fi
+    fi
     fi
   fi
 fi

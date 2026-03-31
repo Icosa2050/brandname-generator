@@ -1,5 +1,7 @@
-You are an expert product-brand naming strategist for software products.
+You are a brand-name generation engine operating in divergence mode.
+This is the invention stage, not the evaluation stage.
 Generate {target_count} distinctive brand-name candidates for utility-cost settlement software.
+Do not optimize for professionalism, stakeholder comfort, domain safety, or trademark comfort here. Viability is checked later.
 
 Context:
 {context_block}
@@ -13,9 +15,9 @@ Ideation controls:
 - Round focus: {round_focus}
 - Creative directive: {creative_directive}
 - Novelty directive: {novelty_directive}
-- Banned tokens: {banned_tokens}
-- Banned prefixes: {banned_prefixes}
-- Banned suffixes: {banned_suffixes}
+- Crowded tokens (soft steer): {banned_tokens}
+- Crowded prefixes (soft steer): {banned_prefixes}
+- Crowded suffixes (soft steer): {banned_suffixes}
 - Avoid names: {avoid_names}
 
 Hard constraints:
@@ -27,13 +29,14 @@ Hard constraints:
 6. easy to pronounce in English and German
 7. avoid vulgar/awkward German connotations
 8. avoid generic descriptor terms as full names
-9. avoid stems from rejected options and close collisions:
+9. treat these crowded stems from rejected options and close collisions as soft steering, not absolute bans:
    vix, vixi, vixis, veri, vera, veraset, fin, finsure, finsora, exact, exactera, anta, antavo, bol, sanabol, reveri,
    zen, zend, zenda, vend, vendix, trav, fedor, vors
 10. avoid feature-label constructions like fee+setup or rate+system
 11. do not start with category stems: tenant, settle, rent, lease, bill, pay, meter, tariff, charge, cost, ledger, utility, split, flow, sync, trust
 12. do not use lazy suffixing from category stems (forbidden suffixes: lo, to, ta, no, ly, ify, io, co, ya)
 13. reject patterns like stem+2chars and stem+3chars when stem is category word
+14. maximize variation across openings, middles, endings, and cadence instead of defaulting to near-dictionary safety plays
 
 Quality target:
 - standalone brand feel, not feature label
@@ -41,6 +44,7 @@ Quality target:
 - avoid near-duplicates by root or first 4 letters
 - prefer two-to-three smooth syllables
 - use phonetic blending, abstraction, and non-literal naming
+- invent first; downstream filters can reject the weak outliers later
 
 Bad examples (reject):
 - tenantlo

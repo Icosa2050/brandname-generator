@@ -34,7 +34,7 @@ weight = 1
 checks = "domain,package,web,social,tmview"
 scope = "global"
 store_countries = "de,ch,it"
-web_search_order = "brave,google_cse,duckduckgo"
+web_search_order = "brave,browser_google"
 tmview_profile_dir = "../../test_outputs/brandpipe/tmview-edge-profile"
 tmview_chrome_executable = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
 

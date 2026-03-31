@@ -3,7 +3,7 @@
 Standalone Python naming/branding pipeline with:
 - candidate generation
 - LLM ideation (OpenRouter, OpenAI-compatible local runtimes, hybrid)
-- async validation
+- shortlist validation with browser-backed web/TMView/App Store rechecks
 - exclusion memory (SQLite) to avoid re-validating eliminated names
 
 ## Environment
@@ -118,9 +118,8 @@ Canonical prompt location:
 
 How to wire a prompt into generation:
 - Direct runner: pass `--llm-prompt-template-file <absolute_or_repo_path>`
-- Two-lane creation config: set the same flag inside `generation_command` in:
-  - `resources/branding/configs/creation_lane.default.toml`
-  - `resources/branding/configs/creation_lane.creative_hybrid.toml`
+- Hybrid shortcut wrappers: pass the corresponding prompt/template flags through the wrapper command
+- Brandpipe attack runs: keep briefs isolated per market and use a dedicated `--out-dir`
 
 Recommendation:
 - Keep one prompt file per brand+market variant.
@@ -170,38 +169,40 @@ zsh scripts/branding/report_campaign_progress.sh \
 ```
 
 ## Other Markets / Brands
-For a new market or brand line, duplicate the config pair and adjust:
+For a new market or brand line, keep the flow simple and adjust the run inputs:
 1. `scope` / store countries:
    - `scope`: `global`, `eu`, `dach`
    - screening countries: `de,ch,it` (or your target list)
-2. prompt file:
+2. prompt file or brief file:
    - `--llm-prompt-template-file resources/branding/llm/prompts/<brand>/<market>.txt`
+   - or a dedicated briefs file for `run_brandpipe_attack.py`
 3. naming constraints:
    - `--generator-min-len`, `--generator-max-len`
    - `--llm-rounds`, `--llm-candidates-per-round`
 4. market lexicon/seeds:
    - update seeds and source inputs (`resources/branding/inputs/source_inputs_v2.csv` or market-specific copy)
-5. legal gate settings:
-   - keep `validation_lane.legal_heavy.toml` defaults for final shortlist,
-   - adjust only if target registry coverage differs.
+5. shortlist validation settings:
+   - keep the default `run_brandpipe_validate.py` check set for final shortlist review
+   - adjust `--store-countries`, `--required-domain-tlds`, and browser profile args only if target coverage differs
 
 Suggested pattern:
-- `resources/branding/configs/creation_lane.<brand>_<market>.toml`
-- `resources/branding/configs/validation_lane.<brand>_<market>.toml`
-- `test_outputs/branding/<brand>_<market>/...`
+- `resources/branding/llm/prompts/<brand_slug>/<market_slug>.txt`
+- `resources/brandpipe/<brand>_<market>_briefs.toml`
+- `test_outputs/brandpipe/<brand>_<market>/...`
 
 ## More
 - Recommended reviewed-shortlist workflow:
-  - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.default.toml`
-  - Review generated `review_unique_top120.csv` in the new decision pack (`keep/maybe/drop`).
-  - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.default.toml --pack-dir <decision_pack_dir>`
-  - Default validation workflow is now `dual`: acceptance-tail first, async publish validation second.
-- Legal-heavier variant:
-  - `direnv exec . python3 scripts/branding/run_creation_lane.py --config resources/branding/configs/creation_lane.creative_hybrid.toml`
-  - Review generated `review_unique_top160.csv` in the tuned decision pack (`keep/maybe/drop`).
-  - `direnv exec . python3 scripts/branding/run_validation_lane.py --config resources/branding/configs/validation_lane.legal_heavy.toml --pack-dir <decision_pack_dir>`
-- Low-level acceptance-tail only:
-  - `direnv exec . python3 scripts/branding/run_acceptance_tail.py --pack-dir <decision_pack_dir>`
+  - Generate a merged shortlist:
+    - `direnv exec . python3 scripts/branding/run_brandpipe_attack.py --briefs-file resources/brandpipe/example_batch_briefs.toml --lanes default --out-dir test_outputs/brandpipe/manual_run`
+  - Review `merged_review_top*.csv` and mark `keep/maybe/drop` when you want human curation.
+  - Validate the shortlist with the blocking queue-backed runner:
+    - `direnv exec . python3 scripts/branding/run_brandpipe_validate.py --input-csv <review_csv> --mode keep_maybe --out-dir <validation_out_dir> --web-browser-profile-dir test_outputs/brandpipe/playwright-profile --tmview-profile-dir test_outputs/brandpipe/playwright-profile`
+    - queue state lives under `<validation_out_dir>/validation_state/brandpipe.db`
+    - rerun the same command to resume, or pass `--reset-state` to discard persisted state for that out-dir
+- Wider exploratory variant:
+  - `--lanes all` enables the experimental recovery lanes (`short_recovery`, `short`) in addition to the curated default lanes.
+- Manual-name validation:
+  - `direnv exec . python3 scripts/branding/run_brandpipe_validate.py --names "orbiluna,scedaria,otarelan" --out-dir <validation_out_dir> --web-browser-profile-dir test_outputs/brandpipe/playwright-profile --tmview-profile-dir test_outputs/brandpipe/playwright-profile`
 - Validation workflow explanation:
   - `docs/branding/validation_workflow.md`
 - Full runner flags:

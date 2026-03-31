@@ -17,6 +17,7 @@ from brandpipe.tmview import (
     TmviewProbeResult,
     _parse_result_count,
     _title_exact_or_near,
+    _title_match_mode,
     build_tmview_url,
     clone_tmview_runtime_profile,
     normalize_alpha,
@@ -27,8 +28,9 @@ from brandpipe.tmview import (
 
 
 class TmviewTests(unittest.TestCase):
-    def test_normalize_alpha_strips_non_letters(self) -> None:
-        self.assertEqual(normalize_alpha("Cord-Nix 42"), "cordnix")
+    def test_normalize_alpha_preserves_digits(self) -> None:
+        self.assertEqual(normalize_alpha("Cord-Nix 42"), "cordnix42")
+        self.assertEqual(normalize_alpha("Set 4 You"), "set4you")
         self.assertEqual(normalize_alpha("Andalé"), "andale")
 
     def test_build_tmview_url_embeds_basic_search(self) -> None:
@@ -51,7 +53,7 @@ class TmviewTests(unittest.TestCase):
     def test_probe_names_normalizes_and_deduplicates(self) -> None:
         fake_results = [
             TmviewProbeResult(
-                name="cordnix",
+                name="Cordnix",
                 url="https://example.test",
                 query_ok=True,
                 source="tmview_playwright",
@@ -67,8 +69,8 @@ class TmviewTests(unittest.TestCase):
             results = probe_names(names=["Cordnix", "cordnix"], profile_dir="/tmp/tmview-profile")
 
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].name, "cordnix")
-        probe.probe_name.assert_called_once_with("cordnix")
+        self.assertEqual(results[0].name, "Cordnix")
+        probe.probe_name.assert_called_once_with("Cordnix", normalized_name="cordnix")
 
     def test_probe_names_passes_explicit_nice_class_to_probe(self) -> None:
         fake_results = [
@@ -104,6 +106,10 @@ class TmviewTests(unittest.TestCase):
         self.assertEqual(_title_exact_or_near("hearthvex", "HEALTHDEX THE BUSINESS HEALTH INDEX"), (False, True))
         self.assertEqual(_title_exact_or_near("cirani", "CIRANO"), (False, True))
         self.assertEqual(_title_exact_or_near("andalen", "Andalé"), (False, True))
+
+    def test_title_match_mode_distinguishes_surface_and_normalized_exact(self) -> None:
+        self.assertEqual(_title_match_mode("incident.io", "incidentio", "INCIDENT.IO"), ("surface_exact", False))
+        self.assertEqual(_title_match_mode("incident.io", "incidentio", "Incidentio"), ("normalized_exact", False))
 
     def test_write_results_json_persists_payload(self) -> None:
         result = TmviewProbeResult(

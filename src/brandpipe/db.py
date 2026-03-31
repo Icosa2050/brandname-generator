@@ -8,8 +8,9 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+import unicodedata
 
-from .models import RunStatus
+from .models import NameFamily, RunStatus, SurfacePolicy, SurfacedCandidate
 
 DENSE_EXTERNAL_REASONS = frozenset(
     {
@@ -70,6 +71,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           run_id INTEGER NOT NULL,
           name TEXT NOT NULL,
           name_normalized TEXT NOT NULL,
+          display_name TEXT NOT NULL DEFAULT '',
+          comparison_name_normalized TEXT NOT NULL DEFAULT '',
+          family TEXT NOT NULL DEFAULT 'smooth_blend',
+          surface_policy TEXT NOT NULL DEFAULT 'alpha_lower',
           source_kind TEXT NOT NULL,
           source_detail TEXT NOT NULL,
           created_at TEXT NOT NULL,
@@ -95,6 +100,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           id INTEGER PRIMARY KEY,
           candidate_id INTEGER NOT NULL UNIQUE,
           total_score REAL NOT NULL,
+          family_score REAL NOT NULL DEFAULT 0.0,
+          family_rank INTEGER NOT NULL DEFAULT 0,
+          rank_position INTEGER NOT NULL DEFAULT 0,
           blocker_count INTEGER NOT NULL,
           unavailable_count INTEGER NOT NULL,
           unsupported_count INTEGER NOT NULL,
@@ -105,10 +113,56 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
           FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS validation_jobs (
+          id INTEGER PRIMARY KEY,
+          run_id INTEGER NOT NULL,
+          candidate_id INTEGER NOT NULL,
+          shortlist_fingerprint TEXT NOT NULL DEFAULT '',
+          job_order INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL,
+          resume_check TEXT NOT NULL DEFAULT '',
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          next_retry_at TEXT,
+          last_error_kind TEXT NOT NULL DEFAULT '',
+          last_error_message TEXT NOT NULL DEFAULT '',
+          started_at TEXT,
+          finished_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(run_id, candidate_id),
+          FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+          FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS validation_attempts (
+          id INTEGER PRIMARY KEY,
+          job_id INTEGER NOT NULL,
+          run_id INTEGER NOT NULL,
+          candidate_id INTEGER NOT NULL,
+          check_name TEXT NOT NULL,
+          attempt_number INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          error_kind TEXT NOT NULL DEFAULT '',
+          retryable INTEGER NOT NULL DEFAULT 0,
+          http_status INTEGER,
+          retry_after_s REAL,
+          headers_json TEXT NOT NULL DEFAULT '{}',
+          evidence_json TEXT NOT NULL DEFAULT '{}',
+          details_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(job_id) REFERENCES validation_jobs(id) ON DELETE CASCADE,
+          FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+          FOREIGN KEY(candidate_id) REFERENCES candidates(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_candidates_run ON candidates(run_id, name);
         CREATE INDEX IF NOT EXISTS idx_candidate_results_candidate ON candidate_results(candidate_id, result_key);
         CREATE INDEX IF NOT EXISTS idx_candidate_rankings_candidate ON candidate_rankings(candidate_id);
+        CREATE INDEX IF NOT EXISTS idx_validation_jobs_run_status ON validation_jobs(run_id, status, job_order);
+        CREATE INDEX IF NOT EXISTS idx_validation_jobs_retry ON validation_jobs(run_id, next_retry_at, job_order);
+        CREATE INDEX IF NOT EXISTS idx_validation_attempts_job_check ON validation_attempts(job_id, check_name, attempt_number);
         """
     )
     try:
@@ -127,6 +181,52 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE candidate_rankings ADD COLUMN unsupported_count INTEGER NOT NULL DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+    try:
+        conn.execute("ALTER TABLE candidates ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE candidates ADD COLUMN comparison_name_normalized TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE candidates ADD COLUMN family TEXT NOT NULL DEFAULT 'smooth_blend'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE candidates ADD COLUMN surface_policy TEXT NOT NULL DEFAULT 'alpha_lower'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE candidate_rankings ADD COLUMN family_score REAL NOT NULL DEFAULT 0.0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE candidate_rankings ADD COLUMN family_rank INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE candidate_rankings ADD COLUMN rank_position INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute(
+        """
+        UPDATE candidates
+        SET display_name = CASE
+          WHEN TRIM(COALESCE(display_name, '')) = '' THEN name
+          ELSE display_name
+        END
+        """
+    )
+    conn.execute(
+        """
+        UPDATE candidates
+        SET comparison_name_normalized = CASE
+          WHEN TRIM(COALESCE(comparison_name_normalized, '')) = '' THEN name_normalized
+          ELSE comparison_name_normalized
+        END
+        """
+    )
     conn.commit()
 
 
@@ -206,23 +306,95 @@ def add_candidates(
     source_kind: str,
     source_detail: str,
 ) -> None:
-    def normalize(name: str) -> str:
+    def normalize_surface(name: str) -> str:
         return name.strip().casefold()
+
+    def normalize_compare(raw: str) -> str:
+        folded = unicodedata.normalize("NFKD", str(raw or ""))
+        plain = "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
+        return re.sub(r"[^a-z0-9]", "", plain)
 
     timestamp = now_iso()
     conn.executemany(
         """
-        INSERT OR IGNORE INTO candidates(run_id, name, name_normalized, source_kind, source_detail, created_at)
-        VALUES(?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO candidates(
+          run_id, name, name_normalized, display_name, comparison_name_normalized,
+          family, surface_policy, source_kind, source_detail, created_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        [(run_id, name, normalize(name), source_kind, source_detail, timestamp) for name in names],
+        [
+            (
+                run_id,
+                name,
+                normalize_surface(name),
+                name,
+                normalize_compare(name),
+                NameFamily.SMOOTH_BLEND.value,
+                SurfacePolicy.ALPHA_LOWER.value,
+                source_kind,
+                source_detail,
+                timestamp,
+            )
+            for name in names
+        ],
+    )
+
+
+def add_candidate_surfaces(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    candidates: Iterable[SurfacedCandidate],
+) -> None:
+    timestamp = now_iso()
+    rows = [
+        (
+            int(run_id),
+            candidate.display_name,
+            str(candidate.display_name).strip().casefold(),
+            candidate.display_name,
+            candidate.name_normalized,
+            candidate.family.value,
+            candidate.surface_policy.value,
+            candidate.source_kind,
+            candidate.source_detail,
+            timestamp,
+        )
+        for candidate in candidates
+        if str(candidate.display_name).strip()
+    ]
+    if not rows:
+        return
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO candidates(
+          run_id, name, name_normalized, display_name, comparison_name_normalized,
+          family, surface_policy, source_kind, source_detail, created_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
     )
 
 
 def list_candidates(conn: sqlite3.Connection, *, run_id: int) -> list[sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT id, name, source_kind, source_detail
+        SELECT
+          id,
+          run_id,
+          name,
+          display_name,
+          CASE
+            WHEN TRIM(COALESCE(comparison_name_normalized, '')) = '' THEN name_normalized
+            ELSE comparison_name_normalized
+          END AS name_normalized,
+          name_normalized AS surface_key,
+          family,
+          surface_policy,
+          source_kind,
+          source_detail
         FROM candidates
         WHERE run_id = ?
         ORDER BY name ASC
@@ -230,6 +402,60 @@ def list_candidates(conn: sqlite3.Connection, *, run_id: int) -> list[sqlite3.Ro
         (run_id,),
     ).fetchall()
     return list(rows)
+
+
+def list_candidates_by_ids(conn: sqlite3.Connection, *, candidate_ids: Iterable[int]) -> list[sqlite3.Row]:
+    ids = [int(candidate_id) for candidate_id in candidate_ids]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT
+          id,
+          run_id,
+          name,
+          display_name,
+          CASE
+            WHEN TRIM(COALESCE(comparison_name_normalized, '')) = '' THEN name_normalized
+            ELSE comparison_name_normalized
+          END AS name_normalized,
+          name_normalized AS surface_key,
+          family,
+          surface_policy,
+          source_kind,
+          source_detail
+        FROM candidates
+        WHERE id IN ({placeholders})
+        ORDER BY id ASC
+        """,
+        tuple(ids),
+    ).fetchall()
+    return list(rows)
+
+
+def get_candidate(conn: sqlite3.Connection, *, candidate_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT
+          id,
+          run_id,
+          name,
+          display_name,
+          CASE
+            WHEN TRIM(COALESCE(comparison_name_normalized, '')) = '' THEN name_normalized
+            ELSE comparison_name_normalized
+          END AS name_normalized,
+          name_normalized AS surface_key,
+          family,
+          surface_policy,
+          source_kind,
+          source_detail
+        FROM candidates
+        WHERE id = ?
+        """,
+        (int(candidate_id),),
+    ).fetchone()
 
 
 def upsert_result(
@@ -269,11 +495,248 @@ def upsert_result(
     )
 
 
+def delete_results_for_run(conn: sqlite3.Connection, *, run_id: int) -> None:
+    conn.execute(
+        """
+        DELETE FROM candidate_results
+        WHERE candidate_id IN (SELECT id FROM candidates WHERE run_id = ?)
+        """,
+        (int(run_id),),
+    )
+    conn.execute(
+        """
+        DELETE FROM candidate_rankings
+        WHERE candidate_id IN (SELECT id FROM candidates WHERE run_id = ?)
+        """,
+        (int(run_id),),
+    )
+
+
+def find_latest_run_by_title(conn: sqlite3.Connection, *, title: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, title, brief_json, config_json, batch_id, batch_index, metrics_json, status, current_step, error_class, error_message, created_at, updated_at, completed_at
+        FROM runs
+        WHERE title = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (title,),
+    ).fetchone()
+
+
+def ensure_validation_jobs(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    ordered_candidate_ids: list[int],
+    shortlist_fingerprint: str,
+) -> None:
+    timestamp = now_iso()
+    conn.executemany(
+        """
+        INSERT INTO validation_jobs(
+          run_id, candidate_id, shortlist_fingerprint, job_order, status, resume_check,
+          attempt_count, next_retry_at, last_error_kind, last_error_message, started_at,
+          finished_at, created_at, updated_at
+        )
+        VALUES(?, ?, ?, ?, 'pending', '', 0, NULL, '', '', NULL, NULL, ?, ?)
+        ON CONFLICT(run_id, candidate_id) DO NOTHING
+        """,
+        [
+            (int(run_id), int(candidate_id), shortlist_fingerprint, index, timestamp, timestamp)
+            for index, candidate_id in enumerate(ordered_candidate_ids)
+        ],
+    )
+
+
+def list_validation_jobs(conn: sqlite3.Connection, *, run_id: int) -> list[sqlite3.Row]:
+    rows = conn.execute(
+        """
+        SELECT id, run_id, candidate_id, shortlist_fingerprint, job_order, status, resume_check,
+               attempt_count, next_retry_at, last_error_kind, last_error_message, started_at,
+               finished_at, created_at, updated_at
+        FROM validation_jobs
+        WHERE run_id = ?
+        ORDER BY job_order ASC, id ASC
+        """,
+        (int(run_id),),
+    ).fetchall()
+    return list(rows)
+
+
+def get_validation_job(conn: sqlite3.Connection, *, job_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, run_id, candidate_id, shortlist_fingerprint, job_order, status, resume_check,
+               attempt_count, next_retry_at, last_error_kind, last_error_message, started_at,
+               finished_at, created_at, updated_at
+        FROM validation_jobs
+        WHERE id = ?
+        """,
+        (int(job_id),),
+    ).fetchone()
+
+
+def claim_next_validation_job(conn: sqlite3.Connection, *, run_id: int, now: str) -> sqlite3.Row | None:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM validation_jobs
+        WHERE run_id = ?
+          AND (
+            status = 'pending'
+            OR (status = 'retry_wait' AND (next_retry_at IS NULL OR next_retry_at <= ?))
+          )
+        ORDER BY job_order ASC, id ASC
+        LIMIT 1
+        """,
+        (int(run_id), now),
+    ).fetchone()
+    if row is None:
+        return None
+    job_id = int(row["id"])
+    conn.execute(
+        """
+        UPDATE validation_jobs
+        SET status = 'running',
+            started_at = COALESCE(started_at, ?),
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (now, now, job_id),
+    )
+    return get_validation_job(conn, job_id=job_id)
+
+
+def update_validation_job(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    status: str,
+    resume_check: str = "",
+    attempt_count: int | None = None,
+    next_retry_at: str | None = None,
+    last_error_kind: str = "",
+    last_error_message: str = "",
+    finished: bool = False,
+) -> None:
+    current = get_validation_job(conn, job_id=job_id)
+    if current is None:
+        raise RuntimeError(f"validation_job_not_found:{job_id}")
+    timestamp = now_iso()
+    conn.execute(
+        """
+        UPDATE validation_jobs
+        SET status = ?,
+            resume_check = ?,
+            attempt_count = ?,
+            next_retry_at = ?,
+            last_error_kind = ?,
+            last_error_message = ?,
+            finished_at = CASE WHEN ? THEN ? ELSE finished_at END,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            status,
+            resume_check,
+            int(current["attempt_count"] if attempt_count is None else attempt_count),
+            next_retry_at,
+            last_error_kind,
+            last_error_message,
+            1 if finished else 0,
+            timestamp,
+            timestamp,
+            int(job_id),
+        ),
+    )
+
+
+def count_validation_jobs(conn: sqlite3.Connection, *, run_id: int) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    rows = conn.execute(
+        """
+        SELECT status, COUNT(*) AS total
+        FROM validation_jobs
+        WHERE run_id = ?
+        GROUP BY status
+        """,
+        (int(run_id),),
+    ).fetchall()
+    for row in rows:
+        counts[str(row["status"])] = int(row["total"])
+    return counts
+
+
+def record_validation_attempt(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    run_id: int,
+    candidate_id: int,
+    check_name: str,
+    attempt_number: int,
+    status: str,
+    reason: str,
+    error_kind: str,
+    retryable: bool,
+    http_status: int | None,
+    retry_after_s: float | None,
+    headers: dict[str, object],
+    evidence: dict[str, object],
+    details: dict[str, object],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO validation_attempts(
+          job_id, run_id, candidate_id, check_name, attempt_number, status, reason, error_kind,
+          retryable, http_status, retry_after_s, headers_json, evidence_json, details_json, created_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(job_id),
+            int(run_id),
+            int(candidate_id),
+            check_name,
+            int(attempt_number),
+            status,
+            reason,
+            error_kind,
+            1 if retryable else 0,
+            None if http_status is None else int(http_status),
+            None if retry_after_s is None else float(retry_after_s),
+            json.dumps(headers, ensure_ascii=False, sort_keys=True),
+            json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+            json.dumps(details, ensure_ascii=False, sort_keys=True),
+            now_iso(),
+        ),
+    )
+
+
+def fetch_validation_attempts(conn: sqlite3.Connection, *, job_id: int) -> list[sqlite3.Row]:
+    rows = conn.execute(
+        """
+        SELECT id, job_id, run_id, candidate_id, check_name, attempt_number, status, reason, error_kind,
+               retryable, http_status, retry_after_s, headers_json, evidence_json, details_json, created_at
+        FROM validation_attempts
+        WHERE job_id = ?
+        ORDER BY attempt_number ASC, id ASC
+        """,
+        (int(job_id),),
+    ).fetchall()
+    return list(rows)
+
+
 def upsert_ranking(
     conn: sqlite3.Connection,
     *,
     candidate_id: int,
     total_score: float,
+    family_score: float = 0.0,
+    family_rank: int = 0,
+    rank_position: int = 0,
     blocker_count: int,
     unavailable_count: int,
     unsupported_count: int,
@@ -284,11 +747,15 @@ def upsert_ranking(
     conn.execute(
         """
         INSERT INTO candidate_rankings(
-          candidate_id, total_score, blocker_count, unavailable_count, unsupported_count, warning_count, decision, created_at, updated_at
+          candidate_id, total_score, family_score, family_rank, rank_position,
+          blocker_count, unavailable_count, unsupported_count, warning_count, decision, created_at, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(candidate_id) DO UPDATE SET
           total_score = excluded.total_score,
+          family_score = excluded.family_score,
+          family_rank = excluded.family_rank,
+          rank_position = excluded.rank_position,
           blocker_count = excluded.blocker_count,
           unavailable_count = excluded.unavailable_count,
           unsupported_count = excluded.unsupported_count,
@@ -299,6 +766,9 @@ def upsert_ranking(
         (
             candidate_id,
             float(total_score),
+            float(family_score),
+            int(family_rank),
+            int(rank_position),
             int(blocker_count),
             int(unavailable_count),
             int(unsupported_count),
@@ -313,28 +783,38 @@ def upsert_ranking(
 def upsert_rankings(
     conn: sqlite3.Connection,
     *,
-    rows: Iterable[tuple[int, float, int, int, int, int, str]],
+    rows: Iterable[tuple],
 ) -> None:
     timestamp = now_iso()
-    conn.executemany(
-        """
-        INSERT INTO candidate_rankings(
-          candidate_id, total_score, blocker_count, unavailable_count, unsupported_count, warning_count, decision, created_at, updated_at
-        )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(candidate_id) DO UPDATE SET
-          total_score = excluded.total_score,
-          blocker_count = excluded.blocker_count,
-          unavailable_count = excluded.unavailable_count,
-          unsupported_count = excluded.unsupported_count,
-          warning_count = excluded.warning_count,
-          decision = excluded.decision,
-          updated_at = excluded.updated_at
-        """,
-        [
+    normalized_rows = []
+    for row in rows:
+        if len(row) == 7:
+            candidate_id, total_score, blocker_count, unavailable_count, unsupported_count, warning_count, decision = row
+            family_score = 0.0
+            family_rank = 0
+            rank_position = 0
+        elif len(row) == 10:
+            (
+                candidate_id,
+                total_score,
+                family_score,
+                family_rank,
+                rank_position,
+                blocker_count,
+                unavailable_count,
+                unsupported_count,
+                warning_count,
+                decision,
+            ) = row
+        else:
+            raise ValueError(f"unsupported_ranking_row_shape:{len(row)}")
+        normalized_rows.append(
             (
                 int(candidate_id),
                 float(total_score),
+                float(family_score),
+                int(family_rank),
+                int(rank_position),
                 int(blocker_count),
                 int(unavailable_count),
                 int(unsupported_count),
@@ -343,8 +823,27 @@ def upsert_rankings(
                 timestamp,
                 timestamp,
             )
-            for candidate_id, total_score, blocker_count, unavailable_count, unsupported_count, warning_count, decision in rows
-        ],
+        )
+    conn.executemany(
+        """
+        INSERT INTO candidate_rankings(
+          candidate_id, total_score, family_score, family_rank, rank_position,
+          blocker_count, unavailable_count, unsupported_count, warning_count, decision, created_at, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(candidate_id) DO UPDATE SET
+          total_score = excluded.total_score,
+          family_score = excluded.family_score,
+          family_rank = excluded.family_rank,
+          rank_position = excluded.rank_position,
+          blocker_count = excluded.blocker_count,
+          unavailable_count = excluded.unavailable_count,
+          unsupported_count = excluded.unsupported_count,
+          warning_count = excluded.warning_count,
+          decision = excluded.decision,
+          updated_at = excluded.updated_at
+        """,
+        normalized_rows,
     )
 
 
@@ -388,7 +887,20 @@ def get_run(conn: sqlite3.Connection, *, run_id: int) -> sqlite3.Row | None:
 def fetch_results_for_run(conn: sqlite3.Connection, *, run_id: int) -> list[sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT c.name, r.result_key, r.status, r.score_delta, r.reason, r.details_json
+        SELECT
+          c.name,
+          c.display_name,
+          CASE
+            WHEN TRIM(COALESCE(c.comparison_name_normalized, '')) = '' THEN c.name_normalized
+            ELSE c.comparison_name_normalized
+          END AS name_normalized,
+          c.family,
+          c.surface_policy,
+          r.result_key,
+          r.status,
+          r.score_delta,
+          r.reason,
+          r.details_json
         FROM candidate_results r
         JOIN candidates c ON c.id = r.candidate_id
         WHERE c.run_id = ?
@@ -402,7 +914,20 @@ def fetch_results_for_run(conn: sqlite3.Connection, *, run_id: int) -> list[sqli
 def fetch_results_for_candidate(conn: sqlite3.Connection, *, candidate_id: int) -> list[sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT c.name, r.result_key, r.status, r.score_delta, r.reason, r.details_json
+        SELECT
+          c.name,
+          c.display_name,
+          CASE
+            WHEN TRIM(COALESCE(c.comparison_name_normalized, '')) = '' THEN c.name_normalized
+            ELSE c.comparison_name_normalized
+          END AS name_normalized,
+          c.family,
+          c.surface_policy,
+          r.result_key,
+          r.status,
+          r.score_delta,
+          r.reason,
+          r.details_json
         FROM candidate_results r
         JOIN candidates c ON c.id = r.candidate_id
         WHERE c.id = ?
@@ -418,7 +943,17 @@ def fetch_ranked_rows(conn: sqlite3.Connection, *, run_id: int, limit: int = 25)
         """
         SELECT
           c.name,
+          c.display_name,
+          CASE
+            WHEN TRIM(COALESCE(c.comparison_name_normalized, '')) = '' THEN c.name_normalized
+            ELSE c.comparison_name_normalized
+          END AS name_normalized,
+          c.family,
+          c.surface_policy,
           r.total_score,
+          r.family_score,
+          r.family_rank,
+          r.rank_position,
           r.blocker_count,
           r.unavailable_count,
           r.unsupported_count,
@@ -427,7 +962,15 @@ def fetch_ranked_rows(conn: sqlite3.Connection, *, run_id: int, limit: int = 25)
         FROM candidate_rankings r
         JOIN candidates c ON c.id = r.candidate_id
         WHERE c.run_id = ?
-        ORDER BY r.blocker_count ASC, r.unavailable_count ASC, r.unsupported_count ASC, r.warning_count ASC, r.total_score DESC, c.name ASC
+        ORDER BY
+          CASE WHEN r.rank_position > 0 THEN 0 ELSE 1 END ASC,
+          CASE WHEN r.rank_position > 0 THEN r.rank_position ELSE 999999 END ASC,
+          r.blocker_count ASC,
+          r.unavailable_count ASC,
+          r.unsupported_count ASC,
+          r.warning_count ASC,
+          r.total_score DESC,
+          c.name ASC
         LIMIT ?
         """,
         (run_id, max(1, int(limit))),

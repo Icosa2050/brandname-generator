@@ -16,19 +16,8 @@ CONSONANT_RUN_RE = re.compile(r"[^aeiouy]+")
 SYLLABLE_LIKE_RE = re.compile(r"[^aeiouy]*[aeiouy]+[^aeiouy]*")
 BANNED_SUFFIX_FAMILIES: tuple[str, ...] = (
     "venix",
-    "ixen",
-    "xen",
     "trix",
     "trex",
-    "vex",
-    "rix",
-    "nix",
-    "lex",
-    "rex",
-    "dex",
-    "tex",
-    "lix",
-    "x",
 )
 BANNED_MORPHEMES: tuple[str, ...] = (
     "parcl",
@@ -291,13 +280,11 @@ def evaluate_name(name: str, *, blocked_fragments: tuple[str, ...] = ()) -> Tast
         hits.append(TasteRuleHit(code="low_open_syllable_ratio", details={"ratio": round(open_ratio, 3)}))
 
     hard_reasons = {
-        "banned_suffix_family",
         "banned_morpheme",
         "repeated_char_run",
         "cluster_overload",
         "direct_domain_fragment",
         "clipped_literal_fragment",
-        "generic_safe_opening",
         "exact_generic_word",
     }
     reject = any(hit.code in hard_reasons for hit in hits)

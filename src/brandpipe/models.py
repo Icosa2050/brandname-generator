@@ -21,6 +21,43 @@ class ResultStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+class JobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ErrorKind(StrEnum):
+    NONE = "none"
+    RATE_LIMITED = "rate_limited"
+    TIMEOUT = "timeout"
+    TRANSPORT = "transport"
+    HTTP = "http"
+    PARSE = "parse"
+    CHALLENGE = "challenge"
+    BROWSER = "browser"
+    CONFIG = "config"
+    UNEXPECTED = "unexpected"
+
+
+class NameFamily(StrEnum):
+    LITERAL_TLD_HACK = "literal_tld_hack"
+    SMOOTH_BLEND = "smooth_blend"
+    MASCOT_MUTATION = "mascot_mutation"
+    CONTRARIAN_DICTIONARY = "contrarian_dictionary"
+    BRUTALIST_UTILITY = "brutalist_utility"
+
+
+class SurfacePolicy(StrEnum):
+    ALPHA_LOWER = "alpha_lower"
+    DOTTED_LOWER = "dotted_lower"
+    HYPHENATED_LOWER = "hyphenated_lower"
+    MIXED_CASE_ALPHA = "mixed_case_alpha"
+    TITLE_SPACED_ACRONYM = "title_spaced_acronym"
+
+
 @dataclass(frozen=True)
 class Brief:
     product_core: str = ""
@@ -49,6 +86,18 @@ class SeedCandidate:
     source_score: float = 0.0
     taste_penalty: float = 0.0
     taste_reasons: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class SurfacedCandidate:
+    display_name: str
+    name_normalized: str
+    family: NameFamily
+    surface_policy: SurfacePolicy
+    source_kind: str = "ideation"
+    source_detail: str = ""
+    family_score: float = 0.0
+    family_rank: int = 0
 
 
 @dataclass(frozen=True)
@@ -113,6 +162,11 @@ class IdeationConfig:
     output_price_per_1k: float = 0.0
     pseudoword: PseudowordConfig | None = None
     roles: tuple[IdeationRoleConfig, ...] = ()
+    family_mix_profile: str = "legacy_alpha"
+    family_prompt_template_files: dict[str, Path] = field(default_factory=dict)
+    family_llm_retry_limit: int = 2
+    family_quotas: dict[str, int] = field(default_factory=dict)
+    late_fusion_min_per_family: int = 1
 
 
 @dataclass(frozen=True)
@@ -125,7 +179,7 @@ class ValidationConfig:
     timeout_s: float = 8.0
     company_top: int = 8
     social_unavailable_fail_threshold: int = 3
-    web_search_order: str = "brave,google_cse,duckduckgo"
+    web_search_order: str = "brave,browser_google"
     web_brave_top: int = 8
     web_brave_api_env: str = "BRAVE_API_KEY"
     web_brave_country: str = "DE"
@@ -178,3 +232,10 @@ class RankedCandidate:
     unsupported_count: int
     warning_count: int
     decision: str
+    display_name: str = ""
+    name_normalized: str = ""
+    family: NameFamily = NameFamily.SMOOTH_BLEND
+    surface_policy: SurfacePolicy = SurfacePolicy.ALPHA_LOWER
+    family_score: float = 0.0
+    family_rank: int = 0
+    rank_position: int = 0
