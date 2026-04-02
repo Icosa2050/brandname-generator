@@ -1,0 +1,32 @@
+[run]
+title = "lmstudio-runic-forge-smoke"
+db_path = "../../test_outputs/brandpipe/run/lmstudio_runic_forge_smoke/brandpipe.db"
+
+[brief]
+product_core = "software platform for complex incident coordination"
+target_users = ["operators", "response teams"]
+trust_signals = ["control", "clarity", "resilience"]
+forbidden_directions = ["generic SaaS compounds", "real Nordic words"]
+language_market = "global-en"
+notes = "Need angular, forged, collision-resistant names with pseudo-Nordic surface but no real language roots."
+
+[ideation]
+provider = "openai_compat"
+model = "llama-3.3-8b-instruct-omniwriter"
+openai_base_url = "http://127.0.0.1:1234/v1"
+rounds = 1
+candidates_per_round = 4
+overgenerate_factor = 1.5
+temperature = 0.95
+timeout_ms = 60000
+strict_json = true
+family_mix_profile = "family_default"
+family_llm_retry_limit = 2
+family_quotas = { literal_tld_hack = 0, smooth_blend = 0, mascot_mutation = 0, runic_forge = 4, contrarian_dictionary = 0, brutalist_utility = 0 }
+
+[validation]
+checks = ""
+
+[export]
+out_csv = "../../test_outputs/brandpipe/run/lmstudio_runic_forge_smoke/finalists_{run_id}.csv"
+top_n = 10

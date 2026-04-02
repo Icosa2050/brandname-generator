@@ -4,7 +4,7 @@ import json
 import re
 import shutil
 import tempfile
-import unicodedata
+import warnings
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -13,6 +13,7 @@ from urllib import parse
 from playwright.sync_api import sync_playwright
 
 from .browser_profile import resolve_chrome_executable, resolve_profile_dir
+from .name_normalization import fold_brand_text, normalize_brand_token
 
 
 @dataclass(frozen=True)
@@ -112,13 +113,11 @@ TMVIEW_VOLATILE_PROFILE_NAMES = {
 
 
 def _fold_ascii_letters(raw: str) -> str:
-    normalized = unicodedata.normalize("NFKD", str(raw or ""))
-    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return fold_brand_text(raw)
 
 
 def normalize_alpha(raw: str) -> str:
-    folded = _fold_ascii_letters(raw).lower()
-    return "".join(ch for ch in folded if ch.isalnum())
+    return normalize_brand_token(raw)
 
 
 def _normalize_surface_phrase(raw: str) -> str:
@@ -360,6 +359,14 @@ def _probe_from_grid_rows(display_name: str, normalized_name: str, rows: list[di
     return stats
 
 
+def _warn_cleanup_failure(stage: str, exc: Exception) -> None:
+    warnings.warn(
+        f"tmview_{stage}_cleanup_failed:{exc.__class__.__name__}: {exc}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
 class TmviewProbe:
     def __init__(
         self,
@@ -416,23 +423,23 @@ class TmviewProbe:
         try:
             if self._context is not None:
                 self._context.close()
-        except Exception:
-            pass
+        except Exception as cleanup_exc:
+            _warn_cleanup_failure("context", cleanup_exc)
         try:
             if self._browser is not None:
                 self._browser.close()
-        except Exception:
-            pass
+        except Exception as cleanup_exc:
+            _warn_cleanup_failure("browser", cleanup_exc)
         try:
             if self._playwright is not None:
                 self._playwright.stop()
-        except Exception:
-            pass
+        except Exception as cleanup_exc:
+            _warn_cleanup_failure("playwright", cleanup_exc)
         try:
-            if self._runtime_profile_root is not None:
-                shutil.rmtree(self._runtime_profile_root, ignore_errors=True)
-        except Exception:
-            pass
+            if self._runtime_profile_root is not None and self._runtime_profile_root.exists():
+                shutil.rmtree(self._runtime_profile_root)
+        except Exception as cleanup_exc:
+            _warn_cleanup_failure("runtime_profile", cleanup_exc)
 
     def available(self) -> bool:
         return bool(self._context is not None and not self._import_error)

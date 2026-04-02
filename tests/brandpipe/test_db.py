@@ -66,7 +66,7 @@ class DatabaseTests(unittest.TestCase):
                     conn,
                     title="surface-run",
                     brief={"product_core": "x"},
-                    config={"ideation": {"provider": "fixture", "family_mix_profile": "surface_diverse_v1"}},
+                    config={"ideation": {"provider": "fixture", "family_mix_profile": "family_default"}},
                 )
                 db.add_candidate_surfaces(
                     conn,
@@ -181,7 +181,7 @@ class DatabaseTests(unittest.TestCase):
                     status="warn",
                     score_delta=-2.0,
                     reason="web_check_pending",
-                    details={"provider": "browser_google"},
+                    details={"provider": "serper"},
                 )
                 softalia_attractiveness = build_attractiveness_result("softalia")
                 db.upsert_result(

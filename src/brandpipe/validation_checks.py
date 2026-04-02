@@ -1,25 +1,20 @@
 from __future__ import annotations
 
 import base64
-import html
 import os
 import re
-import unicodedata
 from typing import Any
 from urllib import parse
 
-from .browser_profile import browser_app_store_items, browser_search_items
-from .http_client import HttpResponse, fetch_json, fetch_status, fetch_text
+from .browser_profile import browser_app_store_items
+from .http_client import HttpResponse, fetch_json, fetch_status
 from .models import CandidateResult, ErrorKind, ResultStatus, ValidationConfig
+from .name_normalization import fold_brand_text, normalize_brand_token
 from .validation_runtime import ProbeResult
 
 
-VALID_NAME_RE = re.compile(r"^(?=.*[a-z])[a-z0-9]{6,14}$")
 EXPLICIT_DOMAIN_RE = re.compile(r"^(?P<label>[a-z0-9-]{2,63})\.(?P<tld>[a-z]{2,24})$", re.IGNORECASE)
-WEB_SEARCH_PROVIDER_ALIASES = {
-    "google_cse": "browser_google",
-    "duckduckgo": "browser_google",
-}
+TMVIEW_TIMEOUT_FLOOR_MS = 15000
 COMPANY_LEGAL_SUFFIX_TOKENS = frozenset(
     {
         "gmbh",
@@ -43,14 +38,20 @@ COMPANY_LEGAL_SUFFIX_TOKENS = frozenset(
 
 
 def normalize_name(raw: str) -> str:
-    folded = unicodedata.normalize("NFKD", str(raw or ""))
-    plain = "".join(ch for ch in folded if not unicodedata.combining(ch)).lower()
-    return re.sub(r"[^a-z0-9]", "", plain)
+    return normalize_brand_token(raw)
 
 
-def normalized_or_fail(name: str) -> str:
+def normalized_or_fail(name: str, *, config: ValidationConfig | None = None) -> str:
+    active_config = config or ValidationConfig()
     normalized = normalize_name(name)
-    if not normalized or not VALID_NAME_RE.fullmatch(normalized):
+    shape = active_config.name_shape_policy
+    if not normalized:
+        raise ValueError(f"invalid_candidate_name:{name!r}")
+    if not (int(shape.min_length) <= len(normalized) <= int(shape.max_length)):
+        raise ValueError(f"invalid_candidate_name:{name!r}")
+    if not bool(shape.allow_digits) and re.search(r"\d", normalized):
+        raise ValueError(f"invalid_candidate_name:{name!r}")
+    if bool(shape.require_letter) and not re.search(r"[a-z]", normalized):
         raise ValueError(f"invalid_candidate_name:{name!r}")
     return normalized
 
@@ -67,7 +68,7 @@ def explicit_domain_parts(name: str) -> tuple[str, str] | None:
 
 
 def package_query_name(name: str, normalized: str) -> str:
-    surface = display_name(name).lower()
+    surface = fold_brand_text(display_name(name)).lower()
     if surface and " " not in surface:
         cleaned = re.sub(r"[^a-z0-9._-]", "", surface)
         if cleaned:
@@ -76,7 +77,7 @@ def package_query_name(name: str, normalized: str) -> str:
 
 
 def social_query_name(name: str, normalized: str) -> str:
-    surface = re.sub(r"[^a-z0-9-]", "", display_name(name).lower())
+    surface = re.sub(r"[^a-z0-9-]", "", fold_brand_text(display_name(name)).lower())
     return surface or normalized
 
 
@@ -191,6 +192,16 @@ def _browser_error_kind(raw_error: object) -> ErrorKind:
     return ErrorKind.UNEXPECTED
 
 
+def _error_kind_from_token(raw: object) -> ErrorKind | None:
+    token = str(raw or "").strip()
+    if not token:
+        return None
+    try:
+        return ErrorKind(token)
+    except ValueError:
+        return None
+
+
 def parse_required_domain_tlds(raw: object) -> tuple[list[str], list[str]]:
     text = str(raw or "").strip().lower()
     if not text:
@@ -246,7 +257,7 @@ def rdap_probe(name: str, tld: str) -> dict[str, object]:
 
 
 def probe_domain(*, name: str, config: ValidationConfig) -> ProbeResult:
-    normalized = normalized_or_fail(name)
+    normalized = normalized_or_fail(name, config=config)
     required = resolve_required_domain_tlds(config)
     explicit_domain = explicit_domain_parts(name)
     candidate_tlds = [explicit_domain[1]] if explicit_domain else ["com", "de", "ch"]
@@ -393,8 +404,7 @@ def package_probe(registry: str, name: str) -> dict[str, object]:
 
 
 def probe_package(*, name: str, config: ValidationConfig) -> ProbeResult:
-    del config
-    normalized = normalized_or_fail(name)
+    normalized = normalized_or_fail(name, config=config)
     query_name = package_query_name(name, normalized)
     probes = {
         "pypi": package_probe("pypi", query_name),
@@ -476,7 +486,7 @@ def social_handle_signal(name: str) -> tuple[str, str, str, str, int, int]:
 
 
 def probe_social(*, name: str, config: ValidationConfig) -> ProbeResult:
-    normalized = normalized_or_fail(name)
+    normalized = normalized_or_fail(name, config=config)
     query_name = social_query_name(name, normalized)
     probes = {
         "github": social_handle_probe(f"https://github.com/{query_name}"),
@@ -590,7 +600,7 @@ def app_store_browser_signal(name: str, country: str, *, config: ValidationConfi
 
 
 def probe_app_store(*, name: str, config: ValidationConfig) -> ProbeResult:
-    normalized = normalized_or_fail(name)
+    normalized = normalized_or_fail(name, config=config)
     query_name = display_name(name) or normalized
     countries = [country.strip().lower() for country in config.store_countries.split(",") if country.strip()]
     exact: list[str] = []
@@ -658,13 +668,14 @@ def probe_app_store(*, name: str, config: ValidationConfig) -> ProbeResult:
 
 
 def resolve_web_search_order(config: ValidationConfig) -> list[str]:
-    supported = {"brave", "browser_google"}
+    supported = {"serper", "brave"}
     order: list[str] = []
     for token in [part.strip().lower() for part in config.web_search_order.split(",") if part.strip()]:
-        normalized = WEB_SEARCH_PROVIDER_ALIASES.get(token, token)
-        if normalized in supported and normalized not in order:
-            order.append(normalized)
-    return order or ["brave", "browser_google"]
+        if token in supported and token not in order:
+            order.append(token)
+    if "serper" in order:
+        order = ["serper", *[item for item in order if item != "serper"]]
+    return order or ["serper", "brave"]
 
 
 def _domain_label(domain: str) -> str:
@@ -717,6 +728,100 @@ def brave_search(name: str, *, config: ValidationConfig) -> dict[str, Any] | Non
     return response.json() if response.ok else None
 
 
+def serper_search_response(name: str, *, config: ValidationConfig) -> HttpResponse:
+    api_key = str(
+        os.getenv(config.web_google_api_env)
+        or os.getenv("SERPER_API_KEY")
+        or ""
+    ).strip()
+    if not api_key:
+        return HttpResponse(
+            ok=False,
+            url="",
+            status_code=None,
+            text="",
+            headers={},
+            error_kind=ErrorKind.CONFIG,
+            error_message="serper_api_key_missing",
+        )
+    query = f'"{name}"'
+    url = "https://google.serper.dev/search?" + parse.urlencode(
+        {
+            "q": query,
+            "num": str(max(1, min(10, int(config.web_google_top)))),
+            "gl": config.web_google_gl,
+            "hl": config.web_google_hl,
+            "autocorrect": "false",
+        }
+    )
+    return fetch_json(
+        url,
+        timeout=config.timeout_s,
+        headers={
+            "X-API-KEY": api_key,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+
+
+def serper_signal(name: str, *, config: ValidationConfig) -> dict[str, object]:
+    query_name = display_name(name)
+    normalized_query = normalized_or_fail(name, config=config)
+    response = serper_search_response(name, config=config)
+    if not response.ok:
+        return {
+            "ok": False,
+            "source": "serper",
+            "error_kind": response.error_kind.value,
+            "error": response.error_message,
+            "status_code": response.status_code,
+            "headers": response.headers,
+            "retry_after_s": response.retry_after_s,
+            "retryable": bool(response.retryable),
+        }
+    payload = response.json()
+    if payload is None:
+        return {
+            "ok": False,
+            "source": "serper",
+            "error_kind": ErrorKind.PARSE.value,
+            "error": "serper_json_parse_failed",
+            "status_code": response.status_code,
+            "headers": response.headers,
+            "retry_after_s": response.retry_after_s,
+            "retryable": False,
+        }
+    items = payload.get("organic")
+    if not isinstance(items, list):
+        return {
+            "ok": False,
+            "source": "serper",
+            "error_kind": ErrorKind.PARSE.value,
+            "error": "serper_results_missing",
+            "status_code": response.status_code,
+            "headers": response.headers,
+            "retry_after_s": response.retry_after_s,
+            "retryable": False,
+        }
+    rows: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "link": str(item.get("link") or "").strip(),
+                "title": str(item.get("title") or "").strip(),
+                "snippet": str(item.get("snippet") or "").strip(),
+            }
+        )
+    signal = _analyze_search_items(normalized=normalized_query, items=rows, source="serper", query=query_name)
+    signal["status_code"] = response.status_code
+    signal["headers"] = response.headers
+    signal["retry_after_s"] = response.retry_after_s
+    return signal
+
+
 def brave_search_response(name: str, *, config: ValidationConfig) -> HttpResponse:
     api_key = str(
         os.getenv(config.web_brave_api_env)
@@ -753,7 +858,7 @@ def brave_search_response(name: str, *, config: ValidationConfig) -> HttpRespons
 
 def brave_signal(name: str, *, config: ValidationConfig) -> dict[str, object]:
     query_name = display_name(name)
-    normalized_query = normalized_or_fail(name)
+    normalized_query = normalized_or_fail(name, config=config)
     response = brave_search_response(name, config=config)
     if not response.ok:
         return {
@@ -821,41 +926,6 @@ def brave_signal(name: str, *, config: ValidationConfig) -> dict[str, object]:
     return signal
 
 
-def browser_google_signal(name: str, *, config: ValidationConfig) -> dict[str, object]:
-    query_name = display_name(name)
-    normalized_query = normalized_or_fail(name)
-    try:
-        payload = browser_search_items(
-            query=query_name,
-            engine="google",
-            profile_dir=config.web_browser_profile_dir or None,
-            chrome_executable=config.web_browser_chrome_executable or None,
-            timeout_ms=max(3000, int(float(config.timeout_s) * 1000)),
-        )
-    except Exception as exc:
-        return {
-            "ok": False,
-            "source": "browser_google",
-            "state": "browser_exception",
-            "error": f"{exc.__class__.__name__}: {exc}",
-        }
-    if not bool(payload.get("ok")):
-        return payload
-    rows = payload.get("items")
-    if not isinstance(rows, list):
-        return {"ok": False, "source": "browser_google", "state": "parse_error", "error": "browser_items_missing"}
-    signal = _analyze_search_items(
-        normalized=normalized_query,
-        items=rows,
-        source="browser_google",
-        query=query_name,
-    )
-    signal["page_title"] = str(payload.get("title") or "")
-    signal["final_url"] = str(payload.get("final_url") or "")
-    signal["state"] = str(payload.get("state") or "results")
-    return signal
-
-
 def _web_result_from_signal(signal: dict[str, object], *, details: dict[str, object]) -> tuple[ResultStatus, float, str]:
     exact_hits = int(signal.get("exact_hits", 0))
     near_hits = int(signal.get("near_hits", 0))
@@ -872,28 +942,42 @@ def _web_result_from_signal(signal: dict[str, object], *, details: dict[str, obj
 
 
 def probe_web(*, name: str, config: ValidationConfig) -> ProbeResult:
-    normalized = normalized_or_fail(name)
+    normalized = normalized_or_fail(name, config=config)
     query_name = display_name(name) or normalized
     order = resolve_web_search_order(config)
-    brave = brave_signal(query_name, config=config) if "brave" in order else {"ok": False, "source": "brave"}
-    browser = None
-    if not brave.get("ok") or (int(brave.get("exact_hits", 0)) == 0 and int(brave.get("near_hits", 0)) < 3):
-        if "browser_google" in order:
-            browser = browser_google_signal(query_name, config=config)
-    selected = brave if brave.get("ok") else browser
+    dispatch = {
+        "serper": serper_signal,
+        "brave": brave_signal,
+    }
+    signals: dict[str, dict[str, object] | None] = {
+        "serper": None,
+        "brave": None,
+    }
+    primary_provider = order[0]
+    primary_signal = dispatch[primary_provider](query_name, config=config)
+    signals[primary_provider] = primary_signal
+    should_probe_fallbacks = not primary_signal.get("ok") or (
+        int(primary_signal.get("exact_hits", 0)) == 0 and int(primary_signal.get("near_hits", 0)) < 3
+    )
+    if should_probe_fallbacks:
+        for provider in order[1:]:
+            if signals[provider] is None:
+                signals[provider] = dispatch[provider](query_name, config=config)
+    fallbacks = [signals[provider] for provider in order[1:] if isinstance(signals[provider], dict)]
+    successful_fallbacks = [signal for signal in fallbacks if bool(signal.get("ok"))]
+    selected = primary_signal if primary_signal.get("ok") else (successful_fallbacks[0] if successful_fallbacks else None)
     details = {
         "query": display_name(name),
         "query_name": query_name,
         "normalized_query": normalized,
         "provider_order": order,
-        "brave": brave,
-        "browser_google": browser,
+        "serper": signals["serper"],
+        "brave": signals["brave"],
     }
     if not selected or not selected.get("ok"):
-        fallback = browser if browser is not None else brave
-        error_kind = ErrorKind.CONFIG if str(fallback.get("error_kind") or "") == ErrorKind.CONFIG.value else _browser_error_kind(fallback.get("error"))
-        if str(fallback.get("error_kind") or "") == ErrorKind.RATE_LIMITED.value:
-            error_kind = ErrorKind.RATE_LIMITED
+        fallback = next((signal for signal in reversed(fallbacks) if signal is not None), primary_signal)
+        explicit_error_kind = _error_kind_from_token(fallback.get("error_kind"))
+        error_kind = explicit_error_kind or _browser_error_kind(fallback.get("error"))
         retryable = error_kind in {ErrorKind.RATE_LIMITED, ErrorKind.TIMEOUT, ErrorKind.BROWSER}
         return _probe_result(
             check_name="web",
@@ -909,18 +993,19 @@ def probe_web(*, name: str, config: ValidationConfig) -> ProbeResult:
             transport=str(fallback.get("source") or "web"),
         )
     status, score_delta, reason = _web_result_from_signal(selected, details=details)
-    if selected is brave and browser and browser.get("ok"):
-        browser_status, browser_score_delta, browser_reason = _web_result_from_signal(browser, details=details)
+    for fallback_signal in successful_fallbacks:
+        fallback_status, fallback_score_delta, fallback_reason = _web_result_from_signal(fallback_signal, details=details)
         severity = {
             ResultStatus.FAIL: 3,
             ResultStatus.WARN: 2,
             ResultStatus.UNAVAILABLE: 1,
             ResultStatus.PASS: 0,
         }
-        if severity[browser_status] > severity[status]:
-            status = browser_status
-            score_delta = browser_score_delta
-            reason = browser_reason
+        if severity[fallback_status] > severity[status]:
+            selected = fallback_signal
+            status = fallback_status
+            score_delta = fallback_score_delta
+            reason = fallback_reason
     details["provider"] = str(selected.get("source") or "")
     details["final_url"] = str(selected.get("final_url") or "")
     details["page_title"] = str(selected.get("page_title") or "")
@@ -1048,7 +1133,7 @@ def company_house_signal(name: str, *, config: ValidationConfig) -> dict[str, ob
 
 
 def probe_company(*, name: str, config: ValidationConfig) -> ProbeResult:
-    normalized = normalized_or_fail(name)
+    normalized = normalized_or_fail(name, config=config)
     query_name = display_name(name) or normalized
     signal = company_house_signal(query_name, config=config)
     details = dict(signal)
@@ -1106,7 +1191,7 @@ def probe_company(*, name: str, config: ValidationConfig) -> ProbeResult:
 
 
 def probe_tm(*, name: str, config: ValidationConfig) -> ProbeResult:
-    normalized = normalized_or_fail(name)
+    normalized = normalized_or_fail(name, config=config)
     query_name = display_name(name) or normalized
     profile_dir = str(config.tmview_profile_dir or "").strip()
     if not profile_dir:
@@ -1127,7 +1212,7 @@ def probe_tm(*, name: str, config: ValidationConfig) -> ProbeResult:
             normalized_names=[normalized],
             profile_dir=profile_dir,
             chrome_executable=(config.tmview_chrome_executable or None),
-            timeout_ms=max(3000, int(float(config.timeout_s) * 1000)),
+            timeout_ms=max(TMVIEW_TIMEOUT_FLOOR_MS, int(float(config.timeout_s) * 1000)),
             settle_ms=2500,
             headless=True,
         )

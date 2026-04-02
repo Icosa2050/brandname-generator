@@ -1,0 +1,38 @@
+Generate exactly {target_count} brand candidates in the `runic_forge` family.
+
+Product core: {product_core}
+Target users: {target_users}
+Trust signals: {trust_signals}
+Market: {language_market}
+Notes: {notes}
+Creative angle: {role_name}
+Role guidance: {role_instructions}
+
+Positive anchors:
+{positive_anchor_block}
+
+Avoidance context:
+{avoidance_block}
+
+Retry feedback:
+{retry_feedback_block}
+
+Style rules:
+- one token only; no spaces, dots, or hyphens
+- target 6-8 letters most of the time
+- aim for a forged, angular, premium, collision-void feel
+- use exactly one strong structural disruptor most of the time: `Æ`, `Ø`, `Å`, a strong `Y`, or `Q` without `U`
+- do not stack exotic signals; avoid names with more than one unusual glyph or more than two disruptors total
+- use only standard Latin letters plus optional `Æ`, `Ø`, or `Å`; never use `Ý`, `Þ`, `Ð`, `Ü`, or other accented variants
+- the name may look vaguely Nordic or runic, but it must not be an actual Scandinavian or Old Norse word
+- avoid real roots from English, German, Romance languages, Arabic-patterned phonetics, pharma endings, SaaS endings, and obvious semantic meanings
+- prioritize unusual consonant skeletons over smoothness
+- prefer forged endings and tails in the corridor of `-MON`, `-RIN`, `-KRIN`, `-VOR`, `-DAL`, `-MOR`, `-KON`, `-QAR`, `-FRAN`
+- avoid generic fantasy sludge tails like `-RAX`, terminal `-X`, muddy `-GN` endings, and dark-lord syllables
+- each candidate should come from a different structural pocket, not just tiny edits of one base
+
+Reference examples of family shape only, never to repeat:
+VÆRMON, KÆDRIN, SØLKRIN, TRÆNVOR, FYRNDAL, KYLMOR, VYRKON, SYLQAR, ZYLFRAN, QYLMAR
+
+Return JSON only with this schema:
+{"candidates":[{"display_name":"VÆRMON"}]}

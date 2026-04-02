@@ -1,7 +1,7 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import csv
-import importlib.util
 import io
 import json
 import sys
@@ -16,18 +16,42 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-SCRIPT_PATH = ROOT_DIR / "scripts/branding/run_brandpipe_validate.py"
-SPEC = importlib.util.spec_from_file_location("run_brandpipe_validate", SCRIPT_PATH)
-assert SPEC is not None and SPEC.loader is not None
-MODULE = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = MODULE
-SPEC.loader.exec_module(MODULE)
-
+from brandpipe import validate_cli as MODULE
 from brandpipe.models import CandidateResult, ResultStatus
 
 
 class RunBrandpipeValidateTests(unittest.TestCase):
-    def test_runner_preserves_digits_from_names_input(self) -> None:
+    def test_load_candidate_result_rows_warns_and_recovers_from_invalid_details_json(self) -> None:
+        fake_conn = object()
+        open_db = mock.MagicMock()
+        open_db.__enter__.return_value = fake_conn
+        open_db.__exit__.return_value = False
+        result_rows = [
+            {
+                "result_key": "web",
+                "status": ResultStatus.WARN.value,
+                "score_delta": -4.0,
+                "reason": "web_near_warning",
+                "details_json": "{broken",
+            }
+        ]
+
+        with (
+            mock.patch.object(MODULE.db, "open_db", return_value=open_db),
+            mock.patch.object(MODULE.db, "ensure_schema"),
+            mock.patch.object(MODULE.db, "list_candidates", return_value=[{"id": 9, "name": "vantora"}]),
+            mock.patch.object(MODULE.db, "fetch_results_for_candidate", return_value=result_rows),
+        ):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                candidate_lookup, result_map = MODULE._load_candidate_result_rows(Path("/tmp/brandpipe.db"), run_id=21)
+
+        self.assertEqual(candidate_lookup, {"vantora": 9})
+        self.assertEqual(len(result_map[9]), 1)
+        self.assertEqual(result_map[9][0].details, {})
+        self.assertIn("validation_details_json_invalid", stderr.getvalue())
+
+    def test_run_validate_command_preserves_digits_from_names_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             out_dir = Path(tmp_dir) / "validated"
             captured_names: list[str] = []
@@ -51,43 +75,41 @@ class RunBrandpipeValidateTests(unittest.TestCase):
                 ]
             }
 
+            args = MODULE.argparse.Namespace(
+                input_csv="",
+                names_file="",
+                names="set4you",
+                mode="keep_maybe",
+                out_dir=str(out_dir),
+                checks="domain,company",
+                concurrency=1,
+                timeout_s=5.0,
+                required_domain_tlds="",
+                store_countries="de,ch,us",
+                company_top=8,
+                social_unavailable_fail_threshold=3,
+                web_search_order="serper,brave",
+                web_browser_profile_dir="",
+                web_browser_chrome_executable="",
+                tmview_profile_dir="",
+                tmview_chrome_executable="",
+                reset_state=False,
+            )
+
             with (
-                mock.patch.object(
-                    MODULE,
-                    "parse_args",
-                    return_value=MODULE.argparse.Namespace(
-                        input_csv="",
-                        names_file="",
-                        names="set4you",
-                        mode="keep_maybe",
-                        out_dir=str(out_dir),
-                        checks="domain,company",
-                        concurrency=1,
-                        timeout_s=5.0,
-                        required_domain_tlds="",
-                        store_countries="de,ch,us",
-                        company_top=8,
-                        social_unavailable_fail_threshold=3,
-                        web_search_order="brave,browser_google",
-                        web_browser_profile_dir="",
-                        web_browser_chrome_executable="",
-                        tmview_profile_dir="",
-                        tmview_chrome_executable="",
-                        reset_state=False,
-                    ),
-                ),
                 mock.patch.object(MODULE, "run_shortlist_validation", side_effect=fake_run_shortlist_validation),
                 mock.patch.object(MODULE, "_load_candidate_result_rows", return_value=({"set4you": 1}, fake_results)),
             ):
-                exit_code = MODULE.main()
+                exit_code = MODULE.run_validate_command(args)
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(captured_names, ["set4you"])
-            with (out_dir / "validated_survivors.csv").open("r", encoding="utf-8", newline="") as handle:
+            task_root = next(out_dir.iterdir())
+            with (task_root / "exports" / "validated_survivors.csv").open("r", encoding="utf-8", newline="") as handle:
                 survivors = list(csv.DictReader(handle))
             self.assertEqual([row["name"] for row in survivors], ["set4you"])
 
-    def test_runner_buckets_survivor_review_and_rejected_rows(self) -> None:
+    def test_run_validate_command_buckets_survivor_review_and_rejected_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             input_csv = root / "review.csv"
@@ -163,31 +185,28 @@ class RunBrandpipeValidateTests(unittest.TestCase):
                 ],
             }
 
+            args = MODULE.argparse.Namespace(
+                input_csv=str(input_csv),
+                names_file="",
+                names="",
+                mode="keep_maybe",
+                out_dir=str(out_dir),
+                checks="domain,company,web",
+                concurrency=2,
+                timeout_s=5.0,
+                required_domain_tlds="",
+                store_countries="de,ch,us",
+                company_top=8,
+                social_unavailable_fail_threshold=3,
+                web_search_order="serper,brave",
+                web_browser_profile_dir="",
+                web_browser_chrome_executable="",
+                tmview_profile_dir="",
+                tmview_chrome_executable="",
+                reset_state=False,
+            )
+
             with (
-                mock.patch.object(
-                    MODULE,
-                    "parse_args",
-                    return_value=MODULE.argparse.Namespace(
-                        input_csv=str(input_csv),
-                        names_file="",
-                        names="",
-                        mode="keep_maybe",
-                        out_dir=str(out_dir),
-                        checks="domain,company,web",
-                        concurrency=2,
-                        timeout_s=5.0,
-                        required_domain_tlds="",
-                        store_countries="de,ch,us",
-                        company_top=8,
-                        social_unavailable_fail_threshold=3,
-                        web_search_order="brave,browser_google",
-                        web_browser_profile_dir="",
-                        web_browser_chrome_executable="",
-                        tmview_profile_dir="",
-                        tmview_chrome_executable="",
-                        reset_state=False,
-                    ),
-                ),
                 mock.patch.object(
                     MODULE,
                     "run_shortlist_validation",
@@ -208,21 +227,22 @@ class RunBrandpipeValidateTests(unittest.TestCase):
             ):
                 stderr = io.StringIO()
                 with redirect_stderr(stderr):
-                    exit_code = MODULE.main()
+                    exit_code = MODULE.run_validate_command(args)
 
             self.assertEqual(exit_code, 0)
             self.assertIn("validator_concurrency_deprecated requested=2 effective=1", stderr.getvalue())
-            with (out_dir / "validated_survivors.csv").open("r", encoding="utf-8", newline="") as handle:
+            task_root = next(out_dir.iterdir())
+            with (task_root / "exports" / "validated_survivors.csv").open("r", encoding="utf-8", newline="") as handle:
                 survivors = list(csv.DictReader(handle))
-            with (out_dir / "validated_review_queue.csv").open("r", encoding="utf-8", newline="") as handle:
+            with (task_root / "exports" / "validated_review_queue.csv").open("r", encoding="utf-8", newline="") as handle:
                 review = list(csv.DictReader(handle))
-            with (out_dir / "validated_rejected.csv").open("r", encoding="utf-8", newline="") as handle:
+            with (task_root / "exports" / "validated_rejected.csv").open("r", encoding="utf-8", newline="") as handle:
                 rejected = list(csv.DictReader(handle))
-            summary = json.loads((out_dir / "validated_publish_summary.json").read_text(encoding="utf-8"))
+            summary = json.loads((task_root / "exports" / "validated_publish_summary.json").read_text(encoding="utf-8"))
 
-            self.assertEqual([row["name"] for row in survivors], ["vantora"])
-            self.assertEqual([row["name"] for row in review], ["meridel"])
-            self.assertEqual([row["name"] for row in rejected], ["certivo"])
+            self.assertEqual([row["name"] for row in survivors], ["Vantora"])
+            self.assertEqual([row["name"] for row in review], ["Meridel"])
+            self.assertEqual([row["name"] for row in rejected], ["Certivo"])
             self.assertEqual(summary["survivor_count"], 1)
             self.assertEqual(summary["review_count"], 1)
             self.assertEqual(summary["rejected_count"], 1)

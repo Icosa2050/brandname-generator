@@ -13,11 +13,15 @@ if str(SRC_DIR) not in sys.path:
 
 from brandpipe.http_client import HttpResponse
 from brandpipe.models import ErrorKind, ResultStatus, ValidationConfig
-from brandpipe.validation import CHECK_PROBERS, validate_candidate
-from brandpipe.validation_checks import resolve_web_search_order
+from brandpipe.validation import validate_candidate
+from brandpipe.validation_checks import normalize_name, resolve_web_search_order
 
 
 class ValidationTests(unittest.TestCase):
+    def test_normalize_name_transliterates_runic_glyphs(self) -> None:
+        self.assertEqual(normalize_name("VÆRMON"), "vaermon")
+        self.assertEqual(normalize_name("SØLKRIN"), "soelkrin")
+
     def test_domain_check_preserves_digits_in_candidate_name(self) -> None:
         config = ValidationConfig(checks=["domain"])
 
@@ -119,18 +123,18 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(results[0].status, ResultStatus.FAIL)
         self.assertEqual(results[0].reason, "package_collision_pypi")
 
-    def test_web_check_normalizes_legacy_provider_order(self) -> None:
-        config = ValidationConfig(checks=["web"], web_search_order="brave,google_cse,duckduckgo")
-        self.assertEqual(resolve_web_search_order(config), ["brave", "browser_google"])
+    def test_web_check_promotes_serper_to_the_front_of_provider_order(self) -> None:
+        config = ValidationConfig(checks=["web"], web_search_order="brave,serper")
+        self.assertEqual(resolve_web_search_order(config), ["serper", "brave"])
 
-    def test_web_check_uses_brave_first_when_exact_collision_found(self) -> None:
+    def test_web_check_uses_serper_first_when_exact_collision_found(self) -> None:
         config = ValidationConfig(checks=["web"])
         with (
             mock.patch(
-                "brandpipe.validation_checks.brave_signal",
+                "brandpipe.validation_checks.serper_signal",
                 return_value={
                     "ok": True,
-                    "source": "brave",
+                    "source": "serper",
                     "exact_hits": 1,
                     "near_hits": 0,
                     "result_count": 3,
@@ -138,54 +142,76 @@ class ValidationTests(unittest.TestCase):
                     "first_hit_exact": False,
                 },
             ),
-            mock.patch("brandpipe.validation_checks.browser_google_signal") as browser_mock,
+            mock.patch("brandpipe.validation_checks.brave_signal") as brave_mock,
         ):
             results = validate_candidate(name="vantora", config=config)
 
         self.assertEqual(results[0].status, ResultStatus.FAIL)
         self.assertEqual(results[0].reason, "web_exact_collision")
-        browser_mock.assert_not_called()
+        brave_mock.assert_not_called()
 
-    def test_web_check_uses_browser_google_when_brave_is_unavailable(self) -> None:
-        config = ValidationConfig(checks=["web"])
+    def test_web_check_ignores_removed_browser_google_provider(self) -> None:
+        config = ValidationConfig(checks=["web"], web_search_order="brave,browser_google")
         with (
             mock.patch(
                 "brandpipe.validation_checks.brave_signal",
                 return_value={
-                    "ok": False,
-                    "source": "brave",
-                    "error_kind": ErrorKind.RATE_LIMITED.value,
-                    "error": "rate_limited",
-                    "status_code": 429,
-                    "headers": {"Retry-After": "12"},
-                    "retry_after_s": 12.0,
-                    "retryable": True,
-                },
-            ),
-            mock.patch(
-                "brandpipe.validation_checks.browser_google_signal",
-                return_value={
                     "ok": True,
-                    "source": "browser_google",
+                    "source": "brave",
                     "exact_hits": 1,
                     "near_hits": 0,
                     "result_count": 3,
                     "sample_domains": ["vantora.example"],
                     "first_hit_exact": False,
-                    "final_url": "https://www.google.com/search?q=vantora",
-                    "page_title": "vantora - Google Search",
-                    "state": "results",
                 },
             ),
+            mock.patch("brandpipe.validation_checks.serper_signal") as serper_mock,
         ):
             results = validate_candidate(name="vantora", config=config)
 
         self.assertEqual(results[0].status, ResultStatus.FAIL)
-        self.assertEqual(results[0].details["provider"], "browser_google")
+        self.assertEqual(results[0].details["provider"], "brave")
+        serper_mock.assert_not_called()
+
+    def test_web_check_ignores_removed_safari_google_provider(self) -> None:
+        config = ValidationConfig(checks=["web"], web_search_order="brave,safari_google")
+        with (
+            mock.patch(
+                "brandpipe.validation_checks.brave_signal",
+                return_value={
+                    "ok": True,
+                    "source": "brave",
+                    "exact_hits": 1,
+                    "near_hits": 0,
+                    "result_count": 3,
+                    "sample_domains": ["vantora.example"],
+                    "first_hit_exact": False,
+                },
+            ),
+            mock.patch("brandpipe.validation_checks.serper_signal") as serper_mock,
+        ):
+            results = validate_candidate(name="vantora", config=config)
+
+        self.assertEqual(results[0].status, ResultStatus.FAIL)
+        self.assertEqual(results[0].details["provider"], "brave")
+        serper_mock.assert_not_called()
 
     def test_web_check_returns_unavailable_without_pending_fallback(self) -> None:
         config = ValidationConfig(checks=["web"])
         with (
+            mock.patch(
+                "brandpipe.validation_checks.serper_signal",
+                return_value={
+                    "ok": False,
+                    "source": "serper",
+                    "error_kind": ErrorKind.CONFIG.value,
+                    "error": "serper_api_key_missing",
+                    "status_code": None,
+                    "headers": {},
+                    "retry_after_s": None,
+                    "retryable": False,
+                },
+            ),
             mock.patch(
                 "brandpipe.validation_checks.brave_signal",
                 return_value={
@@ -197,15 +223,6 @@ class ValidationTests(unittest.TestCase):
                     "headers": {},
                     "retry_after_s": None,
                     "retryable": False,
-                },
-            ),
-            mock.patch(
-                "brandpipe.validation_checks.browser_google_signal",
-                return_value={
-                    "ok": False,
-                    "source": "browser_google",
-                    "state": "browser_boot_failed",
-                    "error": "playwright_missing",
                 },
             ),
         ):
@@ -334,6 +351,33 @@ class ValidationTests(unittest.TestCase):
 
         self.assertEqual(results[0].status, ResultStatus.WARN)
         self.assertEqual(results[0].reason, "tm_near_review")
+
+    def test_tm_check_enforces_minimum_timeout_floor(self) -> None:
+        config = ValidationConfig(checks=["tm"], tmview_profile_dir="/tmp/tmview-profile", timeout_s=3.0)
+
+        with mock.patch(
+            "brandpipe.tmview.probe_names",
+            return_value=[
+                mock.Mock(
+                    query_ok=True,
+                    url="https://example.test",
+                    result_count=0,
+                    exact_hits=0,
+                    near_hits=0,
+                    active_exact_hits=0,
+                    inactive_exact_hits=0,
+                    unknown_exact_hits=0,
+                    sample_text="",
+                    exact_sample_text="",
+                    error="",
+                    state="no_results",
+                )
+            ],
+        ) as probe_mock:
+            results = validate_candidate(name="vantora", config=config)
+
+        self.assertEqual(results[0].status, ResultStatus.PASS)
+        self.assertEqual(probe_mock.call_args.kwargs["timeout_ms"], 15000)
 
     def test_tm_check_blocks_surface_exact_active_collision(self) -> None:
         config = ValidationConfig(checks=["tm"], tmview_profile_dir="/tmp/tmview-profile")

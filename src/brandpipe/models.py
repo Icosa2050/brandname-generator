@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from .naming_policy import DEFAULT_VALIDATION_NAME_SHAPE_POLICY, NameShapePolicy, NamingPolicy
+
+DEFAULT_FAMILY_MIX_PROFILE = "family_default"
+
 
 class RunStatus(StrEnum):
     CREATED = "created"
@@ -46,6 +50,7 @@ class NameFamily(StrEnum):
     LITERAL_TLD_HACK = "literal_tld_hack"
     SMOOTH_BLEND = "smooth_blend"
     MASCOT_MUTATION = "mascot_mutation"
+    RUNIC_FORGE = "runic_forge"
     CONTRARIAN_DICTIONARY = "contrarian_dictionary"
     BRUTALIST_UTILITY = "brutalist_utility"
 
@@ -162,11 +167,12 @@ class IdeationConfig:
     output_price_per_1k: float = 0.0
     pseudoword: PseudowordConfig | None = None
     roles: tuple[IdeationRoleConfig, ...] = ()
-    family_mix_profile: str = "legacy_alpha"
+    family_mix_profile: str = DEFAULT_FAMILY_MIX_PROFILE
     family_prompt_template_files: dict[str, Path] = field(default_factory=dict)
     family_llm_retry_limit: int = 2
     family_quotas: dict[str, int] = field(default_factory=dict)
     late_fusion_min_per_family: int = 1
+    naming_policy: NamingPolicy = field(default_factory=NamingPolicy)
 
 
 @dataclass(frozen=True)
@@ -179,13 +185,13 @@ class ValidationConfig:
     timeout_s: float = 8.0
     company_top: int = 8
     social_unavailable_fail_threshold: int = 3
-    web_search_order: str = "brave,browser_google"
+    web_search_order: str = "serper,brave"
     web_brave_top: int = 8
     web_brave_api_env: str = "BRAVE_API_KEY"
     web_brave_country: str = "DE"
     web_brave_search_lang: str = "en"
     web_google_top: int = 8
-    web_google_api_env: str = "GOOGLE_CSE_API_KEY"
+    web_google_api_env: str = "SERPER_API_KEY"
     web_google_cx_env: str = "GOOGLE_CSE_CX"
     web_google_gl: str = "de"
     web_google_hl: str = "en"
@@ -196,6 +202,7 @@ class ValidationConfig:
     tm_registry_top: int = 12
     tmview_profile_dir: str = ""
     tmview_chrome_executable: str = ""
+    name_shape_policy: NameShapePolicy = field(default_factory=lambda: DEFAULT_VALIDATION_NAME_SHAPE_POLICY)
 
 
 @dataclass(frozen=True)

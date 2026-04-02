@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
@@ -9,38 +8,22 @@ from typing import Any
 
 from .ideation import (
     ROLE_HINTS,
-    _max_completion_tokens,
-    _normalize_openai_compat_base_url,
-    _normalize_openrouter_http_referer,
-    _openrouter_reasoning_payload,
-    _openrouter_response_modes,
-    _post_json,
-    _response_preview,
-    _retry_delay_seconds,
-    _temperature,
-    extract_json_object,
-    extract_response_content,
+    _call_openai_compat_candidates_with_schema,
+    _call_openrouter_candidates_with_schema,
+    extract_candidate_names,
     load_prompt_template,
 )
 from .models import Brief, IdeationConfig, IdeationRoleConfig, NameFamily
+from .naming_policy import DEFAULT_NAMING_POLICY, NamingPolicy
+from .name_normalization import normalize_brand_token
 
 
-ANTI_CORPORATE_TOKENS = (
-    "solution",
-    "solutions",
-    "connect",
-    "nexus",
-    "core",
-    "hub",
-    "bridge",
-    "sync",
-    "flow",
-    "cloud",
-    "smart",
-    "meta",
-    "verse",
-    "suite",
-)
+ANTI_CORPORATE_TOKENS = DEFAULT_NAMING_POLICY.surface.anti_corporate_tokens
+RUNIC_FORGE_BAD_TAILS = DEFAULT_NAMING_POLICY.surface.runic_bad_tails
+
+
+def _resolved_policy(policy: NamingPolicy | None) -> NamingPolicy:
+    return policy or DEFAULT_NAMING_POLICY
 
 
 def _repo_root() -> Path:
@@ -48,18 +31,19 @@ def _repo_root() -> Path:
 
 
 def _default_prompt_paths() -> dict[NameFamily, Path]:
-    base = _repo_root() / "resources" / "branding" / "llm"
+    base = _repo_root() / "resources" / "brandpipe" / "prompts"
     return {
-        NameFamily.LITERAL_TLD_HACK: base / "brandpipe_family_literal_tld_hack_v1.txt",
-        NameFamily.SMOOTH_BLEND: base / "brandpipe_family_smooth_blend_v2.txt",
-        NameFamily.MASCOT_MUTATION: base / "brandpipe_family_mascot_mutation_v1.txt",
-        NameFamily.CONTRARIAN_DICTIONARY: base / "brandpipe_family_contrarian_dictionary_v1.txt",
-        NameFamily.BRUTALIST_UTILITY: base / "brandpipe_family_brutalist_utility_v1.txt",
+        NameFamily.LITERAL_TLD_HACK: base / "literal_tld_hack.txt",
+        NameFamily.SMOOTH_BLEND: base / "smooth_blend.txt",
+        NameFamily.MASCOT_MUTATION: base / "mascot_mutation.txt",
+        NameFamily.RUNIC_FORGE: base / "runic_forge.txt",
+        NameFamily.CONTRARIAN_DICTIONARY: base / "contrarian_dictionary.txt",
+        NameFamily.BRUTALIST_UTILITY: base / "brutalist_utility.txt",
     }
 
 
 def _normalize_token(raw: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(raw or "").lower())
+    return normalize_brand_token(raw)
 
 
 def _role_configs(config: IdeationConfig) -> tuple[IdeationRoleConfig, ...]:
@@ -110,45 +94,12 @@ def _surface_candidate_schema(strict_json: bool) -> dict[str, object]:
 
 
 def _parse_surface_candidate_payload(raw_text: str) -> list[str]:
-    text = str(raw_text or "").strip()
-    if not text:
-        return []
-    try:
-        payload: Any = json.loads(text)
-    except json.JSONDecodeError:
-        extracted = extract_json_object(text)
-        if not extracted:
-            payload = None
-        else:
-            try:
-                payload = json.loads(extracted)
-            except json.JSONDecodeError:
-                payload = None
-
-    source: list[Any] = []
-    if isinstance(payload, dict):
-        if isinstance(payload.get("candidates"), list):
-            source = list(payload["candidates"])
-        elif isinstance(payload.get("names"), list):
-            source = list(payload["names"])
-    elif isinstance(payload, list):
-        source = list(payload)
-
     names: list[str] = []
     seen: set[str] = set()
-    for item in source:
-        raw_name: str | None = None
-        if isinstance(item, str):
-            raw_name = item
-        elif isinstance(item, dict):
-            for key in ("display_name", "name", "candidate"):
-                value = item.get(key)
-                if isinstance(value, str) and value.strip():
-                    raw_name = value
-                    break
-        display_name = str(raw_name or "").strip()
-        if not display_name:
-            continue
+    for display_name in extract_candidate_names(
+        raw_text,
+        candidate_keys=("display_name", "name", "candidate"),
+    ):
         dedupe_key = display_name.casefold()
         if dedupe_key in seen:
             continue
@@ -180,83 +131,19 @@ def _call_openrouter_surface_candidates(
     http_referer: str,
     x_title: str,
 ) -> tuple[list[str], dict[str, Any], str]:
-    max_completion_tokens = _max_completion_tokens(model, target_count)
-    base_body = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": _temperature(temperature),
-        "max_completion_tokens": max_completion_tokens,
-    }
-    reasoning = _openrouter_reasoning_payload(model)
-    if reasoning is not None:
-        base_body["reasoning"] = reasoning
-    attempt_payloads: dict[str, dict[str, object]] = {
-        "json_schema": {
-            **base_body,
-            "response_format": {"type": "json_schema", "json_schema": _surface_candidate_schema(strict_json)},
-            "provider": {"require_parameters": True},
-        },
-        "json_object": {
-            **base_body,
-            "response_format": {"type": "json_object"},
-        },
-        "plain": dict(base_body),
-    }
-    attempts: list[tuple[str, dict[str, object]]] = [
-        (mode, dict(attempt_payloads[mode]))
-        for mode in _openrouter_response_modes(model)
-    ]
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    referer = _normalize_openrouter_http_referer(http_referer)
-    if referer:
-        headers["HTTP-Referer"] = referer
-    if str(x_title or "").strip():
-        headers["X-Title"] = str(x_title).strip()
-
-    last_usage: dict[str, Any] = {}
-    last_error = "unknown"
-    for index, (response_mode, payload) in enumerate(attempts):
-        response, error_code = _post_json(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            payload=payload,
-            timeout_ms=timeout_ms,
-        )
-        if error_code:
-            last_error = error_code
-            if index + 1 < len(attempts) and error_code in {"http_400", "http_422", "http_429", "http_503", "http_504"}:
-                if error_code in {"http_429", "http_503", "http_504"}:
-                    import time
-
-                    time.sleep(_retry_delay_seconds(index))
-                continue
-            last_usage["attempt_count"] = index + 1
-            last_usage["response_mode"] = response_mode
-            last_usage["max_completion_tokens"] = max_completion_tokens
-            return [], last_usage, last_error
-        if response is None:
-            return [], last_usage, "unexpected_empty_response"
-        content, usage, parse_error = extract_response_content(response)
-        if usage:
-            merged_usage = dict(last_usage)
-            merged_usage.update(usage)
-            last_usage = merged_usage
-        last_usage["attempt_count"] = index + 1
-        last_usage["response_mode"] = response_mode
-        last_usage["max_completion_tokens"] = max_completion_tokens
-        if content:
-            last_usage["response_preview"] = _response_preview(content)
-        if parse_error:
-            return [], last_usage, parse_error
-        names = _parse_surface_candidate_payload(content)
-        if names:
-            return names, last_usage, ""
-        last_error = "candidate_parse_failed"
-    return [], last_usage, last_error
+    return _call_openrouter_candidates_with_schema(
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        target_count=target_count,
+        timeout_ms=timeout_ms,
+        strict_json=strict_json,
+        temperature=temperature,
+        http_referer=http_referer,
+        x_title=x_title,
+        schema_builder=_surface_candidate_schema,
+        parse_candidates=_parse_surface_candidate_payload,
+    )
 
 
 def _call_openai_compat_surface_candidates(
@@ -269,56 +156,17 @@ def _call_openai_compat_surface_candidates(
     strict_json: bool,
     temperature: float,
 ) -> tuple[list[str], dict[str, Any], str]:
-    root = _normalize_openai_compat_base_url(base_url)
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    token = str(api_key or "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    base_body = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": _temperature(temperature),
-    }
-    attempts: list[dict[str, object]] = [
-        {
-            **base_body,
-            "response_format": {"type": "json_schema", "json_schema": _surface_candidate_schema(strict_json)},
-        },
-        {
-            **base_body,
-            "response_format": {"type": "json_object"},
-        },
-        dict(base_body),
-    ]
-    last_usage: dict[str, Any] = {}
-    last_error = "unknown"
-    for payload in attempts:
-        response, error_code = _post_json(
-            url=f"{root}/chat/completions",
-            headers=headers,
-            payload=payload,
-            timeout_ms=timeout_ms,
-        )
-        if error_code:
-            last_error = error_code
-            if error_code in {"http_400", "http_422", "http_429", "http_503", "http_504"} and payload is not attempts[-1]:
-                continue
-            return [], last_usage, last_error
-        if response is None:
-            return [], last_usage, "unexpected_empty_response"
-        content, usage, parse_error = extract_response_content(response)
-        if usage:
-            last_usage = usage
-        if parse_error:
-            return [], last_usage, parse_error
-        names = _parse_surface_candidate_payload(content)
-        if names:
-            return names, usage, ""
-        last_error = "candidate_parse_failed"
-    return [], last_usage, last_error
+    return _call_openai_compat_candidates_with_schema(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        prompt=prompt,
+        timeout_ms=timeout_ms,
+        strict_json=strict_json,
+        temperature=temperature,
+        schema_builder=_surface_candidate_schema,
+        parse_candidates=_parse_surface_candidate_payload,
+    )
 
 
 def _call_provider_for_family(
@@ -411,12 +259,17 @@ def _render_prompt(
     success_context: dict[str, object] | None,
     avoidance_context: dict[str, object] | None,
     retry_feedback: str,
+    policy: NamingPolicy | None = None,
 ) -> str:
+    active_policy = _resolved_policy(policy)
     replacements = {
         "family_name": family.value,
         "target_count": str(max(1, int(target_count))),
         "role_name": role_cfg.role,
-        "role_instructions": ROLE_HINTS.get(role_cfg.role, ROLE_HINTS["creative_divergence"]),
+        "role_instructions": active_policy.prompts.role_hints.get(
+            role_cfg.role,
+            active_policy.prompts.role_hints.get("creative_divergence", ROLE_HINTS["creative_divergence"]),
+        ),
         "product_core": str(brief.product_core or ""),
         "target_users": ", ".join(brief.target_users or []) or "none",
         "trust_signals": ", ".join(brief.trust_signals or []) or "none",
@@ -432,13 +285,19 @@ def _render_prompt(
     return prompt.strip()
 
 
-def _accept_candidate(family: NameFamily, display_name: str) -> tuple[bool, str]:
+def _accept_candidate(
+    family: NameFamily,
+    display_name: str,
+    *,
+    policy: NamingPolicy | None = None,
+) -> tuple[bool, str]:
+    active_policy = _resolved_policy(policy)
     display = str(display_name or "").strip()
     normalized = _normalize_token(display)
     lowered = normalized.lower()
     if len(normalized) < 4:
         return False, "too_short"
-    if any(token in lowered for token in ANTI_CORPORATE_TOKENS):
+    if any(token in lowered for token in active_policy.surface.anti_corporate_tokens):
         return False, "corporate_cliche"
     if family == NameFamily.LITERAL_TLD_HACK:
         if " " in display:
@@ -461,6 +320,26 @@ def _accept_candidate(family: NameFamily, display_name: str) -> tuple[bool, str]
             return False, "invalid_surface"
         if sum(1 for ch in lowered if ch in "aeiou") < 2:
             return False, "too_harsh"
+        return True, ""
+    if family == NameFamily.RUNIC_FORGE:
+        if any(marker in display for marker in ".- "):
+            return False, "unexpected_surface_marker"
+        if any(fragment in lowered for fragment in active_policy.surface.runic_crowded_patterns):
+            return False, "crowded_neighbor_pattern"
+        if not re.fullmatch(r"[A-Za-zÆØÅæøå]{6,9}", display):
+            return False, "invalid_surface"
+        upper = display.upper()
+        if not any(marker in upper for marker in ("Æ", "Ø", "Å", "Y", "Q")):
+            return False, "missing_structural_marker"
+        structural_markers = sum(1 for ch in upper if ch in "ÆØÅYQ")
+        if structural_markers > 2:
+            return False, "too_many_disruptors"
+        if "QU" in upper:
+            return False, "english_q_cluster"
+        if sum(1 for ch in upper if ch in "AEIOU") > 3:
+            return False, "too_soft"
+        if any(lowered.endswith(tail) for tail in active_policy.surface.runic_bad_tails) or lowered.endswith("x"):
+            return False, "fantasy_sludge_tail"
         return True, ""
     if family == NameFamily.CONTRARIAN_DICTIONARY:
         if any(marker in display for marker in ".- "):
@@ -514,54 +393,68 @@ def generate_family_candidates(
     attempts = 0
     while len(accepted) < quota and attempts <= retry_limit:
         attempts += 1
-        retry_feedback = _retry_feedback_block(rejected_examples, accepted)
         for role_cfg in role_cfgs:
             role_target = max(1, round(max(1, quota) * (max(1, int(role_cfg.weight)) / max(1, total_weight))))
             request_target = max(role_target, int(math.ceil(role_target * max(1.0, float(config.overgenerate_factor)))))
-            prompt = _render_prompt(
-                template=template,
-                brief=brief,
-                family=family,
-                target_count=request_target,
-                role_cfg=role_cfg,
-                success_context=success_context,
-                avoidance_context=avoidance_context,
-                retry_feedback=retry_feedback,
-            )
-            raw_names, usage, err = _call_provider_for_family(
-                provider=str(config.provider).strip().lower(),
-                config=config,
-                role_cfg=role_cfg,
-                prompt=prompt,
-                target_count=request_target,
-            )
-            if err:
-                errors.append(f"{role_cfg.role}:{err}")
+            request_batches = max(1, quota - len(accepted)) if family == NameFamily.RUNIC_FORGE else 1
             accepted_now = 0
             rejected_now = 0
-            for raw_name in raw_names:
-                is_accepted, reason = _accept_candidate(family, raw_name)
-                if not is_accepted:
-                    rejected_now += 1
-                    if raw_name not in rejected_examples:
-                        rejected_examples.append(f"{raw_name} ({reason})")
-                    continue
-                key = raw_name.casefold()
-                if key in accepted_seen:
-                    continue
-                accepted_seen.add(key)
-                accepted.append(raw_name.strip())
-                accepted_now += 1
+            usage_reports: list[dict[str, Any]] = []
+            role_errors: list[str] = []
+            calls_made = 0
+            for _ in range(request_batches):
                 if len(accepted) >= quota:
                     break
+                retry_feedback = _retry_feedback_block(rejected_examples, accepted)
+                active_target = 1 if family == NameFamily.RUNIC_FORGE else request_target
+                prompt = _render_prompt(
+                    template=template,
+                    brief=brief,
+                    family=family,
+                    target_count=active_target,
+                    role_cfg=role_cfg,
+                    success_context=success_context,
+                    avoidance_context=avoidance_context,
+                    retry_feedback=retry_feedback,
+                    policy=config.naming_policy,
+                )
+                raw_names, usage, err = _call_provider_for_family(
+                    provider=str(config.provider).strip().lower(),
+                    config=config,
+                    role_cfg=role_cfg,
+                    prompt=prompt,
+                    target_count=active_target,
+                )
+                calls_made += 1
+                if usage:
+                    usage_reports.append(usage)
+                if err:
+                    errors.append(f"{role_cfg.role}:{err}")
+                    role_errors.append(err)
+                for raw_name in raw_names:
+                    is_accepted, reason = _accept_candidate(family, raw_name, policy=config.naming_policy)
+                    if not is_accepted:
+                        rejected_now += 1
+                        if raw_name not in rejected_examples:
+                            rejected_examples.append(f"{raw_name} ({reason})")
+                        continue
+                    key = raw_name.casefold()
+                    if key in accepted_seen:
+                        continue
+                    accepted_seen.add(key)
+                    accepted.append(raw_name.strip())
+                    accepted_now += 1
+                    if len(accepted) >= quota:
+                        break
             role_reports.append(
                 {
                     "role": role_cfg.role,
                     "model": role_cfg.model,
+                    "calls": calls_made,
                     "accepted": accepted_now,
                     "rejected": rejected_now,
-                    "usage": usage,
-                    "error": err,
+                    "usage": usage_reports,
+                    "error": ";".join(role_errors),
                 }
             )
             if len(accepted) >= quota:

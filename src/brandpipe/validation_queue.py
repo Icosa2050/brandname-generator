@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Iterable
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -10,7 +10,7 @@ import time
 from . import db
 from .models import ErrorKind, JobStatus, ResultStatus, RunStatus, ValidationConfig
 from .validation import probe_check, skipped_result
-from .validation_runtime import DEFAULT_VALIDATION_ORDER, EARLY_EXIT_CHECKS, ProbeResult
+from .validation_runtime import EARLY_EXIT_CHECKS, ProbeResult
 
 
 SHORTLIST_RUN_PREFIX = "shortlist_validation:"
@@ -20,7 +20,7 @@ MAX_RETRY_ATTEMPTS = 3
 def shortlist_fingerprint(*, names: Iterable[str], config: ValidationConfig) -> str:
     payload = {
         "names": [str(name).strip() for name in names if str(name).strip()],
-        "checks": list(config.checks or DEFAULT_VALIDATION_ORDER),
+        "checks": list(config.checks),
         "required_domain_tlds": str(config.required_domain_tlds or ""),
         "store_countries": str(config.store_countries or ""),
         "company_top": int(config.company_top),
@@ -147,7 +147,7 @@ def prepare_shortlist_run(
         conn,
         title=title,
         brief={"shortlist_fingerprint": fingerprint, "input_count": len(candidate_names)},
-        config={"validation": config.__dict__, "shortlist_fingerprint": fingerprint},
+        config={"validation": asdict(config), "shortlist_fingerprint": fingerprint},
     )
     db.add_candidates(
         conn,
@@ -193,7 +193,7 @@ def run_validation_jobs(
     sleep_fn=time.sleep,
     mark_run_complete: bool = False,
 ) -> dict[str, object]:
-    checks = list(config.checks or DEFAULT_VALIDATION_ORDER)
+    checks = list(config.checks)
     db.set_run_state(conn, run_id=run_id, status=RunStatus.RUNNING.value, current_step="validation_queue")
     conn.commit()
     total_retry_waits = 0

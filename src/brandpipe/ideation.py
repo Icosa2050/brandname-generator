@@ -10,84 +10,32 @@ import re
 import socket
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error, parse, request
 
 from .diversity import filter_names, filter_seed_candidates, salvage_names
 from .generator_pool import generate_seed_pool, select_round_seed_candidates
 from .lexicon import build_lexicon
 from .models import Brief, IdeationConfig, IdeationRoleConfig, LexiconBundle, SeedCandidate
+from .naming_policy import DEFAULT_NAMING_POLICY, NamingPolicy
 from .pseudowords import generate_pseudoword_pool
 from .scoring import score_name_attractiveness
 from .taste import evaluate_name
 
 
-ROUND_SCHEMES: tuple[dict[str, str], ...] = (
+ROUND_SCHEMES: tuple[dict[str, str], ...] = tuple(
     {
-        "phonetic": "smooth",
-        "morphology": "blend",
-        "semantic": "trust",
-        "label": "rounded-open",
-        "preferred_endings": "a, o, u, oo, el",
-        "structure": "2-3 syllables, open endings, rounded vowels, liquid consonants",
-    },
-    {
-        "phonetic": "crisp",
-        "morphology": "coined",
-        "semantic": "precision",
-        "label": "stop-spark",
-        "preferred_endings": "e, o, um, et, ix",
-        "structure": "firmer stops, contrasty rhythm, less default enterprise polish",
-    },
-    {
-        "phonetic": "bright",
-        "morphology": "hybrid",
-        "semantic": "clarity",
-        "label": "bright-lilt",
-        "preferred_endings": "i, o, ar, il, en",
-        "structure": "clean stems, light vowels, sharper finish, wider ending range",
-    },
-    {
-        "phonetic": "grounded",
-        "morphology": "coined",
-        "semantic": "stability",
-        "label": "odd-familiar",
-        "preferred_endings": "o, a, er, um, en",
-        "structure": "almost-familiar forms, asymmetry welcome, avoid obvious dictionary drift",
-    },
-    {
-        "phonetic": "balanced",
-        "morphology": "blend",
-        "semantic": "fairness",
-        "label": "cross-current",
-        "preferred_endings": "al, or, ou, ar, el",
-        "structure": "mixed cadences, less latinate sameness, push opening diversity",
-    },
-    {
-        "phonetic": "resonant",
-        "morphology": "hybrid",
-        "semantic": "lift",
-        "label": "wildcard-open",
-        "preferred_endings": "a, o, u, is, on",
-        "structure": "surprising phonetic turns, rounded or clipped exits, pronounceability retained",
-    },
+        "phonetic": scheme.phonetic,
+        "morphology": scheme.morphology,
+        "semantic": scheme.semantic,
+        "label": scheme.label,
+        "preferred_endings": scheme.preferred_endings,
+        "structure": scheme.structure,
+    }
+    for scheme in DEFAULT_NAMING_POLICY.prompts.round_schemes
 )
-ROLE_HINTS: dict[str, str] = {
-    "creative_divergence": "Push away from the existing-company center of gravity; favor non-obvious sound-shapes and structural variety while staying pronounceable.",
-    "recombinator": "Use the seed pool and morphemes as launch points, then splice and mutate them into less ordinary phonetic territory.",
-    "contrarian": "Refuse the most literal naming path and search for angled, unexpected directions instead of safe B2B polish.",
-    "phonetic_explorer": "Search for fresh openings, rhythm shifts, and less crowded sound-shapes without defaulting to near-real dictionary comfort.",
-    "morpheme_hybridizer": "Fuse lexicon atoms into names that feel ownable and less namespace-crowded than direct near-real-word transmutations.",
-    "ending_diversifier": "Actively explore endings and cadences that widen the batch instead of returning another safe enterprise family remix.",
-}
-ROLE_SCHEME_OFFSETS: dict[str, int] = {
-    "creative_divergence": 5,
-    "recombinator": 3,
-    "contrarian": 4,
-    "phonetic_explorer": 1,
-    "morpheme_hybridizer": 2,
-    "ending_diversifier": 0,
-}
+ROLE_HINTS: dict[str, str] = dict(DEFAULT_NAMING_POLICY.prompts.role_hints)
+ROLE_SCHEME_OFFSETS: dict[str, int] = dict(DEFAULT_NAMING_POLICY.prompts.role_scheme_offsets)
 OPENROUTER_MODEL_FALLBACKS: dict[str, str] = {
     "mistralai/mistral-small-creative": "moonshotai/kimi-k2.5",
 }
@@ -101,42 +49,22 @@ OPENROUTER_COMPLETION_CAP_PREFIXES: tuple[tuple[str, int], ...] = (
 OPENROUTER_RESPONSE_MODE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("google/gemini", ("json_object", "json_schema", "plain")),
 )
-VALID_NAME_RE = re.compile(r"^[a-z]{6,14}$")
 PSEUDOWORD_NON_FATAL_WARNINGS = frozenset({"insufficient_pseudoword_yield"})
-ENDING_FAMILY_RULES: tuple[tuple[str, str], ...] = (
-    ("aria", "aria"),
-    ("eria", "eria"),
-    ("ia", "ia"),
-    ("ea", "ea"),
-    ("en", "en"),
-    ("er", "er"),
-    ("el", "el"),
-    ("et", "et"),
-    ("is", "is"),
-    ("il", "il"),
-    ("in", "in"),
-    ("ix", "ix"),
-    ("ex", "ex"),
-    ("um", "um"),
-    ("an", "an"),
-    ("ar", "ar"),
-    ("a", "a"),
-    ("e", "e"),
-    ("i", "i"),
-    ("n", "n"),
-    ("r", "r"),
-    ("l", "l"),
-    ("s", "s"),
-    ("x", "x"),
-)
+ENDING_FAMILY_RULES: tuple[tuple[str, str], ...] = DEFAULT_NAMING_POLICY.prompts.ending_family_rules
 
 
 def normalize_alpha_name(raw: str) -> str:
     return re.sub(r"[^a-z]", "", str(raw or "").strip().lower())
 
 
-def is_valid_candidate_name(name: str) -> bool:
-    return bool(VALID_NAME_RE.fullmatch(str(name or "").strip()))
+def _resolved_policy(policy: NamingPolicy | None) -> NamingPolicy:
+    return policy or DEFAULT_NAMING_POLICY
+
+
+def is_valid_candidate_name(name: str, *, policy: NamingPolicy | None = None) -> bool:
+    active_policy = _resolved_policy(policy)
+    normalized = normalize_alpha_name(name)
+    return int(active_policy.shape.min_length) <= len(normalized) <= int(active_policy.shape.max_length)
 
 
 def load_prompt_template(path: str | Path | None) -> str:
@@ -353,6 +281,7 @@ def select_direct_seed_names(
     *,
     limit: int = 2,
     crowded_terminal_families: tuple[str, ...] = (),
+    policy: NamingPolicy | None = None,
 ) -> list[str]:
     archetype_rank = {
         "transmute": 0,
@@ -382,9 +311,9 @@ def select_direct_seed_names(
         normalized = normalize_alpha_name(candidate.name)
         if not normalized or normalized in seen:
             continue
-        if crowded_families and _ending_family(normalized) in crowded_families:
+        if crowded_families and _ending_family(normalized, policy=policy) in crowded_families:
             continue
-        attractiveness = score_name_attractiveness(normalized)
+        attractiveness = score_name_attractiveness(normalized, policy=policy)
         if attractiveness.status != "pass":
             continue
         if float(attractiveness.score_delta or 0.0) < 12.0:
@@ -396,13 +325,13 @@ def select_direct_seed_names(
     return names
 
 
-def _is_strong_positive_anchor(name: str) -> bool:
+def _is_strong_positive_anchor(name: str, *, policy: NamingPolicy | None = None) -> bool:
     normalized = normalize_alpha_name(name)
     if not normalized:
         return False
-    if not evaluate_name(normalized).accepted:
+    if not evaluate_name(normalized, policy=policy).accepted:
         return False
-    attractiveness = score_name_attractiveness(normalized)
+    attractiveness = score_name_attractiveness(normalized, policy=policy)
     if attractiveness.status != "pass":
         return False
     if float(attractiveness.score_delta or 0.0) < 18.0:
@@ -431,6 +360,7 @@ def sanitize_positive_anchor_context(
     seed_pool: list[SeedCandidate] | None = None,
     max_names: int = 4,
     min_names: int = 2,
+    policy: NamingPolicy | None = None,
 ) -> dict[str, object]:
     context = dict(success_context or {})
     clean_names: list[str] = []
@@ -440,7 +370,7 @@ def sanitize_positive_anchor_context(
         normalized = normalize_alpha_name(raw_name)
         if not normalized or normalized in seen_names:
             continue
-        if not _is_strong_positive_anchor(normalized):
+        if not _is_strong_positive_anchor(normalized, policy=policy):
             continue
         seen_names.add(normalized)
         clean_names.append(normalized)
@@ -629,12 +559,16 @@ def build_prompt(
     role_name: str = "creative_divergence",
     role_instructions: str = "",
     prompt_template: str = "",
+    policy: NamingPolicy | None = None,
 ) -> tuple[str, tuple[str, str, str]]:
-    scheme_index = (int(round_index) + ROLE_SCHEME_OFFSETS.get(role_name, 0)) % len(ROUND_SCHEMES)
-    scheme = ROUND_SCHEMES[scheme_index]
-    phonetic = scheme["phonetic"]
-    morphology = scheme["morphology"]
-    semantic = scheme["semantic"]
+    active_policy = _resolved_policy(policy)
+    prompt_policy = active_policy.prompts
+    schemes = prompt_policy.round_schemes or DEFAULT_NAMING_POLICY.prompts.round_schemes
+    scheme_index = (int(round_index) + prompt_policy.role_scheme_offsets.get(role_name, 0)) % len(schemes)
+    scheme = schemes[scheme_index]
+    phonetic = scheme.phonetic
+    morphology = scheme.morphology
+    semantic = scheme.semantic
     mode = (phonetic, morphology, semantic)
     role_context = _role_context_packet(context_packet, role_name)
     context_lines = render_context_lines(role_context)
@@ -680,9 +614,9 @@ def build_prompt(
         "phonetic": str(phonetic),
         "morphology": str(morphology),
         "semantic": str(semantic),
-        "scheme_label": scheme["label"],
-        "preferred_endings": scheme["preferred_endings"],
-        "structure": scheme["structure"],
+        "scheme_label": scheme.label,
+        "preferred_endings": scheme.preferred_endings,
+        "structure": scheme.structure,
         "context_block": str(context_block or "none\n"),
         "lexicon_block": str(lexicon_block or "none\n"),
         "seed_block": str(seed_block or "none\n"),
@@ -718,18 +652,18 @@ def build_prompt(
         f"Phonetic mode: {phonetic}\n"
         f"Morphology mode: {morphology}\n"
         f"Semantic mode: {semantic}\n"
-        f"Scheme label: {scheme['label']}\n"
-        f"Preferred endings: {scheme['preferred_endings']}\n"
-        f"Structure cues: {scheme['structure']}\n"
+        f"Scheme label: {scheme.label}\n"
+        f"Preferred endings: {scheme.preferred_endings}\n"
+        f"Structure cues: {scheme.structure}\n"
         f"{context_block}"
         f"{lexicon_block}"
         f"{seed_block}"
         f"{positive_anchor_block}"
         f"{avoidance_block}"
         f"{literal_fragment_block}"
-        f"Role guidance: {role_instructions or ROLE_HINTS.get(role_name, ROLE_HINTS['creative_divergence'])}\n"
+        f"Role guidance: {role_instructions or prompt_policy.role_hints.get(role_name, prompt_policy.role_hints.get('creative_divergence', ''))}\n"
         "Rules:\n"
-        "- lowercase latin letters only, 6-14 chars\n"
+        f"- lowercase latin letters only, {active_policy.shape.min_length}-{active_policy.shape.max_length} chars\n"
         "- no spaces, punctuation, digits\n"
         "- invent first, validate later; prioritize phonetic novelty over category fit\n"
         "- allow rounded endings, open syllables, uncommon letters, and unexpected sound-shapes when they remain pronounceable\n"
@@ -769,42 +703,63 @@ def extract_json_object(raw: str) -> str | None:
     return None
 
 
-def parse_candidate_payload(raw_text: str) -> list[str]:
-    text = raw_text.strip()
+def _load_candidate_payload(raw_text: str) -> Any:
+    text = str(raw_text or "").strip()
     if not text:
-        return []
+        return None
     try:
-        payload: Any = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError:
         extracted = extract_json_object(text)
         if not extracted:
-            payload = None
-        else:
-            try:
-                payload = json.loads(extracted)
-            except json.JSONDecodeError:
-                payload = None
+            return None
+        try:
+            return json.loads(extracted)
+        except json.JSONDecodeError:
+            return None
 
-    source: list[Any] = []
+
+def _candidate_source(payload: Any) -> list[Any]:
     if isinstance(payload, dict):
         if isinstance(payload.get("candidates"), list):
-            source = list(payload["candidates"])
-        elif isinstance(payload.get("names"), list):
-            source = list(payload["names"])
-    elif isinstance(payload, list):
-        source = list(payload)
+            return list(payload["candidates"])
+        if isinstance(payload.get("names"), list):
+            return list(payload["names"])
+        return []
+    if isinstance(payload, list):
+        return list(payload)
+    return []
 
+
+def extract_candidate_names(
+    raw_text: str,
+    *,
+    candidate_keys: tuple[str, ...] = ("name", "candidate"),
+) -> list[str]:
+    payload = _load_candidate_payload(raw_text)
+    source = _candidate_source(payload)
     names: list[str] = []
     for item in source:
         raw_name: str | None = None
         if isinstance(item, str):
             raw_name = item
         elif isinstance(item, dict):
-            candidate_name = item.get("name") or item.get("candidate")
-            if isinstance(candidate_name, str):
-                raw_name = candidate_name
+            for key in candidate_keys:
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw_name = value
+                    break
         if raw_name is None:
             continue
+        display_name = str(raw_name).strip()
+        if display_name:
+            names.append(display_name)
+    return names
+
+
+def parse_candidate_payload(raw_text: str) -> list[str]:
+    names: list[str] = []
+    for raw_name in extract_candidate_names(raw_text):
         name = normalize_alpha_name(raw_name)
         if is_valid_candidate_name(name):
             names.append(name)
@@ -1028,7 +983,7 @@ def _post_json(
     return parsed, ""
 
 
-def call_openrouter_candidates(
+def _call_openrouter_candidates_with_schema(
     *,
     api_key: str,
     model: str,
@@ -1036,9 +991,11 @@ def call_openrouter_candidates(
     target_count: int,
     timeout_ms: int,
     strict_json: bool,
-    temperature: float = 0.8,
-    http_referer: str = "",
-    x_title: str = "",
+    temperature: float,
+    http_referer: str,
+    x_title: str,
+    schema_builder: Callable[[bool], dict[str, object]],
+    parse_candidates: Callable[[str], list[str]],
 ) -> tuple[list[str], dict[str, Any], str]:
     max_completion_tokens = _max_completion_tokens(model, target_count)
     base_body = {
@@ -1054,7 +1011,7 @@ def call_openrouter_candidates(
     attempt_payloads: dict[str, dict[str, object]] = {
         "json_schema": {
             **base_body,
-            "response_format": {"type": "json_schema", "json_schema": _candidate_schema(strict_json)},
+            "response_format": {"type": "json_schema", "json_schema": schema_builder(strict_json)},
             "provider": {"require_parameters": True},
         },
         "json_object": {
@@ -1113,7 +1070,7 @@ def call_openrouter_candidates(
         if parse_error:
             last_error = parse_error
             return [], last_usage, last_error
-        names = parse_candidate_payload(content)
+        names = parse_candidates(content)
         if names:
             return names, last_usage, ""
         last_error = "candidate_parse_failed"
@@ -1122,7 +1079,34 @@ def call_openrouter_candidates(
     return [], last_usage, last_error
 
 
-def call_openai_compat_candidates(
+def call_openrouter_candidates(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    target_count: int,
+    timeout_ms: int,
+    strict_json: bool,
+    temperature: float = 0.8,
+    http_referer: str = "",
+    x_title: str = "",
+) -> tuple[list[str], dict[str, Any], str]:
+    return _call_openrouter_candidates_with_schema(
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        target_count=target_count,
+        timeout_ms=timeout_ms,
+        strict_json=strict_json,
+        temperature=temperature,
+        http_referer=http_referer,
+        x_title=x_title,
+        schema_builder=_candidate_schema,
+        parse_candidates=parse_candidate_payload,
+    )
+
+
+def _call_openai_compat_candidates_with_schema(
     *,
     api_key: str,
     base_url: str,
@@ -1130,7 +1114,9 @@ def call_openai_compat_candidates(
     prompt: str,
     timeout_ms: int,
     strict_json: bool,
-    temperature: float = 0.8,
+    temperature: float,
+    schema_builder: Callable[[bool], dict[str, object]],
+    parse_candidates: Callable[[str], list[str]],
 ) -> tuple[list[str], dict[str, Any], str]:
     root = _normalize_openai_compat_base_url(base_url)
     headers = {
@@ -1149,7 +1135,7 @@ def call_openai_compat_candidates(
     attempts: list[dict[str, object]] = [
         {
             **base_body,
-            "response_format": {"type": "json_schema", "json_schema": _candidate_schema(strict_json)},
+            "response_format": {"type": "json_schema", "json_schema": schema_builder(strict_json)},
         },
         {
             **base_body,
@@ -1182,13 +1168,36 @@ def call_openai_compat_candidates(
         if parse_error:
             last_error = parse_error
             return [], last_usage, last_error
-        names = parse_candidate_payload(content)
+        names = parse_candidates(content)
         if names:
             return names, usage, ""
         last_error = "candidate_parse_failed"
         if index + 1 >= len(attempts):
             return [], last_usage, last_error
     return [], last_usage, last_error
+
+
+def call_openai_compat_candidates(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout_ms: int,
+    strict_json: bool,
+    temperature: float = 0.8,
+) -> tuple[list[str], dict[str, Any], str]:
+    return _call_openai_compat_candidates_with_schema(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        prompt=prompt,
+        timeout_ms=timeout_ms,
+        strict_json=strict_json,
+        temperature=temperature,
+        schema_builder=_candidate_schema,
+        parse_candidates=parse_candidate_payload,
+    )
 
 
 def _call_provider_for_role(
@@ -1265,9 +1274,10 @@ def estimate_usage_cost_usd(
     return round(in_cost + out_cost, 8)
 
 
-def _ending_family(name: str) -> str:
+def _ending_family(name: str, *, policy: NamingPolicy | None = None) -> str:
     lowered = str(name or "").strip().lower()
-    for suffix, family in ENDING_FAMILY_RULES:
+    active_policy = _resolved_policy(policy)
+    for suffix, family in active_policy.prompts.ending_family_rules:
         if lowered.endswith(suffix):
             return family
     return lowered[-2:] if len(lowered) >= 2 else lowered
@@ -1280,6 +1290,7 @@ def _extend_diverse_names(
     family_counts: dict[str, int],
     round_names: list[str],
     per_family_cap: int,
+    policy: NamingPolicy | None = None,
 ) -> tuple[int, int]:
     filtered_end_o = 0
     filtered_family = 0
@@ -1287,7 +1298,7 @@ def _extend_diverse_names(
         if name.endswith("o"):
             filtered_end_o += 1
             continue
-        family = _ending_family(name)
+        family = _ending_family(name, policy=policy)
         if family_counts.get(family, 0) >= max(1, per_family_cap):
             filtered_family += 1
             continue
@@ -1360,6 +1371,7 @@ def generate_candidates(
         blocked_fragments_extra=avoidance_fragment_hints,
         avoid_terms_extra=avoidance_names,
         crowded_terminal_families=avoidance_terminal_families,
+        policy=config.naming_policy,
     )
     blocked_fragments = tuple(str(value) for value in (seed_pool_report.get("blocked_fragments") or []))
     literal_fragment_hints = _literal_fragment_hints(blocked_fragments)
@@ -1367,12 +1379,14 @@ def generate_candidates(
         seed_pool,
         avoid_terms=tuple(sorted({*lexicon_bundle.avoid_terms, *avoidance_names})),
         saturation_limit=max(1, int(config.seed_saturation_limit)),
+        policy=config.naming_policy,
     )
     if not seed_pool:
         raise RuntimeError("generator seed pool failed: no_seed_candidates")
     positive_anchor_context = sanitize_positive_anchor_context(
         success_context,
         seed_pool=seed_pool,
+        policy=config.naming_policy,
     )
     round_seed_sizes: list[int] = []
     role_reports: list[dict[str, object]] = []
@@ -1390,6 +1404,7 @@ def generate_candidates(
             round_seed_candidates,
             limit=min(2, max(1, len(round_seed_candidates))),
             crowded_terminal_families=avoidance_terminal_families,
+            policy=config.naming_policy,
         )
         round_seed_sizes.append(len(round_seed_candidates))
         total_weight = sum(max(1, role.weight) for role in role_cfgs)
@@ -1411,8 +1426,12 @@ def generate_candidates(
                 avoidance_context=avoidance_context,
                 literal_fragments=literal_fragment_hints,
                 role_name=role_cfg.role,
-                role_instructions=ROLE_HINTS.get(role_cfg.role, ROLE_HINTS["creative_divergence"]),
+                role_instructions=config.naming_policy.prompts.role_hints.get(
+                    role_cfg.role,
+                    config.naming_policy.prompts.role_hints.get("creative_divergence", ""),
+                ),
                 prompt_template=prompt_template,
+                policy=config.naming_policy,
             )
             started_at = time.perf_counter()
             role_names, usage, err = _call_provider_for_role(
@@ -1494,6 +1513,7 @@ def generate_candidates(
             family_counts=family_counts,
             round_names=round_outputs,
             per_family_cap=max(1, int(config.per_family_cap)),
+            policy=config.naming_policy,
         )
         filtered_end_o += round_filtered_end_o
         filtered_family += round_filtered_family
@@ -1508,12 +1528,14 @@ def generate_candidates(
         lead_fragment_limit=max(0, int(config.local_filter_lead_fragment_limit)),
         lead_fragment_length=max(2, int(config.local_filter_lead_fragment_length)),
         lead_skeleton_limit=max(0, int(config.local_filter_lead_skeleton_limit)),
+        policy=config.naming_policy,
     )
     if not filtered_names and names:
         filtered_names, salvage_report = salvage_names(
             names,
             avoid_terms=lexicon_bundle.avoid_terms,
             limit=min(3, max(1, len(names))),
+            policy=config.naming_policy,
         )
         diversity_report = {
             **diversity_report,

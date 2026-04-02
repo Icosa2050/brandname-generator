@@ -6,101 +6,37 @@ import re
 from typing import Callable, TypeVar
 
 from .models import LexiconBundle, SeedCandidate, TasteDecision, TasteRuleHit
+from .naming_policy import DEFAULT_NAMING_POLICY, NameShapePolicy, NamingPolicy, TastePolicy
 
 
 T = TypeVar("T")
 
-VALID_NAME_RE = re.compile(r"^[a-z]{6,14}$")
 VOWELS = frozenset("aeiouy")
 CONSONANT_RUN_RE = re.compile(r"[^aeiouy]+")
 SYLLABLE_LIKE_RE = re.compile(r"[^aeiouy]*[aeiouy]+[^aeiouy]*")
-BANNED_SUFFIX_FAMILIES: tuple[str, ...] = (
-    "venix",
-    "trix",
-    "trex",
-)
-BANNED_MORPHEMES: tuple[str, ...] = (
-    "parcl",
-    "prec",
-    "priva",
-    "vex",
-    "xen",
-    "trix",
-    "trex",
-    "splint",
-    "kest",
-)
-SAFE_TRIPLE_CLUSTERS = {
-    "sch",
-    "scr",
-    "shr",
-    "spl",
-    "spr",
-    "squ",
-    "str",
-    "thr",
-}
-BANNED_TRIPLE_CLUSTERS = {
-    "ptr",
-    "rbl",
-    "rth",
-    "thv",
-}
-DIRECT_DOMAIN_FRAGMENT_ROOTS = {
-    "arrears",
-    "billing",
-    "cashflow",
-    "clar",
-    "civic",
-    "deposit",
-    "invoice",
-    "landlord",
-    "ledger",
-    "legal",
-    "lease",
-    "owner",
-    "parcel",
-    "payout",
-    "portfolio",
-    "private",
-    "property",
-    "reconcile",
-    "report",
-    "rent",
-    "secur",
-    "settlement",
-    "tenant",
-    "tenure",
-    "trust",
-    "utility",
-}
-GENERIC_SAFE_OPENINGS: tuple[str, ...] = (
-    "pre",
-    "prec",
-    "prim",
-    "cora",
-    "stati",
-)
-EXACT_GENERIC_WORDS = frozenset(
-    {
-        "render",
-        "renders",
-        "string",
-        "strings",
-    }
-)
 
 
 def normalize_name(name: str) -> str:
     return re.sub(r"[^a-z]", "", str(name or "").strip().lower())
 
 
+def _resolved_policy(policy: NamingPolicy | None) -> NamingPolicy:
+    return policy or DEFAULT_NAMING_POLICY
+
+
+def _is_valid_shape(name: str, shape: NameShapePolicy) -> bool:
+    normalized = normalize_name(name)
+    return int(shape.min_length) <= len(normalized) <= int(shape.max_length)
+
+
 def build_blocked_fragments(
     bundle: LexiconBundle | None = None,
     *,
     extra_fragments: tuple[str, ...] = (),
+    policy: NamingPolicy | None = None,
 ) -> tuple[str, ...]:
-    fragments = set(DIRECT_DOMAIN_FRAGMENT_ROOTS)
+    active_policy = _resolved_policy(policy)
+    fragments = set(active_policy.taste.direct_domain_fragment_roots)
     for fragment in extra_fragments:
         normalized = normalize_name(fragment)
         if len(normalized) >= 4:
@@ -110,10 +46,10 @@ def build_blocked_fragments(
             normalized = normalize_name(term)
             if len(normalized) < 4:
                 continue
-            if normalized in DIRECT_DOMAIN_FRAGMENT_ROOTS:
+            if normalized in active_policy.taste.direct_domain_fragment_roots:
                 fragments.add(normalized)
                 continue
-            if any(root in normalized for root in DIRECT_DOMAIN_FRAGMENT_ROOTS if len(root) >= 5):
+            if any(root in normalized for root in active_policy.taste.direct_domain_fragment_roots if len(root) >= 5):
                 fragments.add(normalized)
     return tuple(sorted(fragments))
 
@@ -140,27 +76,32 @@ def _open_syllable_ratio_proxy(name: str) -> float:
     return openish / len(chunks)
 
 
-def _contains_bad_cluster(name: str) -> tuple[bool, str]:
+def _contains_bad_cluster(name: str, shape: NameShapePolicy) -> tuple[bool, str]:
     normalized = normalize_name(name)
     for run in CONSONANT_RUN_RE.findall(normalized):
-        if len(run) >= 4:
+        if len(run) > int(shape.max_consonant_run):
             return True, run
-        if len(run) == 3 and run in BANNED_TRIPLE_CLUSTERS:
+        if (
+            len(run) == 3
+            and int(shape.max_consonant_run) >= 3
+            and run in set(shape.banned_triple_clusters)
+            and run not in set(shape.safe_triple_clusters)
+        ):
             return True, run
     return False, ""
 
 
-def _matching_suffix(name: str) -> str:
+def _matching_suffix(name: str, taste: TastePolicy) -> str:
     normalized = normalize_name(name)
-    for suffix in sorted(BANNED_SUFFIX_FAMILIES, key=len, reverse=True):
+    for suffix in sorted(taste.banned_suffix_families, key=len, reverse=True):
         if normalized.endswith(suffix) and len(normalized) - len(suffix) >= 3:
             return suffix
     return ""
 
 
-def _matching_morpheme(name: str) -> str:
+def _matching_morpheme(name: str, taste: TastePolicy) -> str:
     normalized = normalize_name(name)
-    for morpheme in sorted(BANNED_MORPHEMES, key=len, reverse=True):
+    for morpheme in sorted(taste.banned_morphemes, key=len, reverse=True):
         if morpheme in normalized:
             return morpheme
     return ""
@@ -202,27 +143,35 @@ def _leading_fragment_hit(name: str, blocked_fragments: tuple[str, ...]) -> str:
     return ""
 
 
-def _generic_safe_opening(name: str) -> str:
+def _generic_safe_opening(name: str, taste: TastePolicy) -> str:
     normalized = normalize_name(name)
-    for opening in GENERIC_SAFE_OPENINGS:
+    for opening in taste.generic_safe_openings:
         if normalized.startswith(opening) and len(normalized) - len(opening) >= 2:
             return opening
     return ""
 
 
-def _exact_generic_word_hit(name: str) -> str:
+def _exact_generic_word_hit(name: str, taste: TastePolicy) -> str:
     normalized = normalize_name(name)
-    if normalized in EXACT_GENERIC_WORDS:
+    if normalized in set(taste.exact_generic_words):
         return normalized
     return ""
 
 
-def evaluate_name(name: str, *, blocked_fragments: tuple[str, ...] = ()) -> TasteDecision:
+def evaluate_name(
+    name: str,
+    *,
+    blocked_fragments: tuple[str, ...] = (),
+    policy: NamingPolicy | None = None,
+) -> TasteDecision:
+    active_policy = _resolved_policy(policy)
+    shape = active_policy.shape
+    taste = active_policy.taste
     normalized = normalize_name(name)
     effective_blocked_fragments = tuple(
         sorted(
             {
-                *DIRECT_DOMAIN_FRAGMENT_ROOTS,
+                *taste.direct_domain_fragment_roots,
                 *(normalize_name(fragment) for fragment in blocked_fragments if normalize_name(fragment)),
             }
         )
@@ -230,7 +179,7 @@ def evaluate_name(name: str, *, blocked_fragments: tuple[str, ...] = ()) -> Tast
     hits: list[TasteRuleHit] = []
     penalty = 0.0
 
-    if not VALID_NAME_RE.fullmatch(normalized):
+    if not _is_valid_shape(normalized, shape):
         return TasteDecision(
             accepted=False,
             penalty=1.0,
@@ -238,18 +187,21 @@ def evaluate_name(name: str, *, blocked_fragments: tuple[str, ...] = ()) -> Tast
             hits=(TasteRuleHit(code="invalid_shape", details={"name": normalized}),),
         )
 
-    suffix = _matching_suffix(normalized)
+    suffix = _matching_suffix(normalized, taste)
     if suffix:
         hits.append(TasteRuleHit(code="banned_suffix_family", details={"suffix": suffix}))
 
-    morpheme = _matching_morpheme(normalized)
+    morpheme = _matching_morpheme(normalized, taste)
     if morpheme:
         hits.append(TasteRuleHit(code="banned_morpheme", details={"morpheme": morpheme}))
 
-    if re.search(r"(.)\1\1", normalized):
+    if bool(shape.reject_repeated_char_run) and re.search(
+        rf"(.)\1{{{max(1, int(shape.repeated_char_run_length)) - 1},}}",
+        normalized,
+    ):
         hits.append(TasteRuleHit(code="repeated_char_run", details={"name": normalized}))
 
-    bad_cluster, cluster = _contains_bad_cluster(normalized)
+    bad_cluster, cluster = _contains_bad_cluster(normalized, shape)
     if bad_cluster:
         hits.append(TasteRuleHit(code="cluster_overload", details={"cluster": cluster}))
 
@@ -261,34 +213,27 @@ def evaluate_name(name: str, *, blocked_fragments: tuple[str, ...] = ()) -> Tast
     if leading_fragment:
         hits.append(TasteRuleHit(code="clipped_literal_fragment", details={"fragment": leading_fragment}))
 
-    generic_opening = _generic_safe_opening(normalized)
+    generic_opening = _generic_safe_opening(normalized, taste)
     if generic_opening:
         hits.append(TasteRuleHit(code="generic_safe_opening", details={"opening": generic_opening}))
 
-    exact_word = _exact_generic_word_hit(normalized)
+    exact_word = _exact_generic_word_hit(normalized, taste)
     if exact_word:
         hits.append(TasteRuleHit(code="exact_generic_word", details={"word": exact_word}))
 
     vowel_ratio = _vowel_ratio(normalized)
-    if vowel_ratio < 0.28:
-        penalty += 0.25
+    if vowel_ratio < float(taste.min_vowel_ratio):
+        penalty += float(taste.low_vowel_penalty)
         hits.append(TasteRuleHit(code="low_vowel_ratio", details={"ratio": round(vowel_ratio, 3)}))
 
     open_ratio = _open_syllable_ratio_proxy(normalized)
-    if open_ratio < 0.34:
-        penalty += 0.2
+    if open_ratio < float(taste.min_open_syllable_ratio):
+        penalty += float(taste.low_open_syllable_penalty)
         hits.append(TasteRuleHit(code="low_open_syllable_ratio", details={"ratio": round(open_ratio, 3)}))
 
-    hard_reasons = {
-        "banned_morpheme",
-        "repeated_char_run",
-        "cluster_overload",
-        "direct_domain_fragment",
-        "clipped_literal_fragment",
-        "exact_generic_word",
-    }
+    hard_reasons = set(taste.reject_codes)
     reject = any(hit.code in hard_reasons for hit in hits)
-    if penalty >= 0.5:
+    if penalty >= float(taste.reject_penalty_threshold):
         reject = True
 
     reasons = tuple(hit.code for hit in hits)
@@ -306,6 +251,7 @@ def _filter_items(
     name_getter: Callable[[T], str],
     blocked_fragments: tuple[str, ...],
     annotate_seed: bool = False,
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[T], dict[str, object]]:
     kept: list[T] = []
     drops = Counter()
@@ -315,7 +261,7 @@ def _filter_items(
     for item in items:
         raw_name = name_getter(item)
         normalized = normalize_name(raw_name)
-        decision = evaluate_name(normalized, blocked_fragments=blocked_fragments)
+        decision = evaluate_name(normalized, blocked_fragments=blocked_fragments, policy=policy)
         if not decision.accepted:
             for reason in decision.reasons:
                 drops[reason] += 1
@@ -351,12 +297,14 @@ def filter_seed_candidates(
     candidates: list[SeedCandidate],
     *,
     blocked_fragments: tuple[str, ...],
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[SeedCandidate], dict[str, object]]:
     return _filter_items(
         candidates,
         name_getter=lambda item: item.name,
         blocked_fragments=blocked_fragments,
         annotate_seed=True,
+        policy=policy,
     )
 
 
@@ -364,11 +312,13 @@ def filter_names(
     names: list[str],
     *,
     blocked_fragments: tuple[str, ...],
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[str], dict[str, object]]:
     kept, report = _filter_items(
         names,
         name_getter=lambda item: str(item),
         blocked_fragments=blocked_fragments,
         annotate_seed=False,
+        policy=policy,
     )
     return [normalize_name(str(item)) for item in kept], report

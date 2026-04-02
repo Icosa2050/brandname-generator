@@ -1,7 +1,6 @@
 # ruff: noqa: E402
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -20,6 +19,25 @@ from brandpipe.validation_runtime import ProbeResult
 
 
 class ValidationQueueTests(unittest.TestCase):
+    def test_shortlist_validation_respects_explicit_empty_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "brandpipe.db"
+            config = ValidationConfig(checks=[])
+
+            with mock.patch("brandpipe.validation_queue.probe_check") as probe_check:
+                summary = run_shortlist_validation(db_path=db_path, candidate_names=["vantora"], config=config)
+
+            self.assertFalse(probe_check.called)
+            self.assertEqual(summary["validation_check_counts"], {})
+            self.assertEqual(summary["job_counts"]["completed"], 1)
+            with db.open_db(db_path) as conn:
+                jobs = db.list_validation_jobs(conn, run_id=int(summary["run_id"]))
+                self.assertEqual(len(jobs), 1)
+                self.assertEqual(str(jobs[0]["status"]), "completed")
+                candidate_row = db.list_candidates(conn, run_id=int(summary["run_id"]))[0]
+                result_rows = db.fetch_results_for_candidate(conn, candidate_id=int(candidate_row["id"]))
+                self.assertEqual(result_rows, [])
+
     def test_shortlist_validation_retries_rate_limited_probe_and_records_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = Path(tmp_dir) / "brandpipe.db"

@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -32,6 +33,8 @@ class TmviewTests(unittest.TestCase):
         self.assertEqual(normalize_alpha("Cord-Nix 42"), "cordnix42")
         self.assertEqual(normalize_alpha("Set 4 You"), "set4you")
         self.assertEqual(normalize_alpha("Andalé"), "andale")
+        self.assertEqual(normalize_alpha("VÆRMON"), "vaermon")
+        self.assertEqual(normalize_alpha("SØLKRIN"), "soelkrin")
 
     def test_build_tmview_url_embeds_basic_search(self) -> None:
         url = build_tmview_url("cordnix")
@@ -196,3 +199,30 @@ class TmviewTests(unittest.TestCase):
                     self.assertIsNotNone(runtime_root)
                 assert runtime_root is not None
                 self.assertFalse(runtime_root.exists())
+
+    def test_tmview_probe_warns_when_cleanup_steps_fail(self) -> None:
+        probe = TmviewProbe()
+        probe._context = mock.Mock()
+        probe._context.close.side_effect = RuntimeError("context down")
+        probe._browser = mock.Mock()
+        probe._browser.close.side_effect = RuntimeError("browser down")
+        probe._playwright = mock.Mock()
+        probe._playwright.stop.side_effect = RuntimeError("playwright down")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            probe._runtime_profile_root = Path(tmp_dir) / "runtime-profile"
+            probe._runtime_profile_root.mkdir()
+            with (
+                mock.patch("brandpipe.tmview.shutil.rmtree", side_effect=OSError("rmtree down")) as rmtree,
+                warnings.catch_warnings(record=True) as caught,
+            ):
+                warnings.simplefilter("always")
+                probe.__exit__(None, None, None)
+
+        self.assertEqual(rmtree.call_count, 1)
+        messages = [str(item.message) for item in caught]
+        self.assertEqual(len(messages), 4)
+        self.assertTrue(any("tmview_context_cleanup_failed" in message for message in messages))
+        self.assertTrue(any("tmview_browser_cleanup_failed" in message for message in messages))
+        self.assertTrue(any("tmview_playwright_cleanup_failed" in message for message in messages))
+        self.assertTrue(any("tmview_runtime_profile_cleanup_failed" in message for message in messages))

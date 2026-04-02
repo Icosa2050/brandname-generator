@@ -1,4 +1,4 @@
-# Runtime dependencies for optional branding pipeline capabilities.
+# Runtime dependencies for optional brandpipe capabilities.
 #
 # Core generation/validation flows are standard-library based.
 # Install this file to enable browser-based legal probes and zipf filtering.
