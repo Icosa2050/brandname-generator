@@ -1,0 +1,70 @@
+name: Brandpipe CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'scripts/brandpipe/**'
+      - 'scripts/cleanup_github_actions_runs.py'
+      - 'src/brandpipe/**'
+      - 'tests/**'
+      - 'resources/brandpipe/**'
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/brandpipe-ci.yml'
+  push:
+    branches:
+      - main
+      - 'codex/**'
+    paths:
+      - 'scripts/brandpipe/**'
+      - 'scripts/cleanup_github_actions_runs.py'
+      - 'src/brandpipe/**'
+      - 'tests/**'
+      - 'resources/brandpipe/**'
+      - 'requirements.txt'
+      - 'requirements-dev.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/brandpipe-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: brandpipe-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  brandpipe_checks:
+    name: Brandpipe Deterministic Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-dev.txt
+          python3 -m pip install -e .
+
+      - name: Python Syntax Check
+        run: |
+          python3 -m compileall \
+            src/brandpipe \
+            scripts/brandpipe \
+            scripts/cleanup_github_actions_runs.py
+
+      - name: Ruff Check
+        run: ruff check src/brandpipe tests scripts/brandpipe scripts/cleanup_github_actions_runs.py
+
+      - name: Pytest
+        env:
+          PYTHONPATH: src
+        run: python3 -m pytest
