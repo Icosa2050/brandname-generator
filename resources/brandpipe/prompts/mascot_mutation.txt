@@ -26,4 +26,4 @@ Style rules:
 - each candidate should feel like a different mascot world, not a spelling ladder
 
 Return JSON only with this schema:
-{"candidates":[{"display_name":"Ollama"}]}
+{"candidates":[{"display_name":"ExampleMascotName"}]}

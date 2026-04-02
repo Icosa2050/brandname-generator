@@ -26,4 +26,4 @@ Style rules:
 - keep the batch meaningfully varied; no clusters of near-synonyms
 
 Return JSON only with this schema:
-{"candidates":[{"display_name":"Discord"}]}
+{"candidates":[{"display_name":"EXAMPLE_NAME"}]}

@@ -26,4 +26,4 @@ Style rules:
 - make the batch internally varied; do not output tiny edits of the same root
 
 Return JSON only with this schema:
-{"candidates":[{"display_name":"incident.io"}]}
+{"candidates":[{"display_name":"brand.example"}]}
