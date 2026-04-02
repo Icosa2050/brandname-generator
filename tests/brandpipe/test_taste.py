@@ -10,6 +10,7 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from brandpipe.naming_policy import build_naming_policy
 from brandpipe.models import LexiconBundle, SeedCandidate
 from brandpipe.taste import build_blocked_fragments, evaluate_name, filter_names, filter_seed_candidates
 
@@ -89,6 +90,30 @@ class TasteTests(unittest.TestCase):
 
         self.assertEqual(filtered_names, ["baltera"])
         self.assertIn("clipped_literal_fragment", name_report["dropped"])
+
+    def test_evaluate_name_respects_relaxed_policy_overrides(self) -> None:
+        policy = build_naming_policy(
+            {
+                "shape": {
+                    "min_length": 5,
+                    "max_length": 16,
+                    "reject_repeated_char_run": False,
+                },
+                "taste": {
+                    "banned_morphemes": [],
+                    "generic_safe_openings": [],
+                    "exact_generic_words": [],
+                    "reject_codes": [],
+                    "min_vowel_ratio": 0.0,
+                    "min_open_syllable_ratio": 0.0,
+                    "reject_penalty_threshold": 99.0,
+                },
+            }
+        )
+
+        decision = evaluate_name("prexa", blocked_fragments=(), policy=policy)
+
+        self.assertTrue(decision.accepted)
 
 
 if __name__ == "__main__":

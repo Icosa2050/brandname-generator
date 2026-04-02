@@ -10,84 +10,32 @@ import re
 import socket
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error, parse, request
 
 from .diversity import filter_names, filter_seed_candidates, salvage_names
 from .generator_pool import generate_seed_pool, select_round_seed_candidates
 from .lexicon import build_lexicon
 from .models import Brief, IdeationConfig, IdeationRoleConfig, LexiconBundle, SeedCandidate
+from .naming_policy import DEFAULT_NAMING_POLICY, NamingPolicy
 from .pseudowords import generate_pseudoword_pool
 from .scoring import score_name_attractiveness
 from .taste import evaluate_name
 
 
-ROUND_SCHEMES: tuple[dict[str, str], ...] = (
+ROUND_SCHEMES: tuple[dict[str, str], ...] = tuple(
     {
-        "phonetic": "smooth",
-        "morphology": "blend",
-        "semantic": "trust",
-        "label": "open-a",
-        "preferred_endings": "a, an, el",
-        "structure": "2-3 syllables, liquid consonants, calm vowel flow",
-    },
-    {
-        "phonetic": "crisp",
-        "morphology": "coined",
-        "semantic": "precision",
-        "label": "ledger-e",
-        "preferred_endings": "e, en, el, et",
-        "structure": "harder stops, tighter rhythm, ledger-tool feeling",
-    },
-    {
-        "phonetic": "bright",
-        "morphology": "hybrid",
-        "semantic": "clarity",
-        "label": "signal-i",
-        "preferred_endings": "al, il, en, ar",
-        "structure": "clean stems, light vowels, elegant bright finish",
-    },
-    {
-        "phonetic": "grounded",
-        "morphology": "coined",
-        "semantic": "stability",
-        "label": "near-real",
-        "preferred_endings": "a, en, el, ar",
-        "structure": "near-real-word feel, gentle terminal consonant only if elegant",
-    },
-    {
-        "phonetic": "balanced",
-        "morphology": "blend",
-        "semantic": "fairness",
-        "label": "latin-ledger",
-        "preferred_endings": "el, ar, an, al",
-        "structure": "subtle latin flavor, calmer cadence, practical but graceful tone",
-    },
-    {
-        "phonetic": "resonant",
-        "morphology": "hybrid",
-        "semantic": "lift",
-        "label": "clean-lilt",
-        "preferred_endings": "a, el, en, al",
-        "structure": "lighter cadence, softer consonants, no q/x/z/j/v unless unavoidable",
-    },
+        "phonetic": scheme.phonetic,
+        "morphology": scheme.morphology,
+        "semantic": scheme.semantic,
+        "label": scheme.label,
+        "preferred_endings": scheme.preferred_endings,
+        "structure": scheme.structure,
+    }
+    for scheme in DEFAULT_NAMING_POLICY.prompts.round_schemes
 )
-ROLE_HINTS: dict[str, str] = {
-    "creative_divergence": "Push for non-obvious sound-shapes and broader semantic jumps while keeping the names pronounceable.",
-    "recombinator": "Use the seed pool and morphemes to recombine, splice, and refine stronger brandable forms.",
-    "contrarian": "Avoid the most literal naming path and search for angled, unexpected, but still commercially usable directions.",
-    "phonetic_explorer": "Search for fresh openings, rhythm shifts, and less crowded sound-shapes while staying sayable in English and major EU markets.",
-    "morpheme_hybridizer": "Fuse lexicon atoms into names that feel ownable and less namespace-crowded than direct near-real-word transmutations.",
-    "ending_diversifier": "Actively explore endings and cadences that widen the batch instead of returning another soft-latin family remix.",
-}
-ROLE_SCHEME_OFFSETS: dict[str, int] = {
-    "creative_divergence": 5,
-    "recombinator": 3,
-    "contrarian": 4,
-    "phonetic_explorer": 1,
-    "morpheme_hybridizer": 2,
-    "ending_diversifier": 0,
-}
+ROLE_HINTS: dict[str, str] = dict(DEFAULT_NAMING_POLICY.prompts.role_hints)
+ROLE_SCHEME_OFFSETS: dict[str, int] = dict(DEFAULT_NAMING_POLICY.prompts.role_scheme_offsets)
 OPENROUTER_MODEL_FALLBACKS: dict[str, str] = {
     "mistralai/mistral-small-creative": "moonshotai/kimi-k2.5",
 }
@@ -101,42 +49,22 @@ OPENROUTER_COMPLETION_CAP_PREFIXES: tuple[tuple[str, int], ...] = (
 OPENROUTER_RESPONSE_MODE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("google/gemini", ("json_object", "json_schema", "plain")),
 )
-VALID_NAME_RE = re.compile(r"^[a-z]{6,14}$")
 PSEUDOWORD_NON_FATAL_WARNINGS = frozenset({"insufficient_pseudoword_yield"})
-ENDING_FAMILY_RULES: tuple[tuple[str, str], ...] = (
-    ("aria", "aria"),
-    ("eria", "eria"),
-    ("ia", "ia"),
-    ("ea", "ea"),
-    ("en", "en"),
-    ("er", "er"),
-    ("el", "el"),
-    ("et", "et"),
-    ("is", "is"),
-    ("il", "il"),
-    ("in", "in"),
-    ("ix", "ix"),
-    ("ex", "ex"),
-    ("um", "um"),
-    ("an", "an"),
-    ("ar", "ar"),
-    ("a", "a"),
-    ("e", "e"),
-    ("i", "i"),
-    ("n", "n"),
-    ("r", "r"),
-    ("l", "l"),
-    ("s", "s"),
-    ("x", "x"),
-)
+ENDING_FAMILY_RULES: tuple[tuple[str, str], ...] = DEFAULT_NAMING_POLICY.prompts.ending_family_rules
 
 
 def normalize_alpha_name(raw: str) -> str:
     return re.sub(r"[^a-z]", "", str(raw or "").strip().lower())
 
 
-def is_valid_candidate_name(name: str) -> bool:
-    return bool(VALID_NAME_RE.fullmatch(str(name or "").strip()))
+def _resolved_policy(policy: NamingPolicy | None) -> NamingPolicy:
+    return policy or DEFAULT_NAMING_POLICY
+
+
+def is_valid_candidate_name(name: str, *, policy: NamingPolicy | None = None) -> bool:
+    active_policy = _resolved_policy(policy)
+    normalized = normalize_alpha_name(name)
+    return int(active_policy.shape.min_length) <= len(normalized) <= int(active_policy.shape.max_length)
 
 
 def load_prompt_template(path: str | Path | None) -> str:
@@ -196,11 +124,11 @@ def format_avoidance_block(avoidance_context: dict[str, object] | None) -> str:
         return ""
 
     lines = [
-        "Avoidance feedback:",
-        "Recent names failed because they were too close to existing namespaces. Move away from these phonetic neighborhoods, not just the exact strings.",
+        "Crowded neighborhoods from recent collisions:",
+        "Treat these as soft steering away from overused phonetic neighborhoods, not absolute bans. Move farther than a tiny prefix or suffix tweak.",
     ]
     if isinstance(local_examples, list) and local_examples:
-        lines.append("Must avoid local collision neighborhoods:")
+        lines.append("Recent local collision neighborhoods:")
         for item in local_examples[:6]:
             if not isinstance(item, dict):
                 continue
@@ -213,13 +141,13 @@ def format_avoidance_block(avoidance_context: dict[str, object] | None) -> str:
         prefixes = [str(value).strip() for value in (local_patterns.get("prefixes") or []) if str(value).strip()]
         suffixes = [str(value).strip() for value in (local_patterns.get("suffixes") or []) if str(value).strip()]
         if prefixes or suffixes:
-            lines.append("Pattern-level steering from recent local collisions:")
+            lines.append("Local collision patterns worth moving away from:")
             if prefixes:
-                lines.append("- avoid locally crowded opening clusters: " + ", ".join(f"{prefix}-" for prefix in prefixes[:4]))
+                lines.append("- move away from locally crowded opening clusters: " + ", ".join(f"{prefix}-" for prefix in prefixes[:4]))
             if suffixes:
-                lines.append("- avoid locally crowded ending families: " + ", ".join(f"-{suffix}" for suffix in suffixes[:4]))
+                lines.append("- move away from locally crowded ending families: " + ", ".join(f"-{suffix}" for suffix in suffixes[:4]))
     if isinstance(external_failures, dict) and external_failures:
-        lines.append("Prefer to avoid recent external failure neighborhoods:")
+        lines.append("Recent external failure neighborhoods:")
         for reason, examples in list(external_failures.items())[:4]:
             if not isinstance(examples, list):
                 continue
@@ -253,31 +181,31 @@ def format_avoidance_block(avoidance_context: dict[str, object] | None) -> str:
         prefixes = [str(value).strip() for value in (external_patterns.get("prefixes") or []) if str(value).strip()]
         suffixes = [str(value).strip() for value in (external_patterns.get("suffixes") or []) if str(value).strip()]
         if prefixes or suffixes:
-            lines.append("Pattern-level steering from recent external failures:")
+            lines.append("External collision patterns worth moving away from:")
             if prefixes:
-                lines.append("- avoid crowded opening clusters: " + ", ".join(f"{prefix}-" for prefix in prefixes[:4]))
+                lines.append("- move away from crowded opening clusters: " + ", ".join(f"{prefix}-" for prefix in prefixes[:4]))
             if suffixes:
-                lines.append("- avoid crowded terminal families: " + ", ".join(f"-{suffix}" for suffix in suffixes[:4]))
+                lines.append("- move away from crowded terminal families: " + ", ".join(f"-{suffix}" for suffix in suffixes[:4]))
     if isinstance(external_terminal_families, list):
         terminal_families = [str(value).strip() for value in external_terminal_families if str(value).strip()]
         if terminal_families:
-            lines.append("- avoid crowded soft terminal families: " + ", ".join(f"-{family}" for family in terminal_families[:4]))
+            lines.append("- move away from crowded terminal families: " + ", ".join(f"-{family}" for family in terminal_families[:4]))
     if isinstance(external_lead_hints, list):
         lead_hints = [str(value).strip() for value in external_lead_hints if str(value).strip()]
         if lead_hints:
-            lines.append("Avoid recently crowded lead fragments:")
+            lines.append("Recently crowded lead fragments:")
             lines.append("- " + ", ".join(f"{fragment}-" for fragment in lead_hints[:6]))
     if isinstance(external_tail_hints, list):
         tail_hints = [str(value).strip() for value in external_tail_hints if str(value).strip()]
         if tail_hints:
-            lines.append("Avoid recently crowded tail fragments:")
+            lines.append("Recently crowded tail fragments:")
             lines.append("- " + ", ".join(f"-{fragment}" for fragment in tail_hints[:6]))
     if isinstance(external_fragment_hints, list):
         fragment_hints = [str(value).strip() for value in external_fragment_hints if str(value).strip()]
         if fragment_hints and not (external_lead_hints or external_tail_hints):
-            lines.append("Avoid recently crowded lead fragments:")
+            lines.append("Recently crowded lead fragments:")
             lines.append("- " + ", ".join(f"{fragment}-" for fragment in fragment_hints[:6]))
-    lines.append("Do not rhyme with, echo, or lightly mutate the names above. Avoid one-syllable swaps, tiny prefix changes, and tiny ending changes.")
+    lines.append("Do not solve this with rhymes, echoes, or tiny mutations. Move materially away from these neighborhoods instead of changing one syllable or one ending.")
     return "\n".join(lines)
 
 
@@ -296,8 +224,7 @@ def format_positive_anchor_block(success_context: dict[str, object] | None) -> s
         lines.append("- recent keepers: " + ", ".join(names[:4]))
     if endings:
         lines.append("- rarer terminal shapes worth echoing in spirit: " + ", ".join(f"-{ending}" for ending in endings[:4]))
-    lines.append("Prefer 8-10 character shapes with a less generic final trigram than default startup-tech endings.")
-    lines.append("Do not copy, rhyme with, or lightly mutate these names.")
+    lines.append("Treat these as proof that less generic phonetic territory can work; do not copy, rhyme with, or lightly mutate them.")
     return "\n".join(lines)
 
 
@@ -354,6 +281,7 @@ def select_direct_seed_names(
     *,
     limit: int = 2,
     crowded_terminal_families: tuple[str, ...] = (),
+    policy: NamingPolicy | None = None,
 ) -> list[str]:
     archetype_rank = {
         "transmute": 0,
@@ -383,9 +311,9 @@ def select_direct_seed_names(
         normalized = normalize_alpha_name(candidate.name)
         if not normalized or normalized in seen:
             continue
-        if crowded_families and _ending_family(normalized) in crowded_families:
+        if crowded_families and _ending_family(normalized, policy=policy) in crowded_families:
             continue
-        attractiveness = score_name_attractiveness(normalized)
+        attractiveness = score_name_attractiveness(normalized, policy=policy)
         if attractiveness.status != "pass":
             continue
         if float(attractiveness.score_delta or 0.0) < 12.0:
@@ -397,13 +325,13 @@ def select_direct_seed_names(
     return names
 
 
-def _is_strong_positive_anchor(name: str) -> bool:
+def _is_strong_positive_anchor(name: str, *, policy: NamingPolicy | None = None) -> bool:
     normalized = normalize_alpha_name(name)
     if not normalized:
         return False
-    if not evaluate_name(normalized).accepted:
+    if not evaluate_name(normalized, policy=policy).accepted:
         return False
-    attractiveness = score_name_attractiveness(normalized)
+    attractiveness = score_name_attractiveness(normalized, policy=policy)
     if attractiveness.status != "pass":
         return False
     if float(attractiveness.score_delta or 0.0) < 18.0:
@@ -432,6 +360,7 @@ def sanitize_positive_anchor_context(
     seed_pool: list[SeedCandidate] | None = None,
     max_names: int = 4,
     min_names: int = 2,
+    policy: NamingPolicy | None = None,
 ) -> dict[str, object]:
     context = dict(success_context or {})
     clean_names: list[str] = []
@@ -441,7 +370,7 @@ def sanitize_positive_anchor_context(
         normalized = normalize_alpha_name(raw_name)
         if not normalized or normalized in seen_names:
             continue
-        if not _is_strong_positive_anchor(normalized):
+        if not _is_strong_positive_anchor(normalized, policy=policy):
             continue
         seen_names.add(normalized)
         clean_names.append(normalized)
@@ -630,12 +559,16 @@ def build_prompt(
     role_name: str = "creative_divergence",
     role_instructions: str = "",
     prompt_template: str = "",
+    policy: NamingPolicy | None = None,
 ) -> tuple[str, tuple[str, str, str]]:
-    scheme_index = (int(round_index) + ROLE_SCHEME_OFFSETS.get(role_name, 0)) % len(ROUND_SCHEMES)
-    scheme = ROUND_SCHEMES[scheme_index]
-    phonetic = scheme["phonetic"]
-    morphology = scheme["morphology"]
-    semantic = scheme["semantic"]
+    active_policy = _resolved_policy(policy)
+    prompt_policy = active_policy.prompts
+    schemes = prompt_policy.round_schemes or DEFAULT_NAMING_POLICY.prompts.round_schemes
+    scheme_index = (int(round_index) + prompt_policy.role_scheme_offsets.get(role_name, 0)) % len(schemes)
+    scheme = schemes[scheme_index]
+    phonetic = scheme.phonetic
+    morphology = scheme.morphology
+    semantic = scheme.semantic
     mode = (phonetic, morphology, semantic)
     role_context = _role_context_packet(context_packet, role_name)
     context_lines = render_context_lines(role_context)
@@ -681,9 +614,9 @@ def build_prompt(
         "phonetic": str(phonetic),
         "morphology": str(morphology),
         "semantic": str(semantic),
-        "scheme_label": scheme["label"],
-        "preferred_endings": scheme["preferred_endings"],
-        "structure": scheme["structure"],
+        "scheme_label": scheme.label,
+        "preferred_endings": scheme.preferred_endings,
+        "structure": scheme.structure,
         "context_block": str(context_block or "none\n"),
         "lexicon_block": str(lexicon_block or "none\n"),
         "seed_block": str(seed_block or "none\n"),
@@ -709,7 +642,9 @@ def build_prompt(
         return prompt.strip(), mode
 
     prompt = (
+        "This is the divergence phase for brand naming, not the evaluation phase.\n"
         "Generate app brand names for utility-cost settlement software.\n"
+        "Invent first. Do not optimize for professionalism, enterprise caution, domain safety, or trademark comfort in this step. Those checks happen later.\n"
         f"Scope: {scope}\n"
         f"Round: {round_index + 1}\n"
         f"Creative lens: {role_name}\n"
@@ -717,30 +652,27 @@ def build_prompt(
         f"Phonetic mode: {phonetic}\n"
         f"Morphology mode: {morphology}\n"
         f"Semantic mode: {semantic}\n"
-        f"Scheme label: {scheme['label']}\n"
-        f"Preferred endings: {scheme['preferred_endings']}\n"
-        f"Structure cues: {scheme['structure']}\n"
+        f"Scheme label: {scheme.label}\n"
+        f"Preferred endings: {scheme.preferred_endings}\n"
+        f"Structure cues: {scheme.structure}\n"
         f"{context_block}"
         f"{lexicon_block}"
         f"{seed_block}"
         f"{positive_anchor_block}"
         f"{avoidance_block}"
         f"{literal_fragment_block}"
-        f"Role guidance: {role_instructions or ROLE_HINTS.get(role_name, ROLE_HINTS['creative_divergence'])}\n"
+        f"Role guidance: {role_instructions or prompt_policy.role_hints.get(role_name, prompt_policy.role_hints.get('creative_divergence', ''))}\n"
         "Rules:\n"
-        "- lowercase latin letters only, 6-14 chars\n"
+        f"- lowercase latin letters only, {active_policy.shape.min_length}-{active_policy.shape.max_length} chars\n"
         "- no spaces, punctuation, digits\n"
-        "- do not end any name with the letter o\n"
-        "- de-prioritize saturated soft-latin tails like -ia, -ea, -aria, -eria, -thea unless the shape is unusually distinct\n"
-        "- avoid harsh synthetic fragments like vex, xen, trix, trex, splint, kest anywhere in the name\n"
-        "- avoid q, x, z, j, and heavy v unless the shape is exceptionally elegant and still easy to say aloud\n"
-        "- avoid literal trust/business stems like clar-, civic, trust, legal, secure, ledger\n"
-        "- avoid generic-safe openings like pre-, prec-, prim-, cora-, stati- that make names feel assembled or enterprise-generic\n"
-        "- use a spread of endings; avoid returning a whole batch with the same final sound\n"
-        "- if seed shapes are provided, mutate them or borrow their sound pattern; do not echo them unchanged\n"
+        "- invent first, validate later; prioritize phonetic novelty over category fit\n"
+        "- allow rounded endings, open syllables, uncommon letters, and unexpected sound-shapes when they remain pronounceable\n"
+        "- maximize variation across openings, middles, endings, cadence, and stress; do not collapse into one ending family\n"
+        "- treat crowded-neighborhood hints as soft steering, not absolute bans; move materially away from them instead of making tiny edits\n"
         "- do not clip literal business/source words into name fragments like priv-, parc-, ledg-, rent-, util-, settl-\n"
-        "- prefer calmer near-real-word shapes over aggressive pseudo-tech invention\n"
-        "- align with context packet priorities when provided\n"
+        "- avoid default corporate templates, near-dictionary safety moves, and obvious category compounds\n"
+        "- if seed shapes are provided, mutate beyond them or invert their rhythm; do not echo them unchanged\n"
+        "- align with context packet priorities when provided, but do not let seriousness flatten the phonetics\n"
         "- no availability claims (domain/store/trademark/social)\n"
         '- return JSON only with schema: {"candidates":[{"name":"string"}]}\n'
         "- no markdown, no prose, no additional keys\n"
@@ -771,42 +703,63 @@ def extract_json_object(raw: str) -> str | None:
     return None
 
 
-def parse_candidate_payload(raw_text: str) -> list[str]:
-    text = raw_text.strip()
+def _load_candidate_payload(raw_text: str) -> Any:
+    text = str(raw_text or "").strip()
     if not text:
-        return []
+        return None
     try:
-        payload: Any = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError:
         extracted = extract_json_object(text)
         if not extracted:
-            payload = None
-        else:
-            try:
-                payload = json.loads(extracted)
-            except json.JSONDecodeError:
-                payload = None
+            return None
+        try:
+            return json.loads(extracted)
+        except json.JSONDecodeError:
+            return None
 
-    source: list[Any] = []
+
+def _candidate_source(payload: Any) -> list[Any]:
     if isinstance(payload, dict):
         if isinstance(payload.get("candidates"), list):
-            source = list(payload["candidates"])
-        elif isinstance(payload.get("names"), list):
-            source = list(payload["names"])
-    elif isinstance(payload, list):
-        source = list(payload)
+            return list(payload["candidates"])
+        if isinstance(payload.get("names"), list):
+            return list(payload["names"])
+        return []
+    if isinstance(payload, list):
+        return list(payload)
+    return []
 
+
+def extract_candidate_names(
+    raw_text: str,
+    *,
+    candidate_keys: tuple[str, ...] = ("name", "candidate"),
+) -> list[str]:
+    payload = _load_candidate_payload(raw_text)
+    source = _candidate_source(payload)
     names: list[str] = []
     for item in source:
         raw_name: str | None = None
         if isinstance(item, str):
             raw_name = item
         elif isinstance(item, dict):
-            candidate_name = item.get("name") or item.get("candidate")
-            if isinstance(candidate_name, str):
-                raw_name = candidate_name
+            for key in candidate_keys:
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw_name = value
+                    break
         if raw_name is None:
             continue
+        display_name = str(raw_name).strip()
+        if display_name:
+            names.append(display_name)
+    return names
+
+
+def parse_candidate_payload(raw_text: str) -> list[str]:
+    names: list[str] = []
+    for raw_name in extract_candidate_names(raw_text):
         name = normalize_alpha_name(raw_name)
         if is_valid_candidate_name(name):
             names.append(name)
@@ -1030,7 +983,7 @@ def _post_json(
     return parsed, ""
 
 
-def call_openrouter_candidates(
+def _call_openrouter_candidates_with_schema(
     *,
     api_key: str,
     model: str,
@@ -1038,9 +991,11 @@ def call_openrouter_candidates(
     target_count: int,
     timeout_ms: int,
     strict_json: bool,
-    temperature: float = 0.8,
-    http_referer: str = "",
-    x_title: str = "",
+    temperature: float,
+    http_referer: str,
+    x_title: str,
+    schema_builder: Callable[[bool], dict[str, object]],
+    parse_candidates: Callable[[str], list[str]],
 ) -> tuple[list[str], dict[str, Any], str]:
     max_completion_tokens = _max_completion_tokens(model, target_count)
     base_body = {
@@ -1056,7 +1011,7 @@ def call_openrouter_candidates(
     attempt_payloads: dict[str, dict[str, object]] = {
         "json_schema": {
             **base_body,
-            "response_format": {"type": "json_schema", "json_schema": _candidate_schema(strict_json)},
+            "response_format": {"type": "json_schema", "json_schema": schema_builder(strict_json)},
             "provider": {"require_parameters": True},
         },
         "json_object": {
@@ -1115,7 +1070,7 @@ def call_openrouter_candidates(
         if parse_error:
             last_error = parse_error
             return [], last_usage, last_error
-        names = parse_candidate_payload(content)
+        names = parse_candidates(content)
         if names:
             return names, last_usage, ""
         last_error = "candidate_parse_failed"
@@ -1124,7 +1079,34 @@ def call_openrouter_candidates(
     return [], last_usage, last_error
 
 
-def call_openai_compat_candidates(
+def call_openrouter_candidates(
+    *,
+    api_key: str,
+    model: str,
+    prompt: str,
+    target_count: int,
+    timeout_ms: int,
+    strict_json: bool,
+    temperature: float = 0.8,
+    http_referer: str = "",
+    x_title: str = "",
+) -> tuple[list[str], dict[str, Any], str]:
+    return _call_openrouter_candidates_with_schema(
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        target_count=target_count,
+        timeout_ms=timeout_ms,
+        strict_json=strict_json,
+        temperature=temperature,
+        http_referer=http_referer,
+        x_title=x_title,
+        schema_builder=_candidate_schema,
+        parse_candidates=parse_candidate_payload,
+    )
+
+
+def _call_openai_compat_candidates_with_schema(
     *,
     api_key: str,
     base_url: str,
@@ -1132,7 +1114,9 @@ def call_openai_compat_candidates(
     prompt: str,
     timeout_ms: int,
     strict_json: bool,
-    temperature: float = 0.8,
+    temperature: float,
+    schema_builder: Callable[[bool], dict[str, object]],
+    parse_candidates: Callable[[str], list[str]],
 ) -> tuple[list[str], dict[str, Any], str]:
     root = _normalize_openai_compat_base_url(base_url)
     headers = {
@@ -1151,7 +1135,7 @@ def call_openai_compat_candidates(
     attempts: list[dict[str, object]] = [
         {
             **base_body,
-            "response_format": {"type": "json_schema", "json_schema": _candidate_schema(strict_json)},
+            "response_format": {"type": "json_schema", "json_schema": schema_builder(strict_json)},
         },
         {
             **base_body,
@@ -1184,13 +1168,36 @@ def call_openai_compat_candidates(
         if parse_error:
             last_error = parse_error
             return [], last_usage, last_error
-        names = parse_candidate_payload(content)
+        names = parse_candidates(content)
         if names:
             return names, usage, ""
         last_error = "candidate_parse_failed"
         if index + 1 >= len(attempts):
             return [], last_usage, last_error
     return [], last_usage, last_error
+
+
+def call_openai_compat_candidates(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout_ms: int,
+    strict_json: bool,
+    temperature: float = 0.8,
+) -> tuple[list[str], dict[str, Any], str]:
+    return _call_openai_compat_candidates_with_schema(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        prompt=prompt,
+        timeout_ms=timeout_ms,
+        strict_json=strict_json,
+        temperature=temperature,
+        schema_builder=_candidate_schema,
+        parse_candidates=parse_candidate_payload,
+    )
 
 
 def _call_provider_for_role(
@@ -1267,9 +1274,10 @@ def estimate_usage_cost_usd(
     return round(in_cost + out_cost, 8)
 
 
-def _ending_family(name: str) -> str:
+def _ending_family(name: str, *, policy: NamingPolicy | None = None) -> str:
     lowered = str(name or "").strip().lower()
-    for suffix, family in ENDING_FAMILY_RULES:
+    active_policy = _resolved_policy(policy)
+    for suffix, family in active_policy.prompts.ending_family_rules:
         if lowered.endswith(suffix):
             return family
     return lowered[-2:] if len(lowered) >= 2 else lowered
@@ -1282,6 +1290,7 @@ def _extend_diverse_names(
     family_counts: dict[str, int],
     round_names: list[str],
     per_family_cap: int,
+    policy: NamingPolicy | None = None,
 ) -> tuple[int, int]:
     filtered_end_o = 0
     filtered_family = 0
@@ -1289,7 +1298,7 @@ def _extend_diverse_names(
         if name.endswith("o"):
             filtered_end_o += 1
             continue
-        family = _ending_family(name)
+        family = _ending_family(name, policy=policy)
         if family_counts.get(family, 0) >= max(1, per_family_cap):
             filtered_family += 1
             continue
@@ -1362,6 +1371,7 @@ def generate_candidates(
         blocked_fragments_extra=avoidance_fragment_hints,
         avoid_terms_extra=avoidance_names,
         crowded_terminal_families=avoidance_terminal_families,
+        policy=config.naming_policy,
     )
     blocked_fragments = tuple(str(value) for value in (seed_pool_report.get("blocked_fragments") or []))
     literal_fragment_hints = _literal_fragment_hints(blocked_fragments)
@@ -1369,12 +1379,14 @@ def generate_candidates(
         seed_pool,
         avoid_terms=tuple(sorted({*lexicon_bundle.avoid_terms, *avoidance_names})),
         saturation_limit=max(1, int(config.seed_saturation_limit)),
+        policy=config.naming_policy,
     )
     if not seed_pool:
         raise RuntimeError("generator seed pool failed: no_seed_candidates")
     positive_anchor_context = sanitize_positive_anchor_context(
         success_context,
         seed_pool=seed_pool,
+        policy=config.naming_policy,
     )
     round_seed_sizes: list[int] = []
     role_reports: list[dict[str, object]] = []
@@ -1392,6 +1404,7 @@ def generate_candidates(
             round_seed_candidates,
             limit=min(2, max(1, len(round_seed_candidates))),
             crowded_terminal_families=avoidance_terminal_families,
+            policy=config.naming_policy,
         )
         round_seed_sizes.append(len(round_seed_candidates))
         total_weight = sum(max(1, role.weight) for role in role_cfgs)
@@ -1413,8 +1426,12 @@ def generate_candidates(
                 avoidance_context=avoidance_context,
                 literal_fragments=literal_fragment_hints,
                 role_name=role_cfg.role,
-                role_instructions=ROLE_HINTS.get(role_cfg.role, ROLE_HINTS["creative_divergence"]),
+                role_instructions=config.naming_policy.prompts.role_hints.get(
+                    role_cfg.role,
+                    config.naming_policy.prompts.role_hints.get("creative_divergence", ""),
+                ),
                 prompt_template=prompt_template,
+                policy=config.naming_policy,
             )
             started_at = time.perf_counter()
             role_names, usage, err = _call_provider_for_role(
@@ -1496,6 +1513,7 @@ def generate_candidates(
             family_counts=family_counts,
             round_names=round_outputs,
             per_family_cap=max(1, int(config.per_family_cap)),
+            policy=config.naming_policy,
         )
         filtered_end_o += round_filtered_end_o
         filtered_family += round_filtered_family
@@ -1510,12 +1528,14 @@ def generate_candidates(
         lead_fragment_limit=max(0, int(config.local_filter_lead_fragment_limit)),
         lead_fragment_length=max(2, int(config.local_filter_lead_fragment_length)),
         lead_skeleton_limit=max(0, int(config.local_filter_lead_skeleton_limit)),
+        policy=config.naming_policy,
     )
     if not filtered_names and names:
         filtered_names, salvage_report = salvage_names(
             names,
             avoid_terms=lexicon_bundle.avoid_terms,
             limit=min(3, max(1, len(names))),
+            policy=config.naming_policy,
         )
         diversity_report = {
             **diversity_report,

@@ -1,0 +1,29 @@
+Generate exactly {target_count} brand candidates in the `smooth_blend` family.
+
+Product core: {product_core}
+Target users: {target_users}
+Trust signals: {trust_signals}
+Market: {language_market}
+Notes: {notes}
+Creative angle: {role_name}
+Role guidance: {role_instructions}
+
+Positive anchors:
+{positive_anchor_block}
+
+Avoidance context:
+{avoidance_block}
+
+Retry feedback:
+{retry_feedback_block}
+
+Style rules:
+- output alpha-only coined names; no spaces, dots, or hyphens
+- prioritize mouthfeel, cadence, and phonetic identity over category literalness
+- vary openings, middles, endings, and stress patterns across the batch
+- allow rounded vowels, unusual blends, and non-corporate endings when pronounceable
+- avoid sterile consulting names, obvious category compounds, and dictionary-safe near-words
+- do not collapse into one ending family or one consonant cluster
+
+Return JSON only with this schema:
+{"candidates":[{"display_name":"nimbalyst"}]}

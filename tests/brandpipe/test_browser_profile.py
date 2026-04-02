@@ -110,10 +110,15 @@ class _FakeSyncPlaywright:
 class BrowserProfileTests(unittest.TestCase):
     def test_resolve_profile_dir_defaults_to_repo_output_path(self) -> None:
         self.assertEqual(resolve_profile_dir(), DEFAULT_PROFILE_DIR)
+        self.assertEqual(
+            DEFAULT_PROFILE_DIR,
+            ROOT_DIR / "test_outputs" / "brandpipe" / "validate" / "playwright-profile",
+        )
 
-    def test_build_target_url_supports_google_and_brave_search(self) -> None:
-        self.assertIn("google.com/search", build_target_url(url="", engine="google", query="brand pipe"))
+    def test_build_target_url_supports_brave_search_only(self) -> None:
         self.assertIn("search.brave.com/search", build_target_url(url="", engine="brave", query="brand pipe"))
+        with self.assertRaisesRegex(ValueError, "unsupported_browser_engine"):
+            build_target_url(url="", engine="google", query="brand pipe")
 
     def test_resolve_chrome_executable_uses_explicit_existing_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -173,7 +178,7 @@ class BrowserProfileTests(unittest.TestCase):
                     result = warm_browser_profile(
                         profile_dir=profile_dir,
                         chrome_executable=chrome_executable,
-                        engine="google",
+                        engine="brave",
                         query="brandpipe warm",
                     )
 

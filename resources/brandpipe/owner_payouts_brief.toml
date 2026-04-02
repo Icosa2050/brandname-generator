@@ -1,8 +1,0 @@
-[[briefs]]
-slug = "owner-payouts"
-product_core = "owner payout and rental income distribution software for small portfolios"
-target_users = ["portfolio owners", "property managers"]
-trust_signals = ["trust", "precision", "calm"]
-forbidden_directions = ["bank clones", "wealth clones", "fintech gloss"]
-language_market = "de-en"
-notes = "prefer clean coined names over corporate finance tone"

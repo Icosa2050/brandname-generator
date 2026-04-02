@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from .naming_policy import DEFAULT_VALIDATION_NAME_SHAPE_POLICY, NameShapePolicy, NamingPolicy
+
+DEFAULT_FAMILY_MIX_PROFILE = "family_default"
+
 
 class RunStatus(StrEnum):
     CREATED = "created"
@@ -19,6 +23,44 @@ class ResultStatus(StrEnum):
     UNAVAILABLE = "unavailable"
     UNSUPPORTED = "unsupported"
     SKIPPED = "skipped"
+
+
+class JobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ErrorKind(StrEnum):
+    NONE = "none"
+    RATE_LIMITED = "rate_limited"
+    TIMEOUT = "timeout"
+    TRANSPORT = "transport"
+    HTTP = "http"
+    PARSE = "parse"
+    CHALLENGE = "challenge"
+    BROWSER = "browser"
+    CONFIG = "config"
+    UNEXPECTED = "unexpected"
+
+
+class NameFamily(StrEnum):
+    LITERAL_TLD_HACK = "literal_tld_hack"
+    SMOOTH_BLEND = "smooth_blend"
+    MASCOT_MUTATION = "mascot_mutation"
+    RUNIC_FORGE = "runic_forge"
+    CONTRARIAN_DICTIONARY = "contrarian_dictionary"
+    BRUTALIST_UTILITY = "brutalist_utility"
+
+
+class SurfacePolicy(StrEnum):
+    ALPHA_LOWER = "alpha_lower"
+    DOTTED_LOWER = "dotted_lower"
+    HYPHENATED_LOWER = "hyphenated_lower"
+    MIXED_CASE_ALPHA = "mixed_case_alpha"
+    TITLE_SPACED_ACRONYM = "title_spaced_acronym"
 
 
 @dataclass(frozen=True)
@@ -49,6 +91,18 @@ class SeedCandidate:
     source_score: float = 0.0
     taste_penalty: float = 0.0
     taste_reasons: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class SurfacedCandidate:
+    display_name: str
+    name_normalized: str
+    family: NameFamily
+    surface_policy: SurfacePolicy
+    source_kind: str = "ideation"
+    source_detail: str = ""
+    family_score: float = 0.0
+    family_rank: int = 0
 
 
 @dataclass(frozen=True)
@@ -113,6 +167,12 @@ class IdeationConfig:
     output_price_per_1k: float = 0.0
     pseudoword: PseudowordConfig | None = None
     roles: tuple[IdeationRoleConfig, ...] = ()
+    family_mix_profile: str = DEFAULT_FAMILY_MIX_PROFILE
+    family_prompt_template_files: dict[str, Path] = field(default_factory=dict)
+    family_llm_retry_limit: int = 2
+    family_quotas: dict[str, int] = field(default_factory=dict)
+    late_fusion_min_per_family: int = 1
+    naming_policy: NamingPolicy = field(default_factory=NamingPolicy)
 
 
 @dataclass(frozen=True)
@@ -125,13 +185,13 @@ class ValidationConfig:
     timeout_s: float = 8.0
     company_top: int = 8
     social_unavailable_fail_threshold: int = 3
-    web_search_order: str = "brave,google_cse,duckduckgo"
+    web_search_order: str = "serper,brave"
     web_brave_top: int = 8
     web_brave_api_env: str = "BRAVE_API_KEY"
     web_brave_country: str = "DE"
     web_brave_search_lang: str = "en"
     web_google_top: int = 8
-    web_google_api_env: str = "GOOGLE_CSE_API_KEY"
+    web_google_api_env: str = "SERPER_API_KEY"
     web_google_cx_env: str = "GOOGLE_CSE_CX"
     web_google_gl: str = "de"
     web_google_hl: str = "en"
@@ -142,6 +202,7 @@ class ValidationConfig:
     tm_registry_top: int = 12
     tmview_profile_dir: str = ""
     tmview_chrome_executable: str = ""
+    name_shape_policy: NameShapePolicy = field(default_factory=lambda: DEFAULT_VALIDATION_NAME_SHAPE_POLICY)
 
 
 @dataclass(frozen=True)
@@ -178,3 +239,10 @@ class RankedCandidate:
     unsupported_count: int
     warning_count: int
     decision: str
+    display_name: str = ""
+    name_normalized: str = ""
+    family: NameFamily = NameFamily.SMOOTH_BLEND
+    surface_policy: SurfacePolicy = SurfacePolicy.ALPHA_LOWER
+    family_score: float = 0.0
+    family_rank: int = 0
+    rank_position: int = 0

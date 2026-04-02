@@ -3,58 +3,11 @@ from __future__ import annotations
 import re
 
 from .models import LexiconBundle, SeedCandidate
+from .naming_policy import DEFAULT_NAMING_POLICY, NamingPolicy
 from .taste import build_blocked_fragments
 
 
-VALID_NAME_RE = re.compile(r"^[a-z]{6,14}$")
 VOWEL_RE = re.compile(r"[aeiouy]")
-COMMON_ENDINGS: tuple[str, ...] = (
-    "ity",
-    "tion",
-    "ment",
-    "ness",
-    "able",
-    "ance",
-    "ence",
-    "ward",
-    "ship",
-    "ing",
-    "ers",
-    "er",
-    "or",
-    "al",
-    "el",
-    "en",
-    "ia",
-    "us",
-)
-RETARGET_ENDINGS: tuple[str, ...] = (
-    "a",
-    "an",
-    "ara",
-    "ela",
-    "el",
-    "en",
-    "era",
-    "ia",
-    "ien",
-    "ine",
-    "ora",
-)
-ROLEISH_TERMS = {
-    "customer",
-    "customers",
-    "landlord",
-    "landlords",
-    "manager",
-    "managers",
-    "owner",
-    "owners",
-    "tenant",
-    "tenants",
-    "user",
-    "users",
-}
 VOWEL_SWAPS: dict[str, tuple[str, ...]] = {
     "a": ("e", "o"),
     "e": ("a", "i"),
@@ -69,23 +22,33 @@ def _normalize(value: str) -> str:
     return re.sub(r"[^a-z]", "", str(value or "").strip().lower())
 
 
-def _is_pronounceable(name: str) -> bool:
+def _resolved_policy(policy: NamingPolicy | None) -> NamingPolicy:
+    return policy or DEFAULT_NAMING_POLICY
+
+
+def _is_pronounceable(name: str, *, policy: NamingPolicy | None = None) -> bool:
+    active_policy = _resolved_policy(policy)
+    shape = active_policy.shape
     normalized = _normalize(name)
-    if not VALID_NAME_RE.fullmatch(normalized):
+    if not (int(shape.min_length) <= len(normalized) <= int(shape.max_length)):
         return False
-    if re.search(r"(.)\1\1", normalized):
+    if bool(shape.reject_repeated_char_run) and re.search(
+        rf"(.)\1{{{max(1, int(shape.repeated_char_run_length)) - 1},}}",
+        normalized,
+    ):
         return False
-    if re.search(r"[^aeiouy]{4,}", normalized):
+    if re.search(rf"[^aeiouy]{{{max(2, int(shape.max_consonant_run)) + 1},}}", normalized):
         return False
     if not VOWEL_RE.search(normalized):
         return False
     return True
 
 
-def _candidate_stems(bundle: LexiconBundle) -> list[str]:
+def _candidate_stems(bundle: LexiconBundle, *, policy: NamingPolicy | None = None) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
-    blocked_fragments = set(build_blocked_fragments(bundle))
+    active_policy = _resolved_policy(policy)
+    blocked_fragments = set(build_blocked_fragments(bundle, policy=active_policy))
     source_pool = [*bundle.modifiers[:10], *bundle.associative_terms[:14], *bundle.morphemes[:20]]
     for raw in source_pool:
         normalized = _normalize(raw)
@@ -93,10 +56,10 @@ def _candidate_stems(bundle: LexiconBundle) -> list[str]:
             continue
         if normalized in blocked_fragments:
             continue
-        if normalized in ROLEISH_TERMS:
+        if normalized in set(active_policy.surface.roleish_terms):
             continue
         variants = {normalized}
-        for ending in COMMON_ENDINGS:
+        for ending in active_policy.surface.transmute_common_endings:
             if normalized.endswith(ending) and len(normalized) - len(ending) >= 4:
                 variants.add(normalized[: -len(ending)])
         for variant in sorted(variants, key=len, reverse=True):
@@ -115,8 +78,10 @@ def _score_name(name: str, ingredients: tuple[str, ...]) -> float:
     score = 0.55
     if 6 <= len(normalized) <= 10:
         score += 0.15
-    if normalized[-1:] in {"a", "e", "n", "l", "r", "s"}:
+    if normalized[-1:] in {"a", "e", "n", "l", "r", "s", "o", "u", "m"}:
         score += 0.08
+    if normalized.endswith(("oo", "ou", "io", "um", "or")):
+        score += 0.05
     if len(re.findall(r"[aeiouy]+", normalized)) in {2, 3}:
         score += 0.12
     if len({part[:1] for part in ingredients if part}) > 1:
@@ -124,9 +89,9 @@ def _score_name(name: str, ingredients: tuple[str, ...]) -> float:
     return round(score, 4)
 
 
-def _make_seed(name: str, ingredients: tuple[str, ...]) -> SeedCandidate | None:
+def _make_seed(name: str, ingredients: tuple[str, ...], *, policy: NamingPolicy | None = None) -> SeedCandidate | None:
     normalized = _normalize(name)
-    if not _is_pronounceable(normalized):
+    if not _is_pronounceable(normalized, policy=policy):
         return None
     return SeedCandidate(
         name=normalized,
@@ -136,11 +101,11 @@ def _make_seed(name: str, ingredients: tuple[str, ...]) -> SeedCandidate | None:
     )
 
 
-def _retarget_endings(stem: str) -> list[str]:
+def _retarget_endings(stem: str, *, policy: NamingPolicy | None = None) -> list[str]:
     variants: list[str] = []
     trimmed = re.sub(r"[aeiouy]+$", "", stem)
     base = trimmed if len(trimmed) >= 4 else stem
-    for ending in RETARGET_ENDINGS:
+    for ending in _resolved_policy(policy).surface.transmute_retarget_endings:
         candidate = base + ending
         if candidate != stem:
             variants.append(candidate)
@@ -177,8 +142,13 @@ def _base_forms(stem: str) -> list[str]:
     return [base for base in bases if len(base) >= 4 and not (base in seen or seen.add(base))]
 
 
-def generate_transmute_candidates(bundle: LexiconBundle, *, limit: int) -> list[SeedCandidate]:
-    stems = _candidate_stems(bundle)
+def generate_transmute_candidates(
+    bundle: LexiconBundle,
+    *,
+    limit: int,
+    policy: NamingPolicy | None = None,
+) -> list[SeedCandidate]:
+    stems = _candidate_stems(bundle, policy=policy)
     seen: set[str] = set()
     grouped: list[list[SeedCandidate]] = []
     for stem in stems:
@@ -186,11 +156,11 @@ def generate_transmute_candidates(bundle: LexiconBundle, *, limit: int) -> list[
         base_forms = _base_forms(stem)
         variants: list[str] = []
         for base in base_forms:
-            variants.extend(_retarget_endings(base))
+            variants.extend(_retarget_endings(base, policy=policy))
             for shifted in _shift_vowel(base):
-                variants.extend(_retarget_endings(shifted))
+                variants.extend(_retarget_endings(shifted, policy=policy))
         for variant in variants:
-            seed = _make_seed(variant, (stem,))
+            seed = _make_seed(variant, (stem,), policy=policy)
             if seed is None or seed.name in seen:
                 continue
             if any(term in seed.name for term in bundle.avoid_terms if len(term) >= 4):

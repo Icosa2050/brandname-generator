@@ -1,0 +1,29 @@
+Generate exactly {target_count} brand candidates in the `mascot_mutation` family.
+
+Product core: {product_core}
+Target users: {target_users}
+Trust signals: {trust_signals}
+Market: {language_market}
+Notes: {notes}
+Creative angle: {role_name}
+Role guidance: {role_instructions}
+
+Positive anchors:
+{positive_anchor_block}
+
+Avoidance context:
+{avoidance_block}
+
+Retry feedback:
+{retry_feedback_block}
+
+Style rules:
+- start from vivid creatures, objects, or characters and mutate them into names
+- output one-token surfaced names; no spaces, dots, or hyphens
+- weird is good, cute-corporate is bad
+- favor specificity over generic “power animals”; think odd mascots, not lion/eagle nonsense
+- do not emit ordinary SaaS blends or business words with a mascot pasted on top
+- each candidate should feel like a different mascot world, not a spelling ladder
+
+Return JSON only with this schema:
+{"candidates":[{"display_name":"ExampleMascotName"}]}

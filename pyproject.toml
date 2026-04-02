@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brandpipe"
 version = "0.1.0"
-description = "Clean-slate branding pipeline CLI"
+description = "Brandpipe generation and validation CLI"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -21,3 +21,8 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["src"]
+testpaths = ["tests"]

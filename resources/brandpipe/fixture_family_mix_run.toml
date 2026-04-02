@@ -1,0 +1,25 @@
+[run]
+title = "fixture-family-mix-run"
+db_path = "../../test_outputs/brandpipe/run/fixture_family_mix_run/brandpipe.db"
+
+[brief]
+product_core = "incident response signal coordination software"
+target_users = ["operators", "responders"]
+trust_signals = ["clarity", "speed", "composure"]
+language_market = "global"
+notes = "Explore multiple naming families without collapsing everything into one smooth invented-word lane."
+
+[ideation]
+provider = "fixture"
+fixture_input = "fixture_candidates.json"
+family_mix_profile = "family_default"
+family_llm_retry_limit = 2
+late_fusion_min_per_family = 1
+family_quotas = { literal_tld_hack = 4, smooth_blend = 4, mascot_mutation = 4, runic_forge = 4, contrarian_dictionary = 4, brutalist_utility = 4 }
+
+[validation]
+checks = ["tm_cheap"]
+
+[export]
+out_csv = "../../test_outputs/brandpipe/run/fixture_family_mix_run/finalists_{run_id}.csv"
+top_n = 20

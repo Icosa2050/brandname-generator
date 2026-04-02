@@ -10,7 +10,9 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from brandpipe.ranking import rank_candidates
+from brandpipe.models import NameFamily, SurfacePolicy
+from brandpipe.naming_policy import build_naming_policy
+from brandpipe.ranking import rank_candidate_surfaces, rank_candidates
 from brandpipe.scoring import build_attractiveness_result, score_name_attractiveness
 
 
@@ -56,6 +58,20 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(result.status, "warn")
         self.assertIn("literal_signal_fragment", result.reasons)
 
+    def test_attractiveness_respects_policy_override_for_generic_opening(self) -> None:
+        policy = build_naming_policy(
+            {
+                "attractiveness": {
+                    "generic_safe_openings": [],
+                    "literal_signal_fragments": [],
+                }
+            }
+        )
+
+        result = score_name_attractiveness("preceral", policy=policy)
+
+        self.assertNotIn("generic_safe_opening", result.reasons)
+
     def test_build_attractiveness_result_uses_candidate_result_contract(self) -> None:
         result = build_attractiveness_result("sollaren")
 
@@ -75,6 +91,54 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(ranked[0].decision, "candidate")
         self.assertEqual(ranked[1].name, "chardlen")
         self.assertEqual(ranked[1].decision, "watch")
+
+    def test_runic_forge_ranking_prefers_forged_corridor_over_generic_fantasy_tail(self) -> None:
+        ranked = rank_candidate_surfaces(
+            candidates=[
+                {
+                    "display_name": "KYLRAX",
+                    "name_normalized": "kylrax",
+                    "family": NameFamily.RUNIC_FORGE.value,
+                    "surface_policy": SurfacePolicy.MIXED_CASE_ALPHA.value,
+                },
+                {
+                    "display_name": "VÆRMON",
+                    "name_normalized": "vaermon",
+                    "family": NameFamily.RUNIC_FORGE.value,
+                    "surface_policy": SurfacePolicy.MIXED_CASE_ALPHA.value,
+                },
+            ],
+            results_by_name={},
+            min_per_family=1,
+        )
+
+        self.assertEqual(ranked[0].display_name, "VÆRMON")
+        self.assertEqual(ranked[1].display_name, "KYLRAX")
+        self.assertGreater(ranked[0].family_score, ranked[1].family_score)
+
+    def test_runic_forge_ranking_penalizes_marker_stacking_and_harsh_clusters(self) -> None:
+        ranked = rank_candidate_surfaces(
+            candidates=[
+                {
+                    "display_name": "QYLDAR",
+                    "name_normalized": "qyldar",
+                    "family": NameFamily.RUNIC_FORGE.value,
+                    "surface_policy": SurfacePolicy.MIXED_CASE_ALPHA.value,
+                },
+                {
+                    "display_name": "VÆRMON",
+                    "name_normalized": "vaermon",
+                    "family": NameFamily.RUNIC_FORGE.value,
+                    "surface_policy": SurfacePolicy.MIXED_CASE_ALPHA.value,
+                },
+            ],
+            results_by_name={},
+            min_per_family=1,
+        )
+
+        self.assertEqual(ranked[0].display_name, "VÆRMON")
+        self.assertEqual(ranked[1].display_name, "QYLDAR")
+        self.assertGreater(ranked[0].family_score, ranked[1].family_score)
 
 
 if __name__ == "__main__":

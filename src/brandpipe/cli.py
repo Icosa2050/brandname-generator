@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
-from .batch import run_batch
 from .browser_profile import run_browser_profile_smoke, warm_browser_profile
 from . import db
-from .pipeline import export_ranked_csv, load_config, recheck_pending_web, recheck_tmview, run_pipeline
+from .pipeline import export_ranked_csv, recheck_pending_web, recheck_tmview
+from .run_cli import run_config_command
 from .tmview import probe_names as probe_tmview_names, write_results_json as write_tmview_results_json
+from .validate_cli import build_validate_parser, run_validate_command
 
 
 def _status_command(
@@ -55,7 +55,7 @@ def _export_command(db_path: Path, run_id: int, out_csv: Path, top_n: int) -> in
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Clean-slate branding pipeline CLI")
+    parser = argparse.ArgumentParser(description="Brandpipe generation and validation CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     init_db = sub.add_parser("init-db", help="Create or migrate the SQLite database")
@@ -64,11 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Run the linear pipeline from a TOML config")
     run.add_argument("--config", required=True, help="Run config TOML path")
 
-    run_batch_parser = sub.add_parser("run-batch", help="Run a batch of briefs using one template config")
-    run_batch_parser.add_argument("--template-config", required=True, help="Template run config TOML path")
-    run_batch_parser.add_argument("--briefs-file", required=True, help="Batch briefs file (.toml, .json, .jsonl)")
-    run_batch_parser.add_argument("--batch-id", default="", help="Optional explicit batch id")
-    run_batch_parser.add_argument("--stop-on-error", action="store_true", help="Stop the batch on the first failed brief")
+    build_validate_parser(sub)
 
     status = sub.add_parser("status", help="Show run status")
     status.add_argument("--db", required=True, help="SQLite path")
@@ -110,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     browser_smoke.add_argument("--profile-dir", default="", help="Dedicated browser profile directory")
     browser_smoke.add_argument("--chrome-executable", default="", help="Optional Chrome executable path override")
     browser_smoke.add_argument("--url", default="", help="Explicit URL to open")
-    browser_smoke.add_argument("--engine", choices=["google", "brave"], default="google", help="Search engine when --query is used")
+    browser_smoke.add_argument("--engine", choices=["brave"], default="brave", help="Search engine when --query is used")
     browser_smoke.add_argument("--query", default="", help="Optional search query for a search smoke")
     browser_smoke.add_argument("--headed", action="store_true", help="Run with a visible browser window")
     browser_smoke.add_argument("--timeout-ms", type=int, default=30000, help="Navigation timeout")
@@ -120,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     browser_warmup.add_argument("--profile-dir", default="", help="Dedicated browser profile directory")
     browser_warmup.add_argument("--chrome-executable", default="", help="Optional Chrome executable path override")
     browser_warmup.add_argument("--url", default="", help="Explicit URL to open")
-    browser_warmup.add_argument("--engine", choices=["google", "brave"], default="google", help="Search engine when --query is used")
+    browser_warmup.add_argument("--engine", choices=["brave"], default="brave", help="Search engine when --query is used")
     browser_warmup.add_argument("--query", default="", help="Optional search query for a search warmup")
     browser_warmup.add_argument("--timeout-ms", type=int, default=30000, help="Navigation timeout")
     browser_warmup.add_argument("--settle-ms", type=int, default=1500, help="Post-load settle delay")
@@ -149,23 +145,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"db={db_path}")
         return 0
     if args.command == "run":
-        config_path = Path(args.config).expanduser().resolve()
-        load_config(config_path)
-        run_pipeline(config_path)
+        run_config_command(args.config)
         return 0
-    if args.command == "run-batch":
-        summary = run_batch(
-            template_config_path=Path(args.template_config).expanduser().resolve(),
-            briefs_file_path=Path(args.briefs_file).expanduser().resolve(),
-            batch_id=args.batch_id,
-            stop_on_error=bool(args.stop_on_error),
-        )
-        print(f"batch_id={summary['batch_id']}")
-        print(f"requested={summary['requested']} succeeded={summary['succeeded']} failed={summary['failed']}")
-        print(f"run_ids={','.join(str(item) for item in summary['run_ids'])}")
-        if summary["failures"]:
-            print(f"failures={json.dumps(summary['failures'], ensure_ascii=False)}")
-        return 0
+    if args.command == "validate":
+        return run_validate_command(args)
     if args.command == "status":
         return _status_command(
             Path(args.db).expanduser().resolve(),

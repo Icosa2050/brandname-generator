@@ -1,4 +1,4 @@
-"""Clean-slate branding pipeline."""
+"""Brandpipe generation and validation pipeline."""
 
 __all__ = ["__version__"]
 

@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +18,7 @@ from brandpipe.tmview import (
     TmviewProbeResult,
     _parse_result_count,
     _title_exact_or_near,
+    _title_match_mode,
     build_tmview_url,
     clone_tmview_runtime_profile,
     normalize_alpha,
@@ -27,9 +29,12 @@ from brandpipe.tmview import (
 
 
 class TmviewTests(unittest.TestCase):
-    def test_normalize_alpha_strips_non_letters(self) -> None:
-        self.assertEqual(normalize_alpha("Cord-Nix 42"), "cordnix")
+    def test_normalize_alpha_preserves_digits(self) -> None:
+        self.assertEqual(normalize_alpha("Cord-Nix 42"), "cordnix42")
+        self.assertEqual(normalize_alpha("Set 4 You"), "set4you")
         self.assertEqual(normalize_alpha("Andalé"), "andale")
+        self.assertEqual(normalize_alpha("VÆRMON"), "vaermon")
+        self.assertEqual(normalize_alpha("SØLKRIN"), "soelkrin")
 
     def test_build_tmview_url_embeds_basic_search(self) -> None:
         url = build_tmview_url("cordnix")
@@ -51,7 +56,7 @@ class TmviewTests(unittest.TestCase):
     def test_probe_names_normalizes_and_deduplicates(self) -> None:
         fake_results = [
             TmviewProbeResult(
-                name="cordnix",
+                name="Cordnix",
                 url="https://example.test",
                 query_ok=True,
                 source="tmview_playwright",
@@ -67,8 +72,8 @@ class TmviewTests(unittest.TestCase):
             results = probe_names(names=["Cordnix", "cordnix"], profile_dir="/tmp/tmview-profile")
 
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].name, "cordnix")
-        probe.probe_name.assert_called_once_with("cordnix")
+        self.assertEqual(results[0].name, "Cordnix")
+        probe.probe_name.assert_called_once_with("Cordnix", normalized_name="cordnix")
 
     def test_probe_names_passes_explicit_nice_class_to_probe(self) -> None:
         fake_results = [
@@ -104,6 +109,10 @@ class TmviewTests(unittest.TestCase):
         self.assertEqual(_title_exact_or_near("hearthvex", "HEALTHDEX THE BUSINESS HEALTH INDEX"), (False, True))
         self.assertEqual(_title_exact_or_near("cirani", "CIRANO"), (False, True))
         self.assertEqual(_title_exact_or_near("andalen", "Andalé"), (False, True))
+
+    def test_title_match_mode_distinguishes_surface_and_normalized_exact(self) -> None:
+        self.assertEqual(_title_match_mode("incident.io", "incidentio", "INCIDENT.IO"), ("surface_exact", False))
+        self.assertEqual(_title_match_mode("incident.io", "incidentio", "Incidentio"), ("normalized_exact", False))
 
     def test_write_results_json_persists_payload(self) -> None:
         result = TmviewProbeResult(
@@ -190,3 +199,30 @@ class TmviewTests(unittest.TestCase):
                     self.assertIsNotNone(runtime_root)
                 assert runtime_root is not None
                 self.assertFalse(runtime_root.exists())
+
+    def test_tmview_probe_warns_when_cleanup_steps_fail(self) -> None:
+        probe = TmviewProbe()
+        probe._context = mock.Mock()
+        probe._context.close.side_effect = RuntimeError("context down")
+        probe._browser = mock.Mock()
+        probe._browser.close.side_effect = RuntimeError("browser down")
+        probe._playwright = mock.Mock()
+        probe._playwright.stop.side_effect = RuntimeError("playwright down")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            probe._runtime_profile_root = Path(tmp_dir) / "runtime-profile"
+            probe._runtime_profile_root.mkdir()
+            with (
+                mock.patch("brandpipe.tmview.shutil.rmtree", side_effect=OSError("rmtree down")) as rmtree,
+                warnings.catch_warnings(record=True) as caught,
+            ):
+                warnings.simplefilter("always")
+                probe.__exit__(None, None, None)
+
+        self.assertEqual(rmtree.call_count, 1)
+        messages = [str(item.message) for item in caught]
+        self.assertEqual(len(messages), 4)
+        self.assertTrue(any("tmview_context_cleanup_failed" in message for message in messages))
+        self.assertTrue(any("tmview_browser_cleanup_failed" in message for message in messages))
+        self.assertTrue(any("tmview_playwright_cleanup_failed" in message for message in messages))
+        self.assertTrue(any("tmview_runtime_profile_cleanup_failed" in message for message in messages))

@@ -8,14 +8,12 @@ import re
 from .blend import best_blend
 from .diversity import filter_seed_candidates as filter_diverse_seed_candidates
 from .models import LexiconBundle, SeedCandidate
+from .naming_policy import DEFAULT_NAMING_POLICY, NamingPolicy
 from .taste import build_blocked_fragments, filter_seed_candidates as filter_taste_seed_candidates
 from .transmute import generate_transmute_candidates
 
 
-VALID_NAME_RE = re.compile(r"^[a-z]{6,14}$")
 VOWEL_RE = re.compile(r"[aeiouy]")
-HARDSTOP_ENDINGS = ("r", "n", "l", "m", "s")
-SOURCE_UNIT_ENDINGS = ("ability", "ibility", "ity", "ment", "tion", "ness", "ance", "ence", "ship", "ward")
 
 
 def _terminal_family(name: str) -> str:
@@ -23,15 +21,24 @@ def _terminal_family(name: str) -> str:
     return normalized[-2:] if len(normalized) >= 2 else normalized
 
 
-def _is_pronounceable(name: str) -> bool:
+def _resolved_policy(policy: NamingPolicy | None) -> NamingPolicy:
+    return policy or DEFAULT_NAMING_POLICY
+
+
+def _is_pronounceable(name: str, *, policy: NamingPolicy | None = None) -> bool:
+    active_policy = _resolved_policy(policy)
+    shape = active_policy.shape
     lowered = str(name or "").strip().lower()
-    if not VALID_NAME_RE.fullmatch(lowered):
+    if not (int(shape.min_length) <= len(lowered) <= int(shape.max_length)):
         return False
-    if lowered.endswith("o"):
+    if bool(shape.disallow_terminal_o) and lowered.endswith("o"):
         return False
-    if re.search(r"[^aeiouy]{4,}", lowered):
+    if re.search(rf"[^aeiouy]{{{max(2, int(shape.max_consonant_run)) + 1},}}", lowered):
         return False
-    if re.search(r"(.)\1\1", lowered):
+    if bool(shape.reject_repeated_char_run) and re.search(
+        rf"(.)\1{{{max(1, int(shape.repeated_char_run_length)) - 1},}}",
+        lowered,
+    ):
         return False
     return True
 
@@ -60,11 +67,18 @@ def _score_name(name: str, ingredients: tuple[str, ...]) -> float:
     return round(score, 4)
 
 
-def _make_seed(name: str, archetype: str, ingredients: tuple[str, ...]) -> SeedCandidate | None:
+def _make_seed(
+    name: str,
+    archetype: str,
+    ingredients: tuple[str, ...],
+    *,
+    policy: NamingPolicy | None = None,
+) -> SeedCandidate | None:
+    active_policy = _resolved_policy(policy)
     normalized = _normalize(name)
-    if not _is_pronounceable(normalized):
+    if not _is_pronounceable(normalized, policy=active_policy):
         return None
-    if any(char in normalized for char in "qxzj"):
+    if any(char in normalized for char in set(active_policy.shape.harsh_letters)):
         return None
     return SeedCandidate(
         name=normalized,
@@ -74,8 +88,9 @@ def _make_seed(name: str, archetype: str, ingredients: tuple[str, ...]) -> SeedC
     )
 
 
-def _seed_source_units(bundle: LexiconBundle, *, include_modifiers: bool) -> list[str]:
-    blocked = set(build_blocked_fragments(bundle))
+def _seed_source_units(bundle: LexiconBundle, *, include_modifiers: bool, policy: NamingPolicy | None = None) -> list[str]:
+    active_policy = _resolved_policy(policy)
+    blocked = set(build_blocked_fragments(bundle, policy=active_policy))
     raw_pool: list[str] = []
     if include_modifiers:
         raw_pool.extend(bundle.modifiers[:8])
@@ -89,14 +104,14 @@ def _seed_source_units(bundle: LexiconBundle, *, include_modifiers: bool) -> lis
         if len(normalized) < 4 or normalized in blocked:
             continue
         variants = {normalized}
-        for ending in SOURCE_UNIT_ENDINGS:
+        for ending in active_policy.surface.source_unit_endings:
             if normalized.endswith(ending) and len(normalized) - len(ending) >= 4:
                 variants.add(normalized[: -len(ending)])
         for candidate in sorted(variants, key=len):
             unit = _normalize(candidate)
             if len(unit) < 4 or len(unit) > 6:
                 continue
-            if any(char in unit for char in "qxzj"):
+            if any(char in unit for char in set(active_policy.shape.harsh_letters)):
                 continue
             if unit.endswith(("k", "d", "x")):
                 continue
@@ -107,15 +122,20 @@ def _seed_source_units(bundle: LexiconBundle, *, include_modifiers: bool) -> lis
     return units
 
 
-def generate_compound_candidates(bundle: LexiconBundle, *, limit: int) -> list[SeedCandidate]:
-    left_pool = _seed_source_units(bundle, include_modifiers=True)
-    right_pool = _seed_source_units(bundle, include_modifiers=False)
+def generate_compound_candidates(
+    bundle: LexiconBundle,
+    *,
+    limit: int,
+    policy: NamingPolicy | None = None,
+) -> list[SeedCandidate]:
+    left_pool = _seed_source_units(bundle, include_modifiers=True, policy=policy)
+    right_pool = _seed_source_units(bundle, include_modifiers=False, policy=policy)
     candidates: list[SeedCandidate] = []
     seen: set[str] = set()
     for left, right in product(left_pool, right_pool):
         if left == right:
             continue
-        seed = _make_seed(left + right, "compound", (left, right))
+        seed = _make_seed(left + right, "compound", (left, right), policy=policy)
         if seed is None or seed.name in seen:
             continue
         if len(left) >= 5 and len(right) >= 5 and seed.name.startswith(left) and seed.name.endswith(right):
@@ -129,8 +149,13 @@ def generate_compound_candidates(bundle: LexiconBundle, *, limit: int) -> list[S
     return candidates
 
 
-def generate_blend_candidates(bundle: LexiconBundle, *, limit: int) -> list[SeedCandidate]:
-    source_pool = _seed_source_units(bundle, include_modifiers=True)
+def generate_blend_candidates(
+    bundle: LexiconBundle,
+    *,
+    limit: int,
+    policy: NamingPolicy | None = None,
+) -> list[SeedCandidate]:
+    source_pool = _seed_source_units(bundle, include_modifiers=True, policy=policy)
     candidates: list[SeedCandidate] = []
     seen: set[str] = set()
     for left, right in product(source_pool, source_pool):
@@ -139,7 +164,7 @@ def generate_blend_candidates(bundle: LexiconBundle, *, limit: int) -> list[Seed
         blended = best_blend(left, right)
         if blended is None:
             continue
-        seed = _make_seed(blended, "blend", (left, right))
+        seed = _make_seed(blended, "blend", (left, right), policy=policy)
         if seed is None or seed.name in seen:
             continue
         if any(term in seed.name for term in bundle.avoid_terms if len(term) >= 4):
@@ -156,11 +181,12 @@ def generate_coined_candidates(
     *,
     pseudowords: list[str],
     limit: int,
+    policy: NamingPolicy | None = None,
 ) -> list[SeedCandidate]:
     candidates: list[SeedCandidate] = []
     seen: set[str] = set()
     for raw in pseudowords:
-        seed = _make_seed(raw, "coined", (raw,))
+        seed = _make_seed(raw, "coined", (raw,), policy=policy)
         if seed is None or seed.name in seen:
             continue
         if any(term in seed.name for term in bundle.avoid_terms if len(term) >= 4):
@@ -172,7 +198,7 @@ def generate_coined_candidates(
     return candidates
 
 
-def _hardstop_variants(raw: str) -> list[str]:
+def _hardstop_variants(raw: str, *, policy: NamingPolicy | None = None) -> list[str]:
     normalized = _normalize(raw)
     if len(normalized) < 4:
         return []
@@ -191,10 +217,11 @@ def _hardstop_variants(raw: str) -> list[str]:
 
     seen: set[str] = set()
     ordered_bases = [base for base in bases if not (base in seen or seen.add(base))]
+    hardstop_endings = _resolved_policy(policy).surface.hardstop_endings
     for index, base in enumerate(ordered_bases):
         if base[-1:] not in "aeiouy":
             variants.append(base)
-        ending = HARDSTOP_ENDINGS[(sum(ord(char) for char in base) + index) % len(HARDSTOP_ENDINGS)]
+        ending = hardstop_endings[(sum(ord(char) for char in base) + index) % len(hardstop_endings)]
         if base[-1:] in "aeiouy":
             mutated = (base[:-1] + ending) if len(base) >= 5 else (base + ending)
         elif len(base) <= 7:
@@ -211,13 +238,14 @@ def generate_hardstop_candidates(
     *,
     pseudowords: list[str],
     limit: int,
+    policy: NamingPolicy | None = None,
 ) -> list[SeedCandidate]:
     source_pool = list(pseudowords[:12]) + list(bundle.morphemes[:16]) + list(bundle.associative_terms[:10])
     candidates: list[SeedCandidate] = []
     seen: set[str] = set()
     for raw in source_pool:
-        for variant in _hardstop_variants(raw):
-            seed = _make_seed(variant, "hardstop", (raw,))
+        for variant in _hardstop_variants(raw, policy=policy):
+            seed = _make_seed(variant, "hardstop", (raw,), policy=policy)
             if seed is None or seed.name in seen:
                 continue
             if any(term in seed.name for term in bundle.avoid_terms if len(term) >= 4):
@@ -237,6 +265,7 @@ def generate_seed_pool(
     blocked_fragments_extra: tuple[str, ...] = (),
     avoid_terms_extra: tuple[str, ...] = (),
     crowded_terminal_families: tuple[str, ...] = (),
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[SeedCandidate], dict[str, object]]:
     raw_limit = max(total_limit, math.ceil(total_limit * 1.5))
     budgets = {
@@ -254,11 +283,11 @@ def generate_seed_pool(
         ),
     }
     pool = (
-        generate_transmute_candidates(bundle, limit=budgets["transmute"])
-        + generate_compound_candidates(bundle, limit=budgets["compound"])
-        + generate_blend_candidates(bundle, limit=budgets["blend"])
-        + generate_hardstop_candidates(bundle, pseudowords=pseudowords, limit=budgets["hardstop"])
-        + generate_coined_candidates(bundle, pseudowords=pseudowords, limit=budgets["coined"])
+        generate_transmute_candidates(bundle, limit=budgets["transmute"], policy=policy)
+        + generate_compound_candidates(bundle, limit=budgets["compound"], policy=policy)
+        + generate_blend_candidates(bundle, limit=budgets["blend"], policy=policy)
+        + generate_hardstop_candidates(bundle, pseudowords=pseudowords, limit=budgets["hardstop"], policy=policy)
+        + generate_coined_candidates(bundle, pseudowords=pseudowords, limit=budgets["coined"], policy=policy)
     )
     deduped_all: list[SeedCandidate] = []
     seen: set[str] = set()
@@ -275,10 +304,11 @@ def generate_seed_pool(
             continue
         seen.add(candidate.name)
         deduped_all.append(candidate)
-    blocked_fragments = build_blocked_fragments(bundle, extra_fragments=blocked_fragments_extra)
+    blocked_fragments = build_blocked_fragments(bundle, extra_fragments=blocked_fragments_extra, policy=policy)
     deduped_all, taste_report = filter_taste_seed_candidates(
         deduped_all,
         blocked_fragments=blocked_fragments,
+        policy=policy,
     )
     deduped = sorted(
         deduped_all,
@@ -296,6 +326,7 @@ def generate_seed_pool(
         deduped,
         avoid_terms=avoid_terms,
         saturation_limit=1,
+        policy=policy,
     )
     counts = Counter(candidate.archetype for candidate in deduped)
     total = max(1, len(deduped))

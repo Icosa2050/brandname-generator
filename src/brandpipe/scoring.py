@@ -4,28 +4,13 @@ from dataclasses import dataclass
 import re
 
 from .models import CandidateResult, ResultStatus
+from .naming_policy import AttractivenessPolicy, DEFAULT_NAMING_POLICY, NamingPolicy
 from .taste import normalize_name
 
 
 VOWELS = frozenset("aeiouy")
 SYLLABLE_LIKE_RE = re.compile(r"[^aeiouy]*[aeiouy]+[^aeiouy]*")
-PLEASANT_ENDINGS: tuple[str, ...] = (
-    "a",
-    "an",
-    "ar",
-    "el",
-    "en",
-    "er",
-    "la",
-    "ra",
-    "ta",
-)
-HARSH_CHARS: tuple[str, ...] = ("x", "z", "q", "j")
-LITERAL_SIGNAL_FRAGMENTS: tuple[str, ...] = ("clar", "civic", "trust", "legal", "secur")
-GENERIC_SAFE_OPENINGS: tuple[str, ...] = ("pre", "prec", "prim", "cora", "stati")
-LIQUIDS = frozenset("lrmn")
 CONSONANT_RUN_RE = re.compile(r"[^aeiouy]+")
-LEADING_HARSH_RE = re.compile(r"^[qxzj]")
 
 
 @dataclass(frozen=True)
@@ -33,6 +18,10 @@ class AttractivenessAssessment:
     score_delta: float
     status: str
     reasons: tuple[str, ...]
+
+
+def _resolved_policy(policy: NamingPolicy | None) -> AttractivenessPolicy:
+    return (policy or DEFAULT_NAMING_POLICY).attractiveness
 
 
 def _vowel_ratio(name: str) -> float:
@@ -54,9 +43,9 @@ def _open_syllable_ratio_proxy(name: str) -> float:
     return openish / len(chunks)
 
 
-def _pleasant_ending(name: str) -> str:
+def _pleasant_ending(name: str, policy: AttractivenessPolicy) -> str:
     lowered = str(name or "").strip().lower()
-    for ending in sorted(PLEASANT_ENDINGS, key=len, reverse=True):
+    for ending in sorted(policy.pleasant_endings, key=len, reverse=True):
         if lowered.endswith(ending):
             return ending
     return ""
@@ -66,7 +55,7 @@ def _has_heavy_consonant_run(name: str) -> bool:
     return any(len(run) >= 3 for run in CONSONANT_RUN_RE.findall(name))
 
 
-def _looks_lexical_seam(name: str) -> bool:
+def _looks_lexical_seam(name: str, policy: AttractivenessPolicy) -> bool:
     chunks = [re.sub(r"[^a-z]", "", chunk) for chunk in SYLLABLE_LIKE_RE.findall(name)]
     if len(chunks) != 3:
         return False
@@ -75,17 +64,22 @@ def _looks_lexical_seam(name: str) -> bool:
         return False
     if middle not in {"al", "el"}:
         return False
-    return bool(_pleasant_ending(name))
+    return bool(_pleasant_ending(name, policy))
 
 
-def _generic_safe_opening(name: str) -> str:
-    for opening in GENERIC_SAFE_OPENINGS:
+def _generic_safe_opening(name: str, policy: AttractivenessPolicy) -> str:
+    for opening in policy.generic_safe_openings:
         if name.startswith(opening) and len(name) - len(opening) >= 2:
             return opening
     return ""
 
 
-def score_name_attractiveness(raw_name: str) -> AttractivenessAssessment:
+def score_name_attractiveness(
+    raw_name: str,
+    *,
+    policy: NamingPolicy | None = None,
+) -> AttractivenessAssessment:
+    active_policy = _resolved_policy(policy)
     name = normalize_name(raw_name)
     if not name:
         return AttractivenessAssessment(score_delta=-12.0, status="warn", reasons=("invalid_name",))
@@ -93,89 +87,91 @@ def score_name_attractiveness(raw_name: str) -> AttractivenessAssessment:
     score = 0.0
     reasons: list[str] = []
     length = len(name)
-    if 7 <= length <= 9:
-        score += 6.0
+    if int(active_policy.sweet_spot_min_length) <= length <= int(active_policy.sweet_spot_max_length):
+        score += float(active_policy.length_sweet_bonus)
         reasons.append("length_sweet_spot")
-    elif length in {6, 10}:
-        score += 3.0
+    elif length in set(active_policy.acceptable_lengths):
+        score += float(active_policy.length_ok_bonus)
         reasons.append("length_acceptable")
     else:
-        score -= 4.0
+        score -= float(active_policy.length_penalty)
         reasons.append("length_awkward")
 
     vowel_ratio = _vowel_ratio(name)
-    if 0.35 <= vowel_ratio <= 0.56:
-        score += 5.0
+    if float(active_policy.vowel_balance_min) <= vowel_ratio <= float(active_policy.vowel_balance_max):
+        score += float(active_policy.vowel_balance_bonus)
         reasons.append("vowel_balance")
-    elif 0.30 <= vowel_ratio <= 0.60:
-        score += 2.0
+    elif float(active_policy.vowel_balance_soft_min) <= vowel_ratio <= float(active_policy.vowel_balance_soft_max):
+        score += float(active_policy.vowel_balance_soft_bonus)
         reasons.append("vowel_balance_soft")
     else:
-        score -= 5.0
+        score -= float(active_policy.vowel_balance_penalty)
         reasons.append("vowel_balance_off")
 
     open_ratio = _open_syllable_ratio_proxy(name)
-    if open_ratio >= 0.55:
-        score += 4.0
+    if open_ratio >= float(active_policy.open_syllable_strong_min):
+        score += float(active_policy.open_syllable_bonus)
         reasons.append("open_syllables")
-    elif open_ratio >= 0.40:
-        score += 1.5
+    elif open_ratio >= float(active_policy.open_syllable_soft_min):
+        score += float(active_policy.open_syllable_soft_bonus)
         reasons.append("open_syllables_soft")
     else:
-        score -= 3.0
+        score -= float(active_policy.open_syllable_penalty)
         reasons.append("closed_syllables_heavy")
 
-    liquid_count = sum(1 for char in name if char in LIQUIDS)
-    if 1 <= liquid_count <= 3:
-        score += 3.0
+    liquids = frozenset(str(active_policy.liquids))
+    liquid_count = sum(1 for char in name if char in liquids)
+    if int(active_policy.liquid_support_min) <= liquid_count <= int(active_policy.liquid_support_max):
+        score += float(active_policy.liquid_support_bonus)
         reasons.append("liquid_support")
     elif liquid_count == 0:
-        score -= 2.0
+        score -= float(active_policy.liquid_absent_penalty)
         reasons.append("liquid_absent")
 
-    harsh_count = sum(1 for char in name if char in HARSH_CHARS)
+    harsh_chars = set(active_policy.harsh_chars)
+    harsh_count = sum(1 for char in name if char in harsh_chars)
     if harsh_count:
-        score -= 4.0 * harsh_count
+        score -= float(active_policy.harsh_penalty_per_char) * harsh_count
         reasons.append("harsh_letters")
-    if LEADING_HARSH_RE.search(name):
-        score -= 3.0
+    if name[:1] in harsh_chars:
+        score -= float(active_policy.leading_harsh_penalty)
         reasons.append("leading_harsh")
 
     if "v" in name:
-        score -= 1.0
+        score -= float(active_policy.sharp_v_penalty)
         reasons.append("sharp_v")
 
     if _has_heavy_consonant_run(name):
-        score -= 4.0
+        score -= float(active_policy.dense_consonant_run_penalty)
         reasons.append("dense_consonant_run")
 
-    ending = _pleasant_ending(name)
+    ending = _pleasant_ending(name, active_policy)
     if ending:
-        score += 2.0
+        score += float(active_policy.pleasant_ending_bonus)
         reasons.append("pleasant_ending")
 
-    if _looks_lexical_seam(name):
-        score -= 4.0
+    if _looks_lexical_seam(name, active_policy):
+        score -= float(active_policy.lexical_seam_penalty)
         reasons.append("lexical_seam")
 
-    if any(fragment in name for fragment in LITERAL_SIGNAL_FRAGMENTS):
-        score -= 5.0
+    if any(fragment in name for fragment in active_policy.literal_signal_fragments):
+        score -= float(active_policy.literal_signal_penalty)
         reasons.append("literal_signal_fragment")
 
-    generic_opening = _generic_safe_opening(name)
+    generic_opening = _generic_safe_opening(name, active_policy)
     if generic_opening:
-        score -= 5.0
+        score -= float(active_policy.generic_opening_penalty)
         reasons.append("generic_safe_opening")
 
     heavy_shape = "closed_syllables_heavy" in reasons or "dense_consonant_run" in reasons
     open_support = "open_syllables" in reasons or "open_syllables_soft" in reasons
     pleasant_support = "pleasant_ending" in reasons
     forced_warn = heavy_shape and not pleasant_support and not open_support
-    if "dense_consonant_run" in reasons and score < 12.0:
+    if "dense_consonant_run" in reasons and score < float(active_policy.dense_run_warn_below):
         forced_warn = True
-    if "vowel_balance_off" in reasons and score < 10.0:
+    if "vowel_balance_off" in reasons and score < float(active_policy.vowel_balance_warn_below):
         forced_warn = True
-    if "lexical_seam" in reasons and score < 18.0:
+    if "lexical_seam" in reasons and score < float(active_policy.lexical_seam_warn_below):
         forced_warn = True
     if "literal_signal_fragment" in reasons:
         forced_warn = True
@@ -183,10 +179,10 @@ def score_name_attractiveness(raw_name: str) -> AttractivenessAssessment:
         forced_warn = True
     if "leading_harsh" in reasons:
         forced_warn = True
-    if "harsh_letters" in reasons and score < 15.0:
+    if "harsh_letters" in reasons and score < float(active_policy.harsh_letters_warn_below):
         forced_warn = True
 
-    status = "pass" if score >= 7.5 and not forced_warn else "warn"
+    status = "pass" if score >= float(active_policy.pass_threshold) and not forced_warn else "warn"
     return AttractivenessAssessment(
         score_delta=round(score, 2),
         status=status,
@@ -194,8 +190,12 @@ def score_name_attractiveness(raw_name: str) -> AttractivenessAssessment:
     )
 
 
-def build_attractiveness_result(raw_name: str) -> CandidateResult:
-    assessment = score_name_attractiveness(raw_name)
+def build_attractiveness_result(
+    raw_name: str,
+    *,
+    policy: NamingPolicy | None = None,
+) -> CandidateResult:
+    assessment = score_name_attractiveness(raw_name, policy=policy)
     return CandidateResult(
         check_name="attractiveness",
         status=ResultStatus.PASS if assessment.status == "pass" else ResultStatus.WARN,

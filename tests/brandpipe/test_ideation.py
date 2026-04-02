@@ -72,11 +72,13 @@ class IdeationTests(unittest.TestCase):
         )
 
         self.assertNotEqual(creative_mode, recomb_mode)
-        self.assertIn("Preferred endings: a, el, en, al", creative_prompt)
-        self.assertIn("Preferred endings: a, en, el, ar", recomb_prompt)
+        self.assertIn("Scheme label: wildcard-open", creative_prompt)
+        self.assertIn("Preferred endings: a, o, u, is, on", creative_prompt)
+        self.assertIn("Scheme label: odd-familiar", recomb_prompt)
+        self.assertIn("Preferred endings: o, a, er, um, en", recomb_prompt)
         self.assertNotIn("product_core: utility-cost settlement software", recomb_prompt)
         self.assertIn("Recombine from lexicon cues and seed shapes.", recomb_prompt)
-        self.assertIn("avoid q, x, z, j", creative_prompt)
+        self.assertIn("maximize variation across openings, middles, endings, cadence, and stress", creative_prompt)
 
     def test_build_prompt_includes_literal_fragment_avoidance(self) -> None:
         prompt, _ = build_prompt(
@@ -122,7 +124,7 @@ class IdeationTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("Avoidance feedback:", block)
+        self.assertIn("Crowded neighborhoods from recent collisions:", block)
         self.assertIn("precen:precerix", block)
         self.assertIn("anch-, clar-", block)
         self.assertIn("-ela, -len", block)
@@ -157,7 +159,7 @@ class IdeationTests(unittest.TestCase):
         self.assertIn("Positive anchors from recent keepers:", block)
         self.assertIn("planchiv, covendel", block)
         self.assertIn("-hiv, -del", block)
-        self.assertIn("8-10 character shapes", block)
+        self.assertIn("Borrow their distinctiveness and distance from crowded namespace patterns", block)
 
     def test_sanitize_positive_anchor_context_does_not_backfill_from_seed_pool(self) -> None:
         sanitized = sanitize_positive_anchor_context(
@@ -388,7 +390,7 @@ class IdeationTests(unittest.TestCase):
             captured["seed_pool_total_limit"] = kwargs["total_limit"]
             return seed_pool, {"total": len(seed_pool), "blocked_fragments": []}
 
-        def fake_filter_seed_candidates(candidates, *, avoid_terms, saturation_limit):  # type: ignore[no-untyped-def]
+        def fake_filter_seed_candidates(candidates, *, avoid_terms, saturation_limit, **kwargs):  # type: ignore[no-untyped-def]
             captured["seed_saturation_limit"] = saturation_limit
             return list(candidates), {"kept": len(candidates), "saturation_limit": saturation_limit}
 
@@ -400,6 +402,7 @@ class IdeationTests(unittest.TestCase):
             lead_fragment_limit,
             lead_fragment_length,
             lead_skeleton_limit,
+            **kwargs,
         ):  # type: ignore[no-untyped-def]
             captured["name_saturation_limit"] = saturation_limit
             captured["lead_fragment_limit"] = lead_fragment_limit

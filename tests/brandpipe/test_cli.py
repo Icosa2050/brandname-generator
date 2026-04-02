@@ -45,7 +45,6 @@ class CliTests(unittest.TestCase):
     def test_cli_day_in_life_run_status_and_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            db_path = root / "brandpipe.db"
             fixture_path = root / "fixture.json"
             export_path = root / "export.csv"
             config_path = root / "run.toml"
@@ -69,7 +68,6 @@ class CliTests(unittest.TestCase):
                     f"""
                     [run]
                     title = "cli-flow"
-                    db_path = "{db_path}"
 
                     [brief]
                     product_core = "utility-cost settlement software"
@@ -77,13 +75,10 @@ class CliTests(unittest.TestCase):
                     [ideation]
                     provider = "fixture"
                     fixture_input = "{fixture_path}"
+                    family_quotas = {{ smooth_blend = 3 }}
 
                     [validation]
                     checks = ""
-
-                    [export]
-                    out_csv = "{root / 'finalists_{run_id}.csv'}"
-                    top_n = 10
                     """
                 ).strip()
                 + "\n",
@@ -92,15 +87,17 @@ class CliTests(unittest.TestCase):
 
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
-                init_code = main(["init-db", "--db", str(db_path)])
                 run_code = main(["run", "--config", str(config_path)])
-            self.assertEqual(init_code, 0)
             self.assertEqual(run_code, 0)
-
-            with db.open_db(db_path) as conn:
-                latest = conn.execute("SELECT MAX(id) AS run_id FROM runs").fetchone()
-                assert latest is not None
-                run_id = int(latest["run_id"])
+            output = stdout.getvalue().splitlines()
+            run_id = int(next(line.split("=", 1)[1] for line in output if line.startswith("run_id=")))
+            db_path = Path(next(line.split("=", 1)[1] for line in output if line.startswith("db=")))
+            task_root = Path(next(line.split("=", 1)[1] for line in output if line.startswith("task_root=")))
+            finalists_path = Path(next(line.split("=", 1)[1] for line in output if line.startswith("export_csv=")))
+            self.assertTrue((task_root / "manifest.json").exists())
+            self.assertEqual(db_path, task_root / "state" / "brandpipe.db")
+            self.assertEqual(finalists_path, task_root / "exports" / f"finalists_{run_id}.csv")
+            self.assertTrue(finalists_path.exists())
 
             status_stdout = io.StringIO()
             with contextlib.redirect_stdout(status_stdout):
@@ -131,6 +128,11 @@ class CliTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 3)
             self.assertEqual(rows[0]["rank"], "1")
+            manifest = json.loads((task_root / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["task"], "run")
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["db_path"], str(db_path))
+            self.assertEqual(manifest["child_runs"], [{"run_id": run_id}])
 
     def test_status_command_errors_for_missing_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -141,112 +143,83 @@ class CliTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "run not found: 99"):
                 main(["status", "--db", str(db_path), "--run-id", "99"])
 
-    def test_run_batch_command_executes_multiple_fixture_briefs(self) -> None:
+    def test_validate_command_writes_standardized_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            db_path = root / "brandpipe.db"
-            fixture_path = root / "fixture.json"
-            template_config_path = root / "template.toml"
-            briefs_path = root / "briefs.toml"
-            fixture_path.write_text(
-                textwrap.dedent(
-                    """
-                    {
-                      "candidates": [
-                        {"name": "vantora"},
-                        {"name": "baltera"}
-                      ]
-                    }
-                    """
-                ).strip()
-                + "\n",
-                encoding="utf-8",
-            )
-            template_config_path.write_text(
-                textwrap.dedent(
-                    f"""
-                    [run]
-                    title = "batch-fixture"
-                    db_path = "{db_path}"
-
-                    [brief]
-                    product_core = "placeholder"
-
-                    [ideation]
-                    provider = "fixture"
-                    fixture_input = "{fixture_path}"
-
-                    [validation]
-                    checks = ""
-
-                    [export]
-                    out_csv = "{root / 'finalists_{run_id}.csv'}"
-                    top_n = 10
-                    """
-                ).strip()
-                + "\n",
-                encoding="utf-8",
-            )
-            briefs_path.write_text(
-                textwrap.dedent(
-                    """
-                    [[briefs]]
-                    slug = "alpha"
-                    product_core = "utility-cost settlement software"
-                    target_users = ["private landlords"]
-
-                    [[briefs]]
-                    slug = "beta"
-                    product_core = "tenant ledger software"
-                    target_users = ["property managers"]
-                    """
-                ).strip()
-                + "\n",
-                encoding="utf-8",
-            )
+            out_dir = Path(tmp_dir) / "validate" / "reviewed-shortlist"
+            fake_results = {
+                1: [
+                    CandidateResult("domain", ResultStatus.PASS, 0.0, "", {}),
+                    CandidateResult("web", ResultStatus.PASS, 0.0, "", {}),
+                ],
+                2: [
+                    CandidateResult("domain", ResultStatus.PASS, 0.0, "", {}),
+                    CandidateResult("web", ResultStatus.WARN, -4.0, "web_near_warning", {}),
+                ],
+            }
 
             stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
+            with (
+                contextlib.redirect_stdout(stdout),
+                mock.patch(
+                    "brandpipe.validate_cli.run_shortlist_validation",
+                    return_value={
+                        "run_id": 17,
+                        "fingerprint": "validate-fixture",
+                        "created_new": True,
+                        "job_counts": {"completed": 2},
+                        "validation_status_counts": {"pass": 3, "warn": 1},
+                        "validation_check_counts": {"domain": 2, "web": 2},
+                    },
+                ),
+                mock.patch(
+                    "brandpipe.validate_cli._load_candidate_result_rows",
+                    return_value=({"vantora": 1, "meridel": 2}, fake_results),
+                ),
+            ):
                 exit_code = main(
                     [
-                        "run-batch",
-                        "--template-config",
-                        str(template_config_path),
-                        "--briefs-file",
-                        str(briefs_path),
-                        "--batch-id",
-                        "test-batch",
+                        "validate",
+                        "--names",
+                        "vantora,meridel",
+                        "--out-dir",
+                        str(out_dir),
+                        "--checks",
+                        "domain,web",
                     ]
                 )
 
             self.assertEqual(exit_code, 0)
             output = stdout.getvalue()
-            self.assertIn("batch_id=test-batch", output)
-            self.assertIn("requested=2 succeeded=2 failed=0", output)
+            task_root_line = next(line for line in output.splitlines() if line.startswith("task_root="))
+            task_root = Path(task_root_line.split("=", 1)[1].strip())
+            self.assertEqual(task_root.parent, out_dir.resolve())
+            self.assertTrue((task_root / "inputs").exists())
+            self.assertTrue((task_root / "logs").exists())
+            self.assertTrue((task_root / "state").exists())
+            self.assertTrue((task_root / "exports").exists())
+            self.assertTrue((task_root / "profiles").exists())
 
-            with db.open_db(db_path) as conn:
-                rows = db.list_runs(conn, limit=10, batch_id="test-batch")
-                self.assertEqual(len(rows), 2)
-                self.assertEqual([int(row["batch_index"]) for row in rows], [0, 1])
-                for row in rows:
-                    metrics = json.loads(str(row["metrics_json"]))
-                    self.assertEqual(metrics["counts"]["ideation_candidates"], 2)
+            manifest = json.loads((task_root / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["task"], "validate")
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["db_path"], str(task_root / "state" / "brandpipe.db"))
+            self.assertEqual(manifest["child_runs"], [{"validation_run_id": 17}])
+            self.assertIn(str(task_root / "exports" / "validated_survivors.csv"), manifest["export_paths"])
+            self.assertEqual(manifest["metrics_summary"]["input_count"], 2)
+            self.assertEqual(manifest["metrics_summary"]["survivor_count"], 1)
+            self.assertEqual(manifest["metrics_summary"]["review_count"], 1)
 
-            status_stdout = io.StringIO()
-            with contextlib.redirect_stdout(status_stdout):
-                status_code = main(
-                    [
-                        "status",
-                        "--db",
-                        str(db_path),
-                        "--batch-id",
-                        "test-batch",
-                        "--show-metrics",
-                    ]
-                )
-            self.assertEqual(status_code, 0)
-            self.assertIn("batch_id=test-batch runs=2", status_stdout.getvalue())
-            self.assertIn("metrics=", status_stdout.getvalue())
+            with (task_root / "exports" / "validated_survivors.csv").open("r", encoding="utf-8", newline="") as handle:
+                survivors = list(csv.DictReader(handle))
+            with (task_root / "exports" / "validated_review_queue.csv").open("r", encoding="utf-8", newline="") as handle:
+                review = list(csv.DictReader(handle))
+            summary = json.loads((task_root / "exports" / "validated_publish_summary.json").read_text(encoding="utf-8"))
+
+            self.assertEqual([row["name"] for row in survivors], ["vantora"])
+            self.assertEqual([row["name"] for row in review], ["meridel"])
+            self.assertEqual(summary["task_root"], str(task_root))
+            self.assertEqual(summary["validation_run_id"], 17)
+            self.assertEqual(summary["state_db"], str(task_root / "state" / "brandpipe.db"))
 
     def test_recheck_web_command_promotes_pending_watch_and_rewrites_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

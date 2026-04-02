@@ -19,6 +19,7 @@ from brandpipe.diversity import (
     salvage_names,
 )
 from brandpipe.models import SeedCandidate
+from brandpipe.naming_policy import build_naming_policy
 
 
 class DiversityTests(unittest.TestCase):
@@ -165,6 +166,27 @@ class DiversityTests(unittest.TestCase):
         self.assertEqual(names, ["meridel"])
         self.assertIn("lead_skeleton_collision", report["dropped"])
         self.assertEqual(report["avoid_lead_skeletons"], ["lmn"])
+
+    def test_filter_local_collisions_uses_policy_default_thresholds(self) -> None:
+        policy = build_naming_policy(
+            {
+                "local_collision": {
+                    "terminal_bigram_quota": 3,
+                    "trigram_threshold": 0.95,
+                    "salvage_keep_count": 2,
+                }
+            }
+        )
+
+        names, report = filter_local_collisions(
+            ["flendex", "trandex"],
+            recent_corpus=[],
+            policy=policy,
+        )
+
+        self.assertEqual(len(names), 2)
+        self.assertEqual(report["terminal_bigram_quota"], 3)
+        self.assertEqual(report["salvage_keep_count"], 2)
 
 
 if __name__ == "__main__":

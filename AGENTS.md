@@ -22,9 +22,11 @@
   - remote: `openrouter_http`
 
 ## Repo Path Layout
-- Active docs only: `docs/branding/`
-- Static inputs/templates/examples: `resources/branding/`
-- Runtime outputs and mutable DBs: `test_outputs/branding/`
+- Active docs only: `docs/brandpipe/`
+- Supported pipeline name: `brandpipe`
+- Supported `brandpipe` configs, prompts, and fixtures: `resources/brandpipe/`
+- Supported `brandpipe` helper scripts: `scripts/brandpipe/`
+- Supported `brandpipe` runtime outputs and mutable DBs: `test_outputs/brandpipe/`
 - Historical artifacts (not canonical docs): `artifacts/branding/legacy/2026-02/`
 - Archived obsolete docs: `docs/archive/branding/2026/`
 
@@ -35,27 +37,16 @@
   - `--llm-openai-keep-alive=<duration>`
 
 ## Useful Commands
-- Show runner flags:
-  - `python3 scripts/branding/naming_campaign_runner.py --help`
+- Show CLI flags:
+  - `direnv exec . env PYTHONPATH=src python3 -m brandpipe.cli --help`
+- Run the supported generation lane:
+  - `direnv exec . env PYTHONPATH=src python3 -m brandpipe.cli run --config resources/brandpipe/fixture_basic_run.toml`
+- Run the supported validation lane:
+  - `direnv exec . env PYTHONPATH=src python3 -m brandpipe.cli validate --input-csv <csv> --out-dir test_outputs/brandpipe/validate/manual`
 - Local warm-cache probe (LM Studio):
-  - `python3 scripts/branding/test_local_llm_warm_cache.py --provider=openai_compat --base-url=http://127.0.0.1:1234/v1 --model=llama-3.3-8b-instruct-omniwriter`
-- One-command Ollama smoke (probe + campaign):
-  - `zsh scripts/branding/test_ollama_local_smoke.sh --model gemma3:12b --keep-alive 30m`
+  - `python3 scripts/brandpipe/local_llm_warm_cache_probe.py --provider=openai_compat --base-url=http://127.0.0.1:1234/v1 --model=llama-3.3-8b-instruct-omniwriter`
 - One-command 3-model benchmark table:
-  - `zsh scripts/branding/benchmark_local_llm_profiles.sh`
-- One-command hybrid shortcuts:
-  - `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh`
-  - `zsh scripts/branding/run_hybrid_ollama_mistral.sh`
-  - Fast profile: `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --fast`
-  - Quality profile: `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --quality`
-  - Creative profile (more OpenRouter share + longer-name bias): `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative`
-  - Optional remote-model mix: `zsh scripts/branding/run_hybrid_lmstudio_mistral.sh --creative --remote-models mistralai/mistral-small-creative,anthropic/claude-sonnet-4.5`
-  - Continuous supervisor (foreground): `zsh scripts/branding/run_continuous_branding_supervisor.sh --backend auto --fallback-backend ollama --profile-plan fast,quality,creative --target-good 120 --target-strong 40`
-  - Continuous supervisor (LaunchAgent): `zsh scripts/branding/install_launchd_continuous_branding.sh --install`
-  - Progress summary: `zsh scripts/branding/report_campaign_progress.sh --out-dir test_outputs/branding/continuous_hybrid --top-n 25`
-  - Continuous targets are strict survivors (checked recommendation + full expensive-check pass/warn coverage + no expensive-check fail/error).
-- Hybrid campaign example:
-  - `direnv exec . python3 scripts/branding/naming_campaign_runner.py --llm-ideation-enabled --llm-provider=hybrid --llm-hybrid-local-models=llama-3.3-8b-instruct-omniwriter --llm-hybrid-remote-models=mistralai/mistral-small-creative --llm-hybrid-local-share=0.75 --llm-openai-base-url=http://127.0.0.1:1234/v1 --llm-openai-ttl-s=3600`
+  - `zsh scripts/brandpipe/benchmark_local_llm_profiles.sh`
 
 ## Git & Worktree Discipline (PR-First, codex.app compatible)
 - Preferred flow for local CLI/manual work: use one dedicated branch + worktree per task/thread (`codex/<task-slug>`), created from `origin/main`:
@@ -83,8 +74,8 @@
   - If dirty, attach changes to a rescue branch before cleanup:
     - `git -C <worktree-path> switch -c codex/rescue-<date>-<slug>`
 - Hygiene cadence (recommended at least weekly):
-  - `zsh scripts/branding/git_worktree_hygiene.sh` (report-only)
-  - `zsh scripts/branding/git_worktree_hygiene.sh --apply` (safe cleanup)
+  - `zsh scripts/brandpipe/git_worktree_hygiene.sh` (report-only)
+  - `zsh scripts/brandpipe/git_worktree_hygiene.sh --apply` (safe cleanup)
   - `git worktree list --porcelain`
   - `git branch -vv --all`
   - `git remote prune origin`

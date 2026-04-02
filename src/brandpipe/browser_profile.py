@@ -10,7 +10,7 @@ from playwright.sync_api import sync_playwright
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_PROFILE_DIR = ROOT_DIR / "test_outputs" / "brandpipe" / "playwright-profile"
+DEFAULT_PROFILE_DIR = ROOT_DIR / "test_outputs" / "brandpipe" / "validate" / "playwright-profile"
 DEFAULT_ARTIFACTS_DIRNAME = "artifacts"
 DEFAULT_CHROME_EXECUTABLE = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 CONSENT_LABELS = (
@@ -44,9 +44,7 @@ def build_target_url(*, url: str, engine: str, query: str) -> str:
     if not normalized_query:
         return "https://example.com"
     encoded = parse.quote_plus(normalized_query)
-    engine_key = str(engine or "google").strip().lower()
-    if engine_key == "google":
-        return f"https://www.google.com/search?q={encoded}&hl=en&gl=de"
+    engine_key = str(engine or "brave").strip().lower()
     if engine_key == "brave":
         return f"https://search.brave.com/search?q={encoded}&source=web"
     raise ValueError(f"unsupported_browser_engine:{engine}")
@@ -69,24 +67,25 @@ def _is_challenge_page(*, final_url: str, title: str) -> bool:
     return any(token in haystack for token in CHALLENGE_TOKENS)
 
 
-def _extract_google_search_items(page) -> list[dict[str, str]]:
+def _extract_app_store_search_items(page) -> list[dict[str, str]]:
     rows = page.evaluate(
         """() => {
           const out = [];
           const seen = new Set();
-          const anchors = Array.from(document.querySelectorAll('a'));
+          const anchors = Array.from(document.querySelectorAll('a[href*="/app/"]'));
           for (const anchor of anchors) {
             const href = (anchor.href || '').trim();
-            const titleNode = anchor.querySelector('h3');
-            const title = (titleNode?.innerText || anchor.innerText || '').trim();
-            if (!href || !title) continue;
-            if (!href.startsWith('http')) continue;
-            if (href.includes('/search?') || href.includes('/preferences') || href.includes('/advanced_search')) continue;
+            if (!href.includes('/app/')) continue;
             if (seen.has(href)) continue;
+            const titleNode = anchor.querySelector('h1, h2, h3, h4');
+            const aria = (anchor.getAttribute('aria-label') || '').trim();
+            const text = (titleNode?.innerText || aria || anchor.innerText || '').trim();
+            const title = text.split('\\n').map((part) => part.trim()).filter(Boolean)[0] || '';
+            const slugMatch = href.match(/\\/app\\/([^/?#]+)\\/id\\d+/i);
+            const slug = slugMatch ? slugMatch[1].trim() : '';
             seen.add(href);
-            const snippet = (anchor.closest('div')?.innerText || '').trim();
-            out.push({ link: href, title, snippet });
-            if (out.length >= 10) break;
+            out.push({ link: href, title, slug });
+            if (out.length >= 20) break;
           }
           return out;
         }"""
@@ -99,10 +98,10 @@ def _extract_google_search_items(page) -> list[dict[str, str]]:
             continue
         link = str(item.get("link") or "").strip()
         title = str(item.get("title") or "").strip()
-        snippet = str(item.get("snippet") or "").strip()
-        if not link or not title:
+        slug = str(item.get("slug") or "").strip()
+        if not link:
             continue
-        cleaned.append({"link": link, "title": title, "snippet": snippet})
+        cleaned.append({"link": link, "title": title, "slug": slug})
     return cleaned
 
 
@@ -137,6 +136,7 @@ def run_browser_profile_smoke(
             java_script_enabled=True,
         )
         try:
+            page = None
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=max(3000, int(timeout_ms)))
             _dismiss_cookie_banner(page)
@@ -197,6 +197,7 @@ def warm_browser_profile(
             java_script_enabled=True,
         )
         try:
+            page = None
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=max(3000, int(timeout_ms)))
             _dismiss_cookie_banner(page)
@@ -229,55 +230,78 @@ def warm_browser_profile(
     return result
 
 
-def browser_search_items(
+def browser_app_store_items(
     *,
     query: str,
-    engine: str = "google",
+    country: str,
     profile_dir: str | Path | None = None,
     chrome_executable: str | Path | None = None,
     timeout_ms: int = 30000,
-    settle_ms: int = 1200,
+    settle_ms: int = 1500,
 ) -> dict[str, object]:
-    engine_key = str(engine or "google").strip().lower()
-    if engine_key != "google":
-        raise ValueError(f"unsupported_browser_engine:{engine}")
     resolved_profile_dir = resolve_profile_dir(profile_dir)
     browser_path = resolve_chrome_executable(chrome_executable)
-    target_url = build_target_url(url="", engine=engine_key, query=query)
+    encoded_query = parse.quote_plus(str(query or "").strip())
+    country_code = str(country or "").strip().lower() or "us"
+    target_url = f"https://apps.apple.com/{country_code}/search?term={encoded_query}"
 
     playwright = sync_playwright().start()
     try:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(resolved_profile_dir),
-            executable_path=str(browser_path),
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-            java_script_enabled=True,
-        )
+        try:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(resolved_profile_dir),
+                executable_path=str(browser_path),
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+                java_script_enabled=True,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "source": "browser_app_store",
+                "country": country_code,
+                "state": "browser_boot_failed",
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "items": [],
+                "final_url": "",
+                "title": "",
+            }
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(target_url, wait_until="domcontentloaded", timeout=max(3000, int(timeout_ms)))
-            _dismiss_cookie_banner(page)
-            if "google." in page.url and "/search?" not in page.url:
-                page.goto(target_url, wait_until="domcontentloaded", timeout=max(3000, int(timeout_ms)))
             page.wait_for_timeout(max(0, int(settle_ms)))
             title = page.title()
             final_url = page.url
-            if _is_challenge_page(final_url=final_url, title=title):
-                return {
-                    "ok": False,
-                    "source": "browser_google",
-                    "error": "browser_challenge",
-                    "final_url": final_url,
-                    "title": title,
-                }
-            items = _extract_google_search_items(page)
+            items = _extract_app_store_search_items(page)
             return {
                 "ok": True,
-                "source": "browser_google",
-                "engine": engine_key,
+                "source": "browser_app_store",
+                "country": country_code,
                 "items": items,
                 "result_count": len(items),
+                "final_url": final_url,
+                "title": title,
+                "state": "results" if items else "no_results",
+            }
+        except Exception as exc:
+            title = ""
+            final_url = ""
+            try:
+                title = page.title() if page is not None else ""
+            except Exception:
+                pass
+            try:
+                final_url = page.url if page is not None else ""
+            except Exception:
+                pass
+            state = "timeout" if "Timeout" in exc.__class__.__name__ else "page_error"
+            return {
+                "ok": False,
+                "source": "browser_app_store",
+                "country": country_code,
+                "state": state,
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "items": [],
                 "final_url": final_url,
                 "title": title,
             }

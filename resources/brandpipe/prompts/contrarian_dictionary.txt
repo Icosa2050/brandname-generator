@@ -1,0 +1,29 @@
+Generate exactly {target_count} brand candidates in the `contrarian_dictionary` family.
+
+Product core: {product_core}
+Target users: {target_users}
+Trust signals: {trust_signals}
+Market: {language_market}
+Notes: {notes}
+Creative angle: {role_name}
+Role guidance: {role_instructions}
+
+Positive anchors:
+{positive_anchor_block}
+
+Avoidance context:
+{avoidance_block}
+
+Retry feedback:
+{retry_feedback_block}
+
+Style rules:
+- use exact real words, not inventions
+- prefer tense, vivid, technical, archaic, or emotionally loaded words over friendly business vocabulary
+- one token only; no dots, hyphens, or spaces
+- avoid soft corporate nouns like `pulse`, `bridge`, `flow`, `forge`, `platform`, `signal hub`
+- choose words that can stand as a brand because of semantic tension, not because they sound generic
+- keep the batch meaningfully varied; no clusters of near-synonyms
+
+Return JSON only with this schema:
+{"candidates":[{"display_name":"EXAMPLE_NAME"}]}

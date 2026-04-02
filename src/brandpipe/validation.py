@@ -1,108 +1,86 @@
 from __future__ import annotations
 
-import time
-
 from .models import CandidateResult, ResultStatus, ValidationConfig
 from .validation_checks import (
-    check_app_store,
-    check_company,
-    check_domain,
-    check_package,
-    check_social,
-    check_tm,
-    check_tm_cheap,
-    check_web,
+    probe_app_store,
+    probe_company,
+    probe_domain,
+    probe_package,
+    probe_social,
+    probe_tm,
+    probe_tm_cheap,
+    probe_web,
 )
+from .validation_runtime import EARLY_EXIT_CHECKS, ProbeResult
 
 
-CHECK_RUNNERS = {
-    "domain": check_domain,
-    "company": check_company,
-    "web": check_web,
-    "tm": check_tm,
-    "tm_cheap": check_tm_cheap,
-    "app_store": check_app_store,
-    "package": check_package,
-    "social": check_social,
+CHECK_PROBERS = {
+    "domain": probe_domain,
+    "company": probe_company,
+    "web": probe_web,
+    "tm": probe_tm,
+    "tm_cheap": probe_tm_cheap,
+    "app_store": probe_app_store,
+    "package": probe_package,
+    "social": probe_social,
 }
 
 
-def _replace_result(results: list[CandidateResult], updated: CandidateResult) -> list[CandidateResult]:
-    replaced: list[CandidateResult] = []
-    did_replace = False
-    for item in results:
-        if item.check_name == updated.check_name and not did_replace:
-            replaced.append(updated)
-            did_replace = True
+def skipped_result(*, check_name: str, blocker_check: str) -> ProbeResult:
+    return ProbeResult(
+        candidate_result=CandidateResult(
+            check_name=check_name,
+            status=ResultStatus.SKIPPED,
+            score_delta=0.0,
+            reason="skipped_due_to_blocker",
+            details={"blocked_by": blocker_check, "retryable": False, "error_kind": "none"},
+        )
+    )
+
+
+def probe_check(*, check_name: str, name: str, config: ValidationConfig) -> ProbeResult:
+    runner = CHECK_PROBERS.get(check_name)
+    if runner is None:
+        return ProbeResult(
+            candidate_result=CandidateResult(
+                check_name=check_name,
+                status=ResultStatus.UNSUPPORTED,
+                score_delta=-1.0,
+                reason="validation_check_unknown",
+                details={"check_name": check_name, "retryable": False, "error_kind": "none"},
+            )
+        )
+    return runner(name=name, config=config)
+
+
+def probe_candidate(
+    *,
+    name: str,
+    config: ValidationConfig,
+    start_index: int = 0,
+    prior_results: list[ProbeResult] | None = None,
+) -> list[ProbeResult]:
+    probes: list[ProbeResult] = list(prior_results or [])
+    blocker_check = next(
+        (
+            item.check_name
+            for item in probes
+            if item.candidate_result.status == ResultStatus.FAIL and item.check_name in EARLY_EXIT_CHECKS
+        ),
+        "",
+    )
+    for index, check_name in enumerate(config.checks):
+        if index < max(0, int(start_index)):
             continue
-        replaced.append(item)
-    if not did_replace:
-        replaced.append(updated)
-    return replaced
-
-
-def _stabilize_web_unavailable(*, name: str, config: ValidationConfig, results: list[CandidateResult]) -> list[CandidateResult]:
-    web_result = next((item for item in results if item.check_name == "web"), None)
-    if web_result is None:
-        return results
-    if web_result.status != ResultStatus.UNAVAILABLE or web_result.reason != "web_search_unavailable":
-        return results
-    if any(
-        item.check_name != "web" and item.status in {ResultStatus.FAIL, ResultStatus.WARN, ResultStatus.UNAVAILABLE}
-        for item in results
-    ):
-        return results
-
-    latest = web_result
-    retry_attempts = max(0, int(config.web_retry_attempts))
-    for attempt in range(retry_attempts):
-        delay_s = float(config.web_retry_backoff_s) * float(attempt + 1)
-        if delay_s > 0:
-            time.sleep(delay_s)
-        latest = check_web(name=name, config=config)
-        if latest.status != ResultStatus.UNAVAILABLE or latest.reason != "web_search_unavailable":
-            break
-
-    if retry_attempts > 0:
-        retry_details = dict(latest.details)
-        retry_details["retried_web_attempts"] = retry_attempts
-        retry_details["initial_reason"] = web_result.reason
-        latest = CandidateResult(
-            check_name=latest.check_name,
-            status=latest.status,
-            score_delta=latest.score_delta,
-            reason=latest.reason,
-            details=retry_details,
-        )
-
-    if latest.status == ResultStatus.UNAVAILABLE and latest.reason == "web_search_unavailable":
-        pending_details = dict(latest.details)
-        pending_details["pending_review"] = True
-        latest = CandidateResult(
-            check_name="web",
-            status=ResultStatus.WARN,
-            score_delta=-2.0,
-            reason="web_check_pending",
-            details=pending_details,
-        )
-
-    return _replace_result(results, latest)
+        if blocker_check:
+            probes.append(skipped_result(check_name=check_name, blocker_check=blocker_check))
+            continue
+        probe = probe_check(check_name=check_name, name=name, config=config)
+        probes.append(probe)
+        if probe.candidate_result.status == ResultStatus.FAIL and check_name in EARLY_EXIT_CHECKS:
+            blocker_check = check_name
+    return probes
 
 
 def validate_candidate(*, name: str, config: ValidationConfig) -> list[CandidateResult]:
-    results: list[CandidateResult] = []
-    for check_name in config.checks:
-        runner = CHECK_RUNNERS.get(check_name)
-        if runner is None:
-            results.append(
-                CandidateResult(
-                    check_name=check_name,
-                    status=ResultStatus.UNSUPPORTED,
-                    score_delta=-1.0,
-                    reason="validation_check_unknown",
-                    details={"check_name": check_name},
-                )
-            )
-            continue
-        results.append(runner(name=name, config=config))
-    return _stabilize_web_unavailable(name=name, config=config, results=results)
+    return [probe.candidate_result for probe in probe_candidate(name=name, config=config)]

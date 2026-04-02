@@ -5,51 +5,23 @@ import re
 from typing import Callable, TypeVar
 
 from .models import SeedCandidate
+from .naming_policy import DEFAULT_NAMING_POLICY, LocalCollisionPolicy, NamingPolicy
 
 
 T = TypeVar("T")
-
-BRAND_SUFFIXES = (
-    "ability",
-    "ation",
-    "ingly",
-    "ingly",
-    "ify",
-    "ness",
-    "tion",
-    "able",
-    "core",
-    "flow",
-    "hub",
-    "labs",
-    "lab",
-    "line",
-    "logic",
-    "loop",
-    "nova",
-    "pilot",
-    "scope",
-    "stack",
-    "sync",
-    "ware",
-    "wise",
-    "ly",
-    "io",
-    "iq",
-    "sy",
-    "er",
-    "ai",
-    "x",
-)
-
 
 def normalize_brand_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name or "").strip().lower())
 
 
-def root_key(name: str) -> str:
+def _resolved_policy(policy: NamingPolicy | None) -> LocalCollisionPolicy:
+    return (policy or DEFAULT_NAMING_POLICY).local_collision
+
+
+def root_key(name: str, *, policy: NamingPolicy | None = None) -> str:
+    active_policy = _resolved_policy(policy)
     lowered = normalize_brand_name(name)
-    for suffix in BRAND_SUFFIXES:
+    for suffix in active_policy.brand_suffixes:
         if lowered.endswith(suffix) and len(lowered) - len(suffix) >= 4:
             lowered = lowered[: -len(suffix)]
             break
@@ -118,14 +90,14 @@ def leading_skeleton(name: str) -> str:
     return skeleton[:3]
 
 
-def _too_close_to_avoid(name: str, avoid_terms: tuple[str, ...]) -> bool:
+def _too_close_to_avoid(name: str, avoid_terms: tuple[str, ...], *, policy: NamingPolicy | None = None) -> bool:
     normalized = normalize_brand_name(name)
-    stem = root_key(normalized)
+    stem = root_key(normalized, policy=policy)
     for avoid in avoid_terms:
         candidate = normalize_brand_name(avoid)
         if not candidate:
             continue
-        if normalized == candidate or stem == root_key(candidate):
+        if normalized == candidate or stem == root_key(candidate, policy=policy):
             return True
         if len(candidate) >= 4 and (candidate in normalized or normalized in candidate):
             return True
@@ -141,6 +113,7 @@ def _filter_items(
     lead_fragment_limit: int = 0,
     lead_fragment_length: int = 4,
     lead_skeleton_limit: int = 0,
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[T], dict[str, object]]:
     kept: list[T] = []
     seen_exact: set[str] = set()
@@ -159,10 +132,10 @@ def _filter_items(
         if name in seen_exact:
             drops["exact_duplicate"] += 1
             continue
-        if _too_close_to_avoid(name, avoid_terms):
+        if _too_close_to_avoid(name, avoid_terms, policy=policy):
             drops["avoid_term"] += 1
             continue
-        stem = root_key(name)
+        stem = root_key(name, policy=policy)
         if seen_roots[stem] >= max(1, saturation_limit):
             drops["suffix_family"] += 1
             continue
@@ -221,12 +194,14 @@ def filter_seed_candidates(
     *,
     avoid_terms: tuple[str, ...],
     saturation_limit: int = 1,
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[SeedCandidate], dict[str, object]]:
     return _filter_items(
         candidates,
         name_getter=lambda item: item.name,
         avoid_terms=avoid_terms,
         saturation_limit=saturation_limit,
+        policy=policy,
     )
 
 
@@ -238,6 +213,7 @@ def filter_names(
     lead_fragment_limit: int = 0,
     lead_fragment_length: int = 4,
     lead_skeleton_limit: int = 0,
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[str], dict[str, object]]:
     return _filter_items(
         names,
@@ -247,6 +223,7 @@ def filter_names(
         lead_fragment_limit=lead_fragment_limit,
         lead_fragment_length=lead_fragment_length,
         lead_skeleton_limit=lead_skeleton_limit,
+        policy=policy,
     )
 
 
@@ -255,6 +232,7 @@ def salvage_names(
     *,
     avoid_terms: tuple[str, ...],
     limit: int = 3,
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[str], dict[str, object]]:
     kept: list[str] = []
     seen_exact: set[str] = set()
@@ -267,7 +245,7 @@ def salvage_names(
         if name in seen_exact:
             drops["exact_duplicate"] += 1
             continue
-        if _too_close_to_avoid(name, avoid_terms):
+        if _too_close_to_avoid(name, avoid_terms, policy=policy):
             drops["avoid_term"] += 1
             continue
         seen_exact.add(name)
@@ -287,14 +265,32 @@ def filter_local_collisions(
     names: list[str],
     *,
     recent_corpus: list[dict[str, object]] | None = None,
-    terminal_bigram_quota: int = 2,
-    trigram_threshold: float = 0.62,
+    terminal_bigram_quota: int | None = None,
+    trigram_threshold: float | None = None,
     avoid_lead_fragments: tuple[str, ...] = (),
     avoid_lead_skeletons: tuple[str, ...] = (),
     avoid_tail_fragments: tuple[str, ...] = (),
     crowded_terminal_families: tuple[str, ...] = (),
     crowded_terminal_skeletons: tuple[str, ...] = (),
+    salvage_keep_count: int | None = None,
+    policy: NamingPolicy | None = None,
 ) -> tuple[list[str], dict[str, object]]:
+    active_policy = _resolved_policy(policy)
+    effective_terminal_bigram_quota = (
+        int(terminal_bigram_quota)
+        if terminal_bigram_quota is not None
+        else int(active_policy.terminal_bigram_quota)
+    )
+    effective_trigram_threshold = (
+        float(trigram_threshold)
+        if trigram_threshold is not None
+        else float(active_policy.trigram_threshold)
+    )
+    effective_salvage_keep_count = (
+        int(salvage_keep_count)
+        if salvage_keep_count is not None
+        else int(active_policy.salvage_keep_count)
+    )
     corpus_entries: list[dict[str, object]] = []
     for item in recent_corpus or []:
         normalized = normalize_brand_name(item.get("name"))
@@ -383,7 +379,7 @@ def filter_local_collisions(
             continue
 
         terminal = name[-2:] if len(name) >= 2 else name
-        if terminal_counts[terminal] >= max(1, int(terminal_bigram_quota)):
+        if terminal_counts[terminal] >= max(1, int(effective_terminal_bigram_quota)):
             drops["terminal_quota"] += 1
             remember_drop("terminal_quota", name)
             salvage_pool.append((1.0, terminal_counts[terminal], name, "terminal_quota"))
@@ -415,7 +411,7 @@ def filter_local_collisions(
                 score = trigram_dice(name_trigrams, prior["trigrams"])
                 if score > max_score:
                     max_score = score
-                if score >= float(trigram_threshold):
+                if score >= float(effective_trigram_threshold):
                     drops["trigram_corpus_collision"] += 1
                     remember_drop("trigram_corpus_collision", f"{name}:{prior['name']}")
                     salvage_pool.append((max_score, 0, name, "trigram_corpus_collision"))
@@ -427,7 +423,7 @@ def filter_local_collisions(
                     score = trigram_dice(name_trigrams, prior_trigrams)
                     if score > max_score:
                         max_score = score
-                    if score >= float(trigram_threshold):
+                    if score >= float(effective_trigram_threshold):
                         drops["trigram_batch_collision"] += 1
                         remember_drop("trigram_batch_collision", f"{name}:{prior_name}")
                         salvage_pool.append((max_score, 0, name, "trigram_batch_collision"))
@@ -457,7 +453,7 @@ def filter_local_collisions(
             if name in relaxed_names:
                 continue
             relaxed_names.append(name)
-            if len(relaxed_names) >= 1:
+            if len(relaxed_names) >= max(1, int(effective_salvage_keep_count)):
                 break
         if relaxed_names:
             kept = relaxed_names
@@ -477,8 +473,8 @@ def filter_local_collisions(
         "terminal_distribution": dict(sorted(terminal_counts.items())),
         "avg_max_trigram_score": round(sum(trigram_scores) / len(trigram_scores), 4) if trigram_scores else 0.0,
         "corpus_size": len(corpus_entries),
-        "terminal_bigram_quota": max(1, int(terminal_bigram_quota)),
-        "trigram_threshold": float(trigram_threshold),
+        "terminal_bigram_quota": max(1, int(effective_terminal_bigram_quota)),
+        "trigram_threshold": float(effective_trigram_threshold),
         "avoid_lead_fragments": sorted(lead_fragments),
         "avoid_lead_skeletons": sorted(lead_skeletons),
         "avoid_tail_fragments": sorted(tail_fragments),
@@ -486,4 +482,5 @@ def filter_local_collisions(
         "crowded_terminal_skeletons": sorted(crowded_skeletons),
         "relaxed": bool(relaxed_report),
         "salvage": relaxed_report,
+        "salvage_keep_count": max(0, int(effective_salvage_keep_count)),
     }
