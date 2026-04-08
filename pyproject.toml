@@ -26,3 +26,26 @@ where = ["src"]
 addopts = ["--import-mode=importlib"]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["brandpipe"]
+data_file = "test_outputs/brandpipe/coverage/.coverage"
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.coverage.html]
+directory = "test_outputs/brandpipe/coverage/html"
+
+[tool.coverage.xml]
+output = "test_outputs/brandpipe/coverage/coverage.xml"
+
+[tool.coverage.json]
+output = "test_outputs/brandpipe/coverage/coverage.json"
+pretty_print = true
+
+[tool.coverage.lcov]
+output = "test_outputs/brandpipe/coverage/lcov.info"

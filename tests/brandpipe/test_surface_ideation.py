@@ -12,13 +12,175 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from brandpipe.family_llm import _accept_candidate, generate_family_candidates
-from brandpipe.models import Brief, IdeationConfig
-from brandpipe.models import NameFamily
+from brandpipe.models import Brief, IdeationConfig, NameFamily, SurfacedCandidate, SurfacePolicy
 from brandpipe.naming_policy import build_naming_policy
-from brandpipe.surface_ideation import generate_candidate_surfaces, normalize_comparison
+from brandpipe.surface_ideation import (
+    _acronym_pool,
+    _alpha_tokens,
+    _blend_halves,
+    _candidate,
+    _family_order,
+    _family_quota_map,
+    _generate_brutalist_utility_family,
+    _generate_contrarian_dictionary_family,
+    _generate_literal_tld_hack_family,
+    _generate_mascot_mutation_family,
+    _generate_smooth_blend_family,
+    _llm_family_candidates,
+    _mascot_variants,
+    _root_pool,
+    _top_family_candidates,
+    generate_candidate_surfaces,
+    infer_surface_policy,
+    normalize_comparison,
+    normalize_surface,
+)
 
 
 class SurfaceIdeationTests(unittest.TestCase):
+    def test_surface_helper_normalization_and_policy_inference(self) -> None:
+        self.assertEqual(normalize_surface("  XnView MP  "), "xnview mp")
+        self.assertEqual(normalize_comparison("VÆRMON"), "vaermon")
+        self.assertEqual(infer_surface_policy("brand.example"), SurfacePolicy.DOTTED_LOWER)
+        self.assertEqual(infer_surface_policy("brand-name"), SurfacePolicy.HYPHENATED_LOWER)
+        self.assertEqual(infer_surface_policy("XnView MP"), SurfacePolicy.TITLE_SPACED_ACRONYM)
+        self.assertEqual(infer_surface_policy("Meridel"), SurfacePolicy.MIXED_CASE_ALPHA)
+        self.assertEqual(infer_surface_policy("meridel"), SurfacePolicy.ALPHA_LOWER)
+
+    def test_family_order_and_quota_map_follow_policy_and_explicit_overrides(self) -> None:
+        config = IdeationConfig(
+            provider="fixture",
+            rounds=2,
+            candidates_per_round=6,
+            family_quotas={"runic_forge": 2, "smooth_blend": 3},
+            naming_policy=build_naming_policy(
+                {
+                    "surface": {
+                        "family_order": ["runic_forge", "invalid_family", "smooth_blend", "runic_forge"],
+                    }
+                }
+            ),
+        )
+
+        ordered = _family_order(config.naming_policy)
+        quotas = _family_quota_map(config)
+
+        self.assertEqual(ordered, (NameFamily.RUNIC_FORGE, NameFamily.SMOOTH_BLEND))
+        self.assertEqual(quotas, {NameFamily.RUNIC_FORGE: 2, NameFamily.SMOOTH_BLEND: 3})
+
+        default_config = IdeationConfig(provider="fixture", rounds=1, candidates_per_round=7)
+        default_quotas = _family_quota_map(default_config)
+        self.assertEqual(sum(default_quotas.values()), 7)
+        self.assertEqual(len(default_quotas), 6)
+
+    def test_alpha_root_and_acronym_pools_filter_noise(self) -> None:
+        brief = Brief(
+            product_core="Signal signal settlement tools",
+            target_users=["operators", "operators"],
+            trust_signals=["clarity"],
+            notes="steady utility utility",
+        )
+
+        alpha_tokens = _alpha_tokens(brief)
+        roots = _root_pool(brief)
+        acronyms = _acronym_pool(brief)
+
+        self.assertIn("operators", alpha_tokens)
+        self.assertIn("clarity", alpha_tokens)
+        self.assertEqual(alpha_tokens.count("signal"), 1)
+        self.assertEqual(alpha_tokens.count("operators"), 1)
+        self.assertIn("operators", roots)
+        self.assertIn("clarity", roots)
+        self.assertGreaterEqual(len(acronyms[0]), 2)
+        self.assertIn("TSX", acronyms)
+
+    def test_candidate_and_helper_generators_cover_edge_cases(self) -> None:
+        candidate = _candidate(
+            "Tool Grid",
+            NameFamily.BRUTALIST_UTILITY,
+            source_kind="family_lane_llm",
+            source_detail={"source": "test"},
+        )
+
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.name_normalized, "toolgrid")
+        self.assertEqual(candidate.surface_policy, SurfacePolicy.TITLE_SPACED_ACRONYM)
+        self.assertIn('"source": "test"', candidate.source_detail)
+        self.assertIsNone(
+            _candidate(
+                "a",
+                NameFamily.SMOOTH_BLEND,
+                source_kind="family_lane_llm",
+                source_detail={},
+            )
+        )
+
+        self.assertEqual(_blend_halves("anchor", "beacon"), "anccon")
+        self.assertEqual(_blend_halves("same", "same"), "")
+        self.assertEqual(_mascot_variants("otter")[:3], ["Otter", "Ootter", "Ottero"])
+
+    def test_top_family_candidates_and_llm_family_candidates_dedupe_and_rank(self) -> None:
+        seeded = [
+            SurfacedCandidate(
+                display_name="Beta",
+                name_normalized="beta",
+                family=NameFamily.SMOOTH_BLEND,
+                surface_policy=SurfacePolicy.MIXED_CASE_ALPHA,
+                family_score=4.0,
+                family_rank=0,
+            ),
+            SurfacedCandidate(
+                display_name="Alpha",
+                name_normalized="alpha",
+                family=NameFamily.SMOOTH_BLEND,
+                surface_policy=SurfacePolicy.MIXED_CASE_ALPHA,
+                family_score=9.0,
+                family_rank=0,
+            ),
+        ]
+
+        ranked = _top_family_candidates(seeded, 1)
+        self.assertEqual([(item.display_name, item.family_rank) for item in ranked], [("Alpha", 1)])
+
+        config = IdeationConfig(provider="fixture")
+        with mock.patch(
+            "brandpipe.surface_ideation.generate_family_candidates",
+            return_value=(["Tool Grid", "Tool Grid", ""], {"family": "brutalist_utility", "attempts": 1}),
+        ):
+            candidates, report = _llm_family_candidates(
+                family=NameFamily.BRUTALIST_UTILITY,
+                brief=Brief(product_core="tooling"),
+                config=config,
+                quota=2,
+                success_context=None,
+                avoidance_context=None,
+            )
+
+        self.assertEqual([candidate.display_name for candidate in candidates], ["Tool Grid"])
+        self.assertEqual(report["attempts"], 1)
+
+    def test_deterministic_family_generators_emit_expected_shapes(self) -> None:
+        brief = Brief(product_core="settlement utility signal", target_users=["operators"], trust_signals=["clarity"])
+
+        literal = _generate_literal_tld_hack_family(brief, 2)
+        smooth = _generate_smooth_blend_family(brief=brief, quota=2)
+        mascot = _generate_mascot_mutation_family(brief, 2)
+        contrarian = _generate_contrarian_dictionary_family(brief, 2)
+        brutalist = _generate_brutalist_utility_family(brief, 2)
+
+        self.assertTrue(any(candidate.display_name.endswith((".io", ".app", ".hq", ".cloud")) for candidate in literal))
+        self.assertTrue(all(candidate.family == NameFamily.SMOOTH_BLEND for candidate in smooth))
+        self.assertTrue(all(candidate.family == NameFamily.MASCOT_MUTATION for candidate in mascot))
+        self.assertTrue(all(candidate.family == NameFamily.CONTRARIAN_DICTIONARY for candidate in contrarian))
+        self.assertTrue(all(" " in candidate.display_name for candidate in brutalist))
+
+    def test_smooth_blend_generator_uses_root_fallback_when_no_blends_exist(self) -> None:
+        with mock.patch("brandpipe.surface_ideation._root_pool", return_value=["anchor"]):
+            generated = _generate_smooth_blend_family(brief=Brief(product_core="anchor"), quota=1)
+
+        self.assertEqual([candidate.display_name for candidate in generated], ["Anchor"])
+
     def test_family_default_uses_family_llm_and_deterministic_fallback(self) -> None:
         brief = Brief(
             product_core="incident response signal coordination software",

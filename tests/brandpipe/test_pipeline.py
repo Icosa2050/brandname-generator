@@ -1,6 +1,7 @@
 # ruff: noqa: E402
 from __future__ import annotations
 
+from collections import Counter
 import csv
 import io
 import json
@@ -19,7 +20,20 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from brandpipe import db
-from brandpipe.models import CandidateResult, NameFamily, ResultStatus, SurfacePolicy, SurfacedCandidate
+import brandpipe.pipeline as pipeline
+from brandpipe.models import (
+    Brief,
+    CandidateResult,
+    ExportConfig,
+    IdeationConfig,
+    NameFamily,
+    RankedCandidate,
+    ResultStatus,
+    RunConfig,
+    SurfacePolicy,
+    SurfacedCandidate,
+    ValidationConfig,
+)
 from brandpipe.pipeline import load_config, recheck_pending_web, recheck_tmview, run_pipeline
 from brandpipe.scoring import build_attractiveness_result
 from brandpipe.tmview import TmviewProbeResult
@@ -1512,6 +1526,404 @@ class PipelineTests(unittest.TestCase):
             assert isinstance(success_context, dict)
             self.assertIn("names", success_context)
             self.assertIn("endings", success_context)
+
+    def test_pipeline_helper_config_and_json_parsing(self) -> None:
+        self.assertEqual(pipeline._cfg_int(None, 3), 3)
+        self.assertEqual(pipeline._cfg_int(-2, 3, minimum=1), 1)
+        self.assertEqual(pipeline._cfg_float(None, 1.5), 1.5)
+        self.assertEqual(pipeline._cfg_float("0.01", 2.0, minimum=0.1), 0.1)
+        self.assertTrue(pipeline._cfg_bool(None, True))
+        self.assertFalse(pipeline._cfg_bool("off", True))
+        self.assertTrue(pipeline._cfg_bool(["value"], False))
+        self.assertEqual(
+            pipeline._cfg_int_map({"alpha": -2, "beta": "3", "": 9}),
+            {"alpha": 0, "beta": 3},
+        )
+        self.assertEqual(
+            pipeline._cfg_int_map("alpha:-2, beta: 3, :5, nope"),
+            {"alpha": 0, "beta": 3},
+        )
+        self.assertEqual(
+            pipeline._canonical_web_search_order("brave,serper,brave,unknown"),
+            "serper,brave",
+        )
+        self.assertEqual(pipeline._canonical_web_search_order(""), "serper,brave")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            self.assertEqual(
+                pipeline._cfg_path_map(
+                    root,
+                    {"alpha": "one.txt", " ": "skip", "beta": "./two.txt"},
+                ),
+                {
+                    "alpha": (root / "one.txt").resolve(),
+                    "beta": (root / "two.txt").resolve(),
+                },
+            )
+
+        with mock.patch("brandpipe.pipeline._warn_runtime_issue") as warn:
+            self.assertEqual(pipeline._load_json_dict('{"ok": 1}', context="cfg"), {"ok": 1})
+            self.assertEqual(pipeline._load_json_dict("[1, 2]", context="cfg"), {})
+            self.assertEqual(pipeline._load_json_dict("{", context="cfg"), {})
+
+        self.assertEqual(warn.call_count, 2)
+        self.assertIn("expected_json_object_got_list", warn.call_args_list[0].args[0])
+        self.assertIn("invalid_json", warn.call_args_list[1].args[0])
+
+    def test_pipeline_helper_serialization_validation_and_runtime_wrappers(self) -> None:
+        serialized = pipeline._serialize_value(
+            {
+                "family": NameFamily.SMOOTH_BLEND,
+                "brief": Brief(product_core="utility", target_users=["operators"]),
+                "path": Path("/tmp/example.txt"),
+                "items": [SurfacePolicy.ALPHA_LOWER, {"nested": Path("relative.txt")}],
+            }
+        )
+
+        self.assertEqual(serialized["family"], "smooth_blend")
+        self.assertEqual(serialized["brief"]["product_core"], "utility")
+        self.assertEqual(serialized["items"][0], "alpha_lower")
+        self.assertEqual(serialized["items"][1]["nested"], "relative.txt")
+        self.assertEqual(serialized["path"], "/tmp/example.txt")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            template = Path(tmp_dir) / "ranked_{run_id}.csv"
+            self.assertEqual(
+                pipeline._format_export_path(template, 7),
+                (Path(tmp_dir) / "ranked_7.csv").resolve(),
+            )
+        self.assertIsNone(pipeline._format_export_path(None, 7))
+
+        unavailable = pipeline._runtime_unavailable_result("web", RuntimeError("boom"))
+        self.assertEqual(unavailable.check_name, "web")
+        self.assertEqual(unavailable.status, ResultStatus.UNAVAILABLE)
+        self.assertEqual(unavailable.reason, "RuntimeError: boom")
+        self.assertEqual(unavailable.details["error_class"], "RuntimeError")
+
+        config = ValidationConfig(parallel_workers=4)
+        self.assertEqual(pipeline._validation_worker_count(config=config, candidate_count=0), 1)
+        self.assertEqual(pipeline._validation_worker_count(config=config, candidate_count=2), 2)
+        self.assertEqual(pipeline._validation_worker_count(config=config, candidate_count=10), 4)
+
+        success = [
+            CandidateResult(
+                check_name="web",
+                status=ResultStatus.PASS,
+                score_delta=1.0,
+                reason="ok",
+                details={},
+            )
+        ]
+        with mock.patch("brandpipe.pipeline.validate_candidate", return_value=success):
+            self.assertEqual(
+                pipeline._validate_candidate_safe(candidate_name="vantora", config=config),
+                success,
+            )
+        with mock.patch("brandpipe.pipeline.validate_candidate", side_effect=ValueError("bad config")):
+            failure = pipeline._validate_candidate_safe(candidate_name="vantora", config=config)
+        self.assertEqual(len(failure), 1)
+        self.assertEqual(failure[0].status, ResultStatus.UNAVAILABLE)
+        self.assertEqual(failure[0].check_name, "validation_runtime")
+
+        self.assertEqual(
+            pipeline._sanitize_csv_value("=SUM(1)\nfoo\rbar"),
+            "'=SUM(1) foo bar",
+        )
+        self.assertIn("serialization_error", pipeline._json_string({"bad": {1, 2}}))
+        self.assertEqual(
+            pipeline._normalize_names([" Alpha ", "alpha", "Beta", "", "beta "]),
+            ["Alpha", "Beta"],
+        )
+        self.assertEqual(
+            pipeline._merge_unique_strings([" Alpha ", ""], ["alpha", "Beta"], ["beta", "Gamma"]),
+            ["Alpha", "Beta", "Gamma"],
+        )
+
+        validation_config = pipeline._validation_config_from_payload(
+            {
+                "checks": "web,tmview",
+                "parallel_workers": 0,
+                "timeout_s": 0.01,
+                "company_top": 0,
+                "social_unavailable_fail_threshold": 0,
+                "web_search_order": "brave,serper,brave",
+                "web_retry_attempts": 5,
+                "web_retry_backoff_s": 0.25,
+                "tm_registry_top": 0,
+            }
+        )
+        self.assertEqual(validation_config.checks, ["web", "tmview"])
+        self.assertEqual(validation_config.parallel_workers, 1)
+        self.assertEqual(validation_config.timeout_s, 0.1)
+        self.assertEqual(validation_config.company_top, 1)
+        self.assertEqual(validation_config.social_unavailable_fail_threshold, 1)
+        self.assertEqual(validation_config.web_search_order, "serper,brave")
+        self.assertEqual(validation_config.web_retry_attempts, 5)
+        self.assertEqual(validation_config.web_retry_backoff_s, 0.25)
+        self.assertEqual(validation_config.tm_registry_top, 1)
+
+    def test_pipeline_avoidance_and_surface_helpers(self) -> None:
+        brief = Brief(
+            product_core="utility settlement",
+            forbidden_directions=["legacy"],
+            notes="keep it modern",
+        )
+
+        with mock.patch(
+            "brandpipe.pipeline.db.recent_blocked_patterns",
+            return_value={"suffixes": [], "stems": [], "run_ids": [1], "blocked_names": ["alpha"]},
+        ):
+            unchanged_brief, unchanged_report = pipeline._augment_brief_with_recent_failures(
+                mock.sentinel.conn,
+                brief=brief,
+            )
+        self.assertEqual(unchanged_brief, brief)
+        self.assertFalse(unchanged_report["applied"])
+
+        with mock.patch(
+            "brandpipe.pipeline.db.recent_blocked_patterns",
+            return_value={
+                "suffixes": ["ify", "ify"],
+                "stems": ["volt"],
+                "run_ids": [2],
+                "blocked_names": ["voltify"],
+            },
+        ):
+            augmented_brief, augmented_report = pipeline._augment_brief_with_recent_failures(
+                mock.sentinel.conn,
+                brief=brief,
+            )
+        self.assertTrue(augmented_report["applied"])
+        self.assertEqual(augmented_report["suffixes"], ["ify", "ify"])
+        self.assertEqual(augmented_report["stems"], ["volt"])
+        self.assertIn("ify", augmented_brief.forbidden_directions)
+        self.assertIn("volt", augmented_brief.forbidden_directions)
+        self.assertIn("avoid repeating crowded suffix families", augmented_brief.notes)
+        self.assertIn("avoid reusing recently blocked stems", augmented_brief.notes)
+
+        avoidance_context = {
+            "external_reason_patterns": {
+                "web_near_collision": {
+                    "examples": ["Voltora", "voltora", "Axion"],
+                    "lead_hints": ["volt", "vol", "axi"],
+                    "tail_hints": ["ora", "ra", "ora"],
+                },
+                "tmview_exact_collision": {
+                    "examples": ["Baldex"],
+                    "lead_hints": ["bald"],
+                    "tail_hints": ["dex"],
+                },
+            },
+            "external_fragment_hints": ["city", "volt"],
+            "external_tail_hints": ["ora", "dex"],
+            "external_avoid_names": ["FallbackOne"],
+            "external_lead_hints": ["volt", "alto"],
+            "external_terminal_families": ["ra", "tx", "ra"],
+            "external_terminal_skeletons": ["vlt", "tx", "vlt"],
+            "local_patterns": {"prefixes": ["volt", "bald"], "suffixes": ["ora", "dex"]},
+        }
+
+        high_signal = pipeline._high_signal_avoidance_terms(avoidance_context)
+        self.assertEqual(high_signal["avoid_names"], ("Baldex", "Voltora", "Axion"))
+        self.assertIn("volt", high_signal["lead_hints"])
+        self.assertIn("bald", high_signal["lead_hints"])
+        self.assertIn("ora", high_signal["tail_hints"])
+        self.assertIn("dex", high_signal["tail_hints"])
+        self.assertIn("vlt", high_signal["lead_skeletons"])
+        self.assertIn("bld", high_signal["lead_skeletons"])
+
+        fallback_signal = pipeline._high_signal_avoidance_terms(
+            {"external_avoid_names": ["FallbackOne", "fallbackone", "FallbackTwo"]}
+        )
+        self.assertEqual(fallback_signal["avoid_names"], ("FallbackOne", "FallbackTwo"))
+        self.assertEqual(pipeline._ordered_unique_tokens("not-a-sequence"), ())
+        self.assertEqual(
+            pipeline._ordered_unique_tokens([" Alpha ", "alpha", "be", "Beta"], minimum_length=3),
+            ("alpha", "beta"),
+        )
+
+        explicit_key = pipeline._surface_candidate_key(
+            SurfacedCandidate(
+                display_name="Vantora",
+                name_normalized="vantora",
+                family=NameFamily.SMOOTH_BLEND,
+                surface_policy=SurfacePolicy.ALPHA_LOWER,
+            )
+        )
+        derived_key = pipeline._surface_candidate_key(
+            SurfacedCandidate(
+                display_name="Vantora++",
+                name_normalized="",
+                family=NameFamily.SMOOTH_BLEND,
+                surface_policy=SurfacePolicy.ALPHA_LOWER,
+            )
+        )
+        self.assertEqual(explicit_key, "vantora")
+        self.assertEqual(derived_key, pipeline.normalize_brand_token("Vantora++"))
+
+        filter_inputs = pipeline._surface_filter_inputs(avoidance_context)
+        self.assertIn("voltora", filter_inputs["taste_fragments"])
+        self.assertIn("city", filter_inputs["taste_fragments"])
+        self.assertIn("volt", filter_inputs["lead_fragments"])
+        self.assertIn("bald", filter_inputs["lead_fragments"])
+        self.assertIn("ora", filter_inputs["tail_fragments"])
+        self.assertEqual(filter_inputs["crowded_terminal_families"], ("ra", "tx"))
+        self.assertEqual(filter_inputs["crowded_terminal_skeletons"], ("vlt", "tx"))
+
+        filtered, report = pipeline._filter_surfaced_candidates(
+            conn=mock.sentinel.conn,
+            brief=brief,
+            config=RunConfig(
+                db_path=Path("/tmp/brandpipe.db"),
+                title="surface-empty",
+                brief=brief,
+                ideation=IdeationConfig(provider="fixture"),
+                validation=ValidationConfig(),
+                export=ExportConfig(),
+            ),
+            surfaced_candidates=[],
+            avoidance_context=None,
+            batch_id="batch-1",
+        )
+        self.assertEqual(filtered, [])
+        self.assertEqual(report["candidate_count"], 0)
+        self.assertEqual(report["taste_filter"]["kept"], 0)
+        self.assertEqual(report["local_filter"]["kept"], 0)
+
+    def test_pipeline_build_run_metrics_and_export_ranked_csv(self) -> None:
+        config = RunConfig(
+            db_path=Path("/tmp/brandpipe.db"),
+            title="metrics-run",
+            brief=Brief(product_core="utility settlement"),
+            ideation=IdeationConfig(provider="fixture"),
+            validation=ValidationConfig(),
+            export=ExportConfig(top_n=2),
+        )
+        rankings = [
+            RankedCandidate(
+                name="alpha",
+                display_name="Alpha",
+                total_score=9.5,
+                blocker_count=0,
+                unavailable_count=0,
+                unsupported_count=0,
+                warning_count=0,
+                decision="shortlist",
+            ),
+            RankedCandidate(
+                name="beta",
+                display_name="Beta",
+                total_score=7.0,
+                blocker_count=0,
+                unavailable_count=1,
+                unsupported_count=0,
+                warning_count=1,
+                decision="review",
+            ),
+        ]
+
+        metrics = pipeline._build_run_metrics(
+            config=config,
+            batch_id="batch-7",
+            batch_index=3,
+            ideation_candidate_count=5,
+            ideation_report={
+                "pseudoword": {"generated_count": 2},
+                "seed_pool": {"total": 4},
+                "taste_filter": {"kept": 3},
+                "local_filter": {"kept": 2},
+                "candidate_count": 2,
+                "cost_usd": 1.75,
+                "seed_diversity": {"unique": 4},
+                "name_diversity": {"unique": 2},
+                "surface_candidate_count": 2,
+                "surface_family_counts": {"smooth_blend": 2},
+                "family_reports": {"smooth_blend": {"accepted": 2}},
+                "family_counts": {"smooth_blend": 2},
+                "feedback": {"applied": True},
+                "success_context": {"names": ["baldex"]},
+                "avoidance_context": {"external_avoid_names": ["voltora"]},
+                "roles": [{"role": "creative_divergence"}],
+            },
+            validation_status_counts=Counter({"pass": 3, "warn": 1}),
+            validation_check_counts=Counter({"web": 2, "tmview": 1}),
+            rankings=rankings,
+            durations_ms={"ideation": 12, "validation": 34},
+            export_path=Path("/tmp/finalists.csv"),
+        )
+        self.assertEqual(metrics["counts"]["pseudoword_seeds"], 2)
+        self.assertEqual(metrics["counts"]["seed_pool_total"], 4)
+        self.assertEqual(metrics["counts"]["taste_filter_passed"], 3)
+        self.assertEqual(metrics["counts"]["local_filter_passed"], 2)
+        self.assertEqual(metrics["counts"]["ideation_candidates"], 2)
+        self.assertEqual(metrics["counts"]["validation_results"], 4)
+        self.assertEqual(metrics["counts"]["ranked_candidates"], 2)
+        self.assertEqual(metrics["counts"]["export_rows"], 2)
+        self.assertEqual(metrics["top_names"], ["Alpha", "Beta"])
+        self.assertEqual(metrics["decision_counts"], {"review": 1, "shortlist": 1})
+        self.assertEqual(metrics["export_path"], "/tmp/finalists.csv")
+
+        metrics_without_export = pipeline._build_run_metrics(
+            config=config,
+            batch_id="batch-7",
+            batch_index=None,
+            ideation_candidate_count=0,
+            ideation_report={},
+            validation_status_counts=Counter(),
+            validation_check_counts=Counter(),
+            rankings=[],
+            durations_ms={},
+            export_path=None,
+        )
+        self.assertEqual(metrics_without_export["counts"]["export_rows"], 0)
+        self.assertEqual(metrics_without_export["export_path"], "")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_path = Path(tmp_dir) / "ranked.csv"
+            rows = [
+                {
+                    "display_name": "=Alpha\nBeta",
+                    "name": "alpha",
+                    "family": "smooth_blend",
+                    "surface_policy": "alpha_lower",
+                    "total_score": 9.5,
+                    "family_score": 4.5,
+                    "family_rank": 1,
+                    "blocker_count": 0,
+                    "unavailable_count": 0,
+                    "unsupported_count": 0,
+                    "warning_count": 1,
+                    "decision": "shortlist",
+                }
+            ]
+            attractiveness = mock.Mock(score_delta=1.25, status="pass", reasons=("smooth", "clean"))
+            with (
+                mock.patch("brandpipe.pipeline.db.fetch_ranked_rows", return_value=rows),
+                mock.patch(
+                    "brandpipe.pipeline.db.get_run",
+                    return_value={"config_json": json.dumps({"ideation": {"naming_policy": {}}})},
+                ),
+                mock.patch("brandpipe.pipeline.build_naming_policy", return_value=mock.sentinel.policy),
+                mock.patch("brandpipe.pipeline.score_name_attractiveness", return_value=attractiveness),
+            ):
+                written = pipeline.export_ranked_csv(
+                    conn=mock.sentinel.conn,
+                    run_id=5,
+                    out_path=out_path,
+                    limit=10,
+                )
+
+            self.assertEqual(written, out_path)
+            with out_path.open("r", encoding="utf-8", newline="") as handle:
+                exported_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(exported_rows), 1)
+            self.assertEqual(exported_rows[0]["name"], "'=Alpha Beta")
+            self.assertEqual(exported_rows[0]["family"], "smooth_blend")
+            self.assertEqual(exported_rows[0]["surface_policy"], "alpha_lower")
+            self.assertEqual(exported_rows[0]["attractiveness_score"], "1.25")
+            self.assertEqual(exported_rows[0]["attractiveness_status"], "pass")
+            self.assertEqual(exported_rows[0]["attractiveness_reasons"], "smooth,clean")
 
 
 if __name__ == "__main__":

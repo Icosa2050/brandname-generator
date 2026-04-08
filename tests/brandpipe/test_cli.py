@@ -5,10 +5,12 @@ import contextlib
 import csv
 import io
 import json
+import runpy
 import sys
 import tempfile
 import textwrap
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -142,6 +144,58 @@ class CliTests(unittest.TestCase):
 
             with self.assertRaisesRegex(SystemExit, "run not found: 99"):
                 main(["status", "--db", str(db_path), "--run-id", "99"])
+
+    def test_status_command_lists_runs_and_prints_metrics_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "brandpipe.db"
+            with db.open_db(db_path) as conn:
+                db.ensure_schema(conn)
+                run_one = db.create_run(
+                    conn,
+                    title="first-run",
+                    brief={"product_core": "utility-cost settlement software"},
+                    config={},
+                    batch_id="batch-42",
+                )
+                run_two = db.create_run(
+                    conn,
+                    title="second-run",
+                    brief={"product_core": "utility-cost settlement software"},
+                    config={},
+                    batch_id="batch-42",
+                )
+                db.update_run_metrics(conn, run_id=run_one, metrics={"counts": {"ranked_candidates": 2}})
+                db.update_run_metrics(conn, run_id=run_two, metrics={"counts": {"ranked_candidates": 1}})
+                conn.commit()
+
+            single_stdout = io.StringIO()
+            with contextlib.redirect_stdout(single_stdout):
+                exit_code = main(
+                    ["status", "--db", str(db_path), "--run-id", str(run_one), "--show-metrics"]
+                )
+            self.assertEqual(exit_code, 0)
+            self.assertIn("metrics=", single_stdout.getvalue())
+
+            list_stdout = io.StringIO()
+            with contextlib.redirect_stdout(list_stdout):
+                exit_code = main(
+                    [
+                        "status",
+                        "--db",
+                        str(db_path),
+                        "--batch-id",
+                        "batch-42",
+                        "--limit",
+                        "5",
+                        "--show-metrics",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            output = list_stdout.getvalue()
+            self.assertIn(f"id={run_one}", output)
+            self.assertIn(f"id={run_two}", output)
+            self.assertIn("metrics=", output)
+            self.assertIn("batch_id=batch-42 runs=2", output)
 
     def test_validate_command_writes_standardized_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -452,7 +506,208 @@ class CliTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(ranking)
                 assert ranking is not None
-                self.assertEqual(ranking["decision"], "blocked")
+            self.assertEqual(ranking["decision"], "blocked")
+
+    def test_recheck_tmview_command_prints_nice_class_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "brandpipe.db"
+            profile_dir = Path(tmp_dir) / "tmview-profile"
+            profile_dir.mkdir()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with mock.patch(
+                    "brandpipe.cli.recheck_tmview",
+                    return_value={
+                        "retried": 0,
+                        "run_count": 1,
+                        "runs": [
+                            {
+                                "run_id": 7,
+                                "retried": 0,
+                                "promoted_to_candidate": 0,
+                                "promoted_to_watch": 0,
+                                "blocked": 0,
+                                "unchanged": 1,
+                            }
+                        ],
+                    },
+                ) as recheck_mock:
+                    exit_code = main(
+                        [
+                            "recheck-tmview",
+                            "--db",
+                            str(db_path),
+                            "--profile-dir",
+                            str(profile_dir),
+                            "--nice-class",
+                            "9,OR,42",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("nice_class=9,OR,42", stdout.getvalue())
+        self.assertEqual(recheck_mock.call_args.kwargs["nice_class"], "9,OR,42")
+
+    def test_browser_profile_commands_print_expected_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_dir = Path(tmp_dir) / "browser-profile"
+            chrome_executable = Path(tmp_dir) / "chrome"
+            smoke_stdout = io.StringIO()
+            with contextlib.redirect_stdout(smoke_stdout):
+                with mock.patch(
+                    "brandpipe.cli.run_browser_profile_smoke",
+                    return_value={
+                        "profile_dir": str(profile_dir),
+                        "title": "Search Results",
+                        "final_url": "https://search.brave.com/search?q=vantora",
+                        "cookies_count": 5,
+                        "screenshot_path": str(profile_dir / "smoke.png"),
+                        "storage_state_path": str(profile_dir / "state.json"),
+                        "report_path": str(profile_dir / "report.json"),
+                    },
+                ) as smoke_mock:
+                    exit_code = main(
+                        [
+                            "browser-profile-smoke",
+                            "--profile-dir",
+                            str(profile_dir),
+                            "--chrome-executable",
+                            str(chrome_executable),
+                            "--query",
+                            "vantora",
+                            "--headed",
+                            "--timeout-ms",
+                            "4500",
+                            "--settle-ms",
+                            "750",
+                        ]
+                    )
+
+            self.assertEqual(exit_code, 0)
+            smoke_output = smoke_stdout.getvalue()
+            self.assertIn("screenshot=", smoke_output)
+            self.assertIn("storage_state=", smoke_output)
+            self.assertIn("report=", smoke_output)
+            self.assertEqual(smoke_mock.call_args.kwargs["profile_dir"], profile_dir.resolve())
+            self.assertEqual(smoke_mock.call_args.kwargs["chrome_executable"], chrome_executable.resolve())
+            self.assertTrue(smoke_mock.call_args.kwargs["headed"])
+
+            warm_stdout = io.StringIO()
+            with contextlib.redirect_stdout(warm_stdout):
+                with mock.patch(
+                    "brandpipe.cli.warm_browser_profile",
+                    return_value={
+                        "profile_dir": str(profile_dir),
+                        "title": "Warm Browser",
+                        "final_url": "https://search.brave.com/search?q=vantora",
+                        "cookies_count": 2,
+                        "storage_state_path": str(profile_dir / "state.json"),
+                        "report_path": str(profile_dir / "warm-report.json"),
+                    },
+                ) as warm_mock:
+                    exit_code = main(
+                        [
+                            "browser-profile-warmup",
+                            "--profile-dir",
+                            str(profile_dir),
+                            "--chrome-executable",
+                            str(chrome_executable),
+                            "--query",
+                            "vantora",
+                            "--timeout-ms",
+                            "5000",
+                            "--settle-ms",
+                            "900",
+                        ]
+                    )
+
+            self.assertEqual(exit_code, 0)
+            warm_output = warm_stdout.getvalue()
+            self.assertIn("storage_state=", warm_output)
+            self.assertIn("report=", warm_output)
+            self.assertEqual(warm_mock.call_args.kwargs["profile_dir"], profile_dir.resolve())
+            self.assertEqual(warm_mock.call_args.kwargs["chrome_executable"], chrome_executable.resolve())
+
+    def test_tmview_probe_command_prints_results_and_optional_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            profile_dir = Path(tmp_dir) / "tmview-profile"
+            profile_dir.mkdir()
+            chrome_executable = Path(tmp_dir) / "chrome"
+            output_json = Path(tmp_dir) / "tmview.json"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with (
+                    mock.patch(
+                        "brandpipe.cli.probe_tmview_names",
+                        return_value=[
+                            TmviewProbeResult(
+                                name="vantora",
+                                url="https://example.test/tmview",
+                                query_ok=True,
+                                source="tmview_playwright",
+                                exact_hits=1,
+                                near_hits=0,
+                                result_count=3,
+                                sample_text="VANTORA",
+                                error="",
+                            )
+                        ],
+                    ) as probe_mock,
+                    mock.patch(
+                        "brandpipe.cli.write_tmview_results_json",
+                        return_value=output_json,
+                    ) as write_mock,
+                ):
+                    exit_code = main(
+                        [
+                            "tmview-probe",
+                            "--names",
+                            "vantora, meridel ,",
+                            "--profile-dir",
+                            str(profile_dir),
+                            "--chrome-executable",
+                            str(chrome_executable),
+                            "--nice-class",
+                            "9,OR,42",
+                            "--output-json",
+                            str(output_json),
+                            "--headful",
+                        ]
+                    )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("nice_class=9,OR,42", output)
+        self.assertIn("tmview_probe name=vantora", output)
+        self.assertIn(f"output_json={output_json}", output)
+        self.assertEqual(probe_mock.call_args.kwargs["names"], ["vantora", "meridel"])
+        self.assertEqual(probe_mock.call_args.kwargs["profile_dir"], profile_dir.resolve())
+        self.assertEqual(probe_mock.call_args.kwargs["chrome_executable"], chrome_executable.resolve())
+        self.assertFalse(probe_mock.call_args.kwargs["headless"])
+        self.assertEqual(probe_mock.call_args.kwargs["nice_class"], "9,OR,42")
+        self.assertEqual(write_mock.call_args.args[0], str(output_json))
+
+    def test_main_rejects_mocked_unsupported_command(self) -> None:
+        parser = mock.Mock()
+        parser.parse_args.return_value = mock.Mock(command="mystery")
+        with mock.patch("brandpipe.cli.build_parser", return_value=parser):
+            with self.assertRaisesRegex(SystemExit, "unsupported command: mystery"):
+                main([])
+
+    def test_module_entrypoint_raises_system_exit_with_main_return_code(self) -> None:
+        with mock.patch("sys.argv", ["brandpipe.cli", "run", "--config", "fixture.toml"]):
+            with mock.patch("brandpipe.run_cli.run_config_command") as run_mock:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"'brandpipe\.cli' found in sys\.modules",
+                        category=RuntimeWarning,
+                    )
+                    with self.assertRaises(SystemExit) as exc:
+                        runpy.run_module("brandpipe.cli", run_name="__main__")
+
+        self.assertEqual(exc.exception.code, 0)
+        run_mock.assert_called_once_with("fixture.toml")
 
 
 if __name__ == "__main__":

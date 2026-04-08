@@ -13,8 +13,21 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from brandpipe.models import Brief, PseudowordConfig
-from brandpipe.pseudowords import derive_seed_words, generate_pseudoword_pool, select_round_seed_names
+import brandpipe.pseudowords as MODULE
+from brandpipe.models import Brief, LexiconBundle, PseudowordConfig
+from brandpipe.pseudowords import (
+    _blocked_lexical_fragments,
+    _extract_plain_candidate,
+    _generate_rare_pronounceable_pool,
+    _generate_wuggy_pseudowords,
+    _is_low_collision_shape,
+    _plugin_target_counts,
+    _seed_forms,
+    derive_seed_words,
+    derive_seed_words_from_lexicon,
+    generate_pseudoword_pool,
+    select_round_seed_names,
+)
 
 
 class _FakeWuggyGenerator:
@@ -78,6 +91,30 @@ class PseudowordTests(unittest.TestCase):
 
         self.assertIn("reliable", seeds)
         self.assertIn("defensible", seeds)
+
+    def test_lexicon_seed_helpers_and_candidate_extraction_cover_normalization_edges(self) -> None:
+        bundle = LexiconBundle(
+            core_terms=("stories", "reliability"),
+            modifiers=("flexibility", "ledgers"),
+            associative_terms=("stories", "about"),
+        )
+
+        seeds = derive_seed_words_from_lexicon(bundle)
+
+        self.assertIn("story", seeds)
+        self.assertIn("reliable", seeds)
+        self.assertIn("flexible", seeds)
+        self.assertIn("ledger", seeds)
+        self.assertNotIn("about", seeds)
+        self.assertEqual(_seed_forms("trust"), [])
+        self.assertEqual(_extract_plain_candidate("zivora"), "zivora")
+        self.assertEqual(_extract_plain_candidate({"plain": 3, "pseudoword": "valtor"}), "valtor")
+        self.assertIn("fallback", _extract_plain_candidate({"other": "fallback"}))
+
+    def test_seed_round_and_plugin_count_helpers_cover_empty_inputs(self) -> None:
+        self.assertEqual(select_round_seed_names(seed_pool=[], round_index=3, max_count=2), [])
+        self.assertEqual(select_round_seed_names(seed_pool=["alpha"], round_index=0, max_count=0), [])
+        self.assertEqual(_plugin_target_counts(5, 0), [])
 
     def test_generate_pseudoword_pool_uses_wuggy_when_available(self) -> None:
         fake_module = types.SimpleNamespace(WuggyGenerator=_FakeWuggyGenerator)
@@ -250,6 +287,197 @@ class PseudowordTests(unittest.TestCase):
         self.assertGreaterEqual(len(names), 10)
         self.assertEqual(report["warning"], "")
         self.assertGreaterEqual(int(report["rare_pronounceable"]["generated_count"]), 4)
+
+    def test_blocked_fragment_and_low_collision_helpers_cover_rejection_paths(self) -> None:
+        brief = Brief(
+            product_core="tenant signal ledger",
+            forbidden_directions=["clarity"],
+            notes="about",
+        )
+        lexicon = LexiconBundle(
+            core_terms=("signal",),
+            modifiers=("about",),
+            avoid_terms=("trust",),
+            associative_terms=("clarity",),
+        )
+
+        blocked = _blocked_lexical_fragments(brief=brief, lexicon=lexicon, seed_words=["settlor"])
+
+        self.assertIn("signal", blocked)
+        self.assertIn("clarity", blocked)
+        self.assertIn("settlor", blocked)
+        self.assertNotIn("about", blocked)
+        self.assertFalse(
+            _is_low_collision_shape("bad", blocked_fragments=(), initial_clusters=("zv",), internal_clusters=("vr",))
+        )
+        self.assertFalse(
+            _is_low_collision_shape("aaaezx", blocked_fragments=(), initial_clusters=("zv",), internal_clusters=("vr",))
+        )
+        self.assertFalse(
+            _is_low_collision_shape("abclmn", blocked_fragments=(), initial_clusters=("zv",), internal_clusters=("vr",))
+        )
+        self.assertFalse(
+            _is_low_collision_shape("stralp", blocked_fragments=(), initial_clusters=("zv",), internal_clusters=("vr",))
+        )
+        self.assertFalse(
+            _is_low_collision_shape("tanaka", blocked_fragments=(), initial_clusters=("zv",), internal_clusters=("vr",))
+        )
+        self.assertFalse(
+            _is_low_collision_shape("valeria", blocked_fragments=(), initial_clusters=("zv",), internal_clusters=("vr",))
+        )
+
+    def test_rare_generator_reports_unsupported_profiles_and_empty_output(self) -> None:
+        names, report = _generate_rare_pronounceable_pool(
+            brief=Brief(product_core="tenant balance clarity ledger"),
+            config=PseudowordConfig(rare_seed_count=2, rare_profile="mystery"),
+            lexicon=None,
+            seed_words=["ledger"],
+            seen=set(),
+        )
+
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "unsupported_rare_profile")
+
+        with mock.patch("brandpipe.pseudowords._is_low_collision_shape", return_value=False):
+            names, report = _generate_rare_pronounceable_pool(
+                brief=Brief(product_core="tenant balance clarity ledger"),
+                config=PseudowordConfig(rare_seed_count=2, rare_profile="balanced"),
+                lexicon=None,
+                seed_words=["ledger"],
+                seen=set(),
+            )
+
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "rare_pronounceable_empty")
+
+    def test_generate_wuggy_helper_handles_zero_seedless_and_import_fail_paths(self) -> None:
+        names, report = _generate_wuggy_pseudowords(
+            seed_words=["ledger"],
+            config=PseudowordConfig(seed_count=0),
+        )
+        self.assertEqual(names, [])
+        self.assertEqual(report["requested_count"], 0)
+
+        names, report = _generate_wuggy_pseudowords(
+            seed_words=[],
+            config=PseudowordConfig(seed_count=3),
+        )
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "no_seed_words")
+
+        with mock.patch.dict(sys.modules, {"wuggy": None}):
+            names, report = _generate_wuggy_pseudowords(
+                seed_words=["ledger"],
+                config=PseudowordConfig(seed_count=2),
+            )
+
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "wuggy_unavailable")
+        self.assertTrue(report["error_class"])
+
+    def test_generate_wuggy_helper_reports_unsupported_plugin_and_download_failures(self) -> None:
+        fake_module = types.SimpleNamespace(WuggyGenerator=_FakeWuggyGenerator)
+
+        with mock.patch.dict(sys.modules, {"wuggy": fake_module}):
+            names, report = _generate_wuggy_pseudowords(
+                seed_words=["ledger"],
+                config=PseudowordConfig(
+                    language_plugin="orthographic_spanish",
+                    language_plugins=("orthographic_spanish",),
+                    seed_count=2,
+                ),
+            )
+
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "unsupported_language_plugin")
+        self.assertEqual(report["supported_plugins"], ["orthographic_english", "orthographic_german"])
+
+        class _DownloadFailWuggy(_FakeWuggyGenerator):
+            def download_language_plugin(self, language_plugin: str, auto_download: bool = False) -> None:
+                del language_plugin, auto_download
+                raise RuntimeError("download boom")
+
+        failing_module = types.SimpleNamespace(WuggyGenerator=_DownloadFailWuggy)
+        with mock.patch.dict(sys.modules, {"wuggy": failing_module}):
+            with mock.patch("brandpipe.pseudowords.inspect.getfile", return_value="/tmp/wuggy/generators/fake.py"):
+                with mock.patch("brandpipe.pseudowords.os.path.exists", return_value=False):
+                    names, report = _generate_wuggy_pseudowords(
+                        seed_words=["ledger"],
+                        config=PseudowordConfig(seed_count=2),
+                    )
+
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "language_plugin_download_failed")
+        self.assertEqual(report["error_class"], "RuntimeError")
+
+    def test_generate_wuggy_helper_reports_load_and_generation_failures(self) -> None:
+        class _LoadFailWuggy(_FakeWuggyGenerator):
+            def load(self, language_plugin: str) -> None:
+                del language_plugin
+                raise RuntimeError("load boom")
+
+        load_module = types.SimpleNamespace(WuggyGenerator=_LoadFailWuggy)
+        with mock.patch.dict(sys.modules, {"wuggy": load_module}):
+            names, report = _generate_wuggy_pseudowords(
+                seed_words=["ledger"],
+                config=PseudowordConfig(seed_count=2),
+            )
+
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "language_plugin_load_failed")
+        self.assertEqual(report["error_class"], "RuntimeError")
+
+        class _GenerationFailWuggy(_FakeWuggyGenerator):
+            def generate_classic(self, input_sequences, ncandidates_per_sequence=10, output_mode="plain"):  # type: ignore[no-untyped-def]
+                del input_sequences, ncandidates_per_sequence, output_mode
+                raise RuntimeError("generation boom")
+
+        generation_module = types.SimpleNamespace(WuggyGenerator=_GenerationFailWuggy)
+        with mock.patch.dict(sys.modules, {"wuggy": generation_module}):
+            names, report = _generate_wuggy_pseudowords(
+                seed_words=["ledger"],
+                config=PseudowordConfig(seed_count=2),
+            )
+
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "generation_failed")
+        self.assertEqual(report["error_class"], "RuntimeError")
+
+    def test_generate_pseudoword_pool_preserves_top_level_no_name_warnings(self) -> None:
+        brief = Brief(product_core="tenant balance clarity ledger")
+        config = PseudowordConfig(seed_count=2)
+
+        with (
+            mock.patch.object(MODULE, "derive_seed_words", return_value=["ledger"]),
+            mock.patch.object(
+                MODULE,
+                "_generate_wuggy_pseudowords",
+                return_value=(
+                    [],
+                    {
+                        "language_plugin": "orthographic_english",
+                        "language_plugins": ["orthographic_english"],
+                        "attempted_seed_count": 1,
+                        "successful_seed_count": 0,
+                        "dropped_seeds": [],
+                        "plugin_reports": [],
+                        "warning": "wuggy_unavailable",
+                        "downloaded_plugin": True,
+                        "supported_plugins": ["orthographic_english"],
+                        "error_class": "ModuleNotFoundError",
+                        "error_message": "missing",
+                    },
+                ),
+            ),
+            mock.patch.object(MODULE, "_generate_rare_pronounceable_pool", return_value=([], {"warning": ""})),
+        ):
+            names, report = generate_pseudoword_pool(brief=brief, config=config)
+
+        self.assertEqual(names, [])
+        self.assertEqual(report["warning"], "wuggy_unavailable")
+        self.assertTrue(report["downloaded_plugin"])
+        self.assertEqual(report["supported_plugins"], ["orthographic_english"])
+        self.assertEqual(report["error_class"], "ModuleNotFoundError")
 
     def test_select_round_seed_names_rotates_pool(self) -> None:
         pool = ["alpha", "bravo", "charly", "delta", "echo"]
