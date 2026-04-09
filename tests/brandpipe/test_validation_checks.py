@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 import unittest
 from pathlib import Path
+from urllib.parse import urlparse
 from unittest import mock
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -210,7 +211,8 @@ class ValidationChecksTests(unittest.TestCase):
 
         def fake_social_probe(url: str) -> dict[str, object]:
             seen_urls.append(url)
-            if "github.com" in url:
+            host = (urlparse(url).hostname or "").lower()
+            if host == "github.com" or host.endswith(".github.com"):
                 return {
                     "availability": "unknown",
                     "status_code": 429,
