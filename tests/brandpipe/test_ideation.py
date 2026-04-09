@@ -1,20 +1,24 @@
 # ruff: noqa: E402
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import socket
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib import error
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+import brandpipe.ideation as ideation
 from brandpipe.ideation import (
     _avoidance_fragment_hints,
     build_prompt,
@@ -45,7 +49,131 @@ class _FakeHttpResponse:
         return False
 
 
+class _RawHttpResponse:
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    def read(self) -> bytes:
+        return self._raw
+
+    def __enter__(self) -> "_RawHttpResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
 class IdeationTests(unittest.TestCase):
+    def test_top_level_helpers_cover_prompt_context_and_limits(self) -> None:
+        self.assertEqual(ideation.normalize_alpha_name(" Van-tora 2! "), "vantora")
+        self.assertTrue(ideation.is_valid_candidate_name("vantora"))
+        self.assertFalse(ideation.is_valid_candidate_name("ab"))
+        self.assertEqual(ideation.render_context_lines({}), [])
+        self.assertEqual(ideation.format_avoidance_block(None), "")
+        self.assertEqual(ideation.format_positive_anchor_block(None), "")
+        self.assertEqual(
+            ideation._literal_fragment_hints(("priva", "PARCL", "xx", "cordnance"), limit=3),
+            ["priv", "parc", "cordn"],
+        )
+        self.assertEqual(
+            ideation._avoidance_terminal_families(
+                {"external_terminal_families": ["ra", "RA", "x", "terra", "zen"]},
+                limit=3,
+            ),
+            ("ra", "terra", "zen"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            prompt_path = root / "prompt.txt"
+            empty_path = root / "empty.txt"
+            read_error_path = root / "prompt-dir"
+            prompt_path.write_text("  craft names boldly  \n", encoding="utf-8")
+            empty_path.write_text("   \n", encoding="utf-8")
+            read_error_path.mkdir()
+
+            self.assertEqual(ideation.load_prompt_template(None), "")
+            self.assertEqual(ideation.load_prompt_template(prompt_path), "craft names boldly")
+            with self.assertRaisesRegex(ValueError, "prompt_template_not_found"):
+                ideation.load_prompt_template(root / "missing.txt")
+            with self.assertRaisesRegex(ValueError, "prompt_template_empty"):
+                ideation.load_prompt_template(empty_path)
+            with self.assertRaisesRegex(ValueError, "prompt_template_read_error"):
+                ideation.load_prompt_template(read_error_path)
+
+        brief = Brief(
+            product_core="utility settlement",
+            target_users=["operators"],
+            trust_signals=["clarity"],
+            forbidden_directions=["banking"],
+            language_market="de",
+            notes="keep it light",
+        )
+        context_packet = ideation._context_packet(brief)
+        self.assertEqual(
+            ideation.render_context_lines(context_packet),
+            [
+                "product_core: utility settlement",
+                "target_users: operators",
+                "trust_signals: clarity",
+                "forbidden_directions: banking",
+                "language_market: de",
+                "notes: keep it light",
+            ],
+        )
+        recomb_packet = ideation._role_context_packet(context_packet, "recombinator")
+        self.assertEqual(recomb_packet["product_core"], "")
+        self.assertEqual(recomb_packet["target_users"], [])
+        self.assertIn("Recombine from lexicon cues and seed shapes.", str(recomb_packet["notes"]))
+        hybrid_packet = ideation._role_context_packet(context_packet, "morpheme_hybridizer")
+        self.assertEqual(hybrid_packet["product_core"], "")
+        self.assertIn("Fuse shorter lexicon atoms", str(hybrid_packet["notes"]))
+        contrarian_packet = ideation._role_context_packet(context_packet, "contrarian")
+        self.assertEqual(contrarian_packet["target_users"], [])
+        explorer_packet = ideation._role_context_packet(context_packet, "phonetic_explorer")
+        self.assertEqual(explorer_packet["target_users"], [])
+        self.assertIn("Push farther on opening and rhythm variation", str(explorer_packet["notes"]))
+        ending_packet = ideation._role_context_packet(context_packet, "ending_diversifier")
+        self.assertIn("Favor endings and terminal cadences", str(ending_packet["notes"]))
+        self.assertEqual(ideation._role_context_packet(context_packet, "creative_divergence"), context_packet)
+
+        self.assertEqual(
+            ideation._round_seed_target(
+                IdeationConfig(provider="fixture", candidates_per_round=3, round_seed_min=4, round_seed_max=6)
+            ),
+            4,
+        )
+        self.assertEqual(
+            ideation._round_seed_target(
+                IdeationConfig(provider="fixture", candidates_per_round=20, round_seed_min=3, round_seed_max=6)
+            ),
+            6,
+        )
+        lexicon_terms = ideation._prompt_lexicon_terms(
+            LexiconBundle(
+                core_terms=("core1", "core2"),
+                modifiers=("mod1", "mod2"),
+                associative_terms=("assoc1", "assoc2"),
+                morphemes=("m1", "m2", "m3"),
+            ),
+            IdeationConfig(
+                provider="fixture",
+                lexicon_core_limit=1,
+                lexicon_modifier_limit=1,
+                lexicon_associative_limit=1,
+                lexicon_morpheme_limit=2,
+            ),
+        )
+        self.assertEqual(
+            lexicon_terms,
+            {
+                "core_terms": ["core1"],
+                "modifiers": ["mod1"],
+                "associative_terms": ["assoc1"],
+                "morphemes": ["m1", "m2"],
+            },
+        )
+
     def test_build_prompt_varies_scheme_by_role(self) -> None:
         base_context = {
             "product_core": "utility-cost settlement software",
@@ -696,6 +824,97 @@ class IdeationTests(unittest.TestCase):
         self.assertEqual(usage["max_completion_tokens"], 1024)
         self.assertEqual(usage["response_preview"], "Here is the JSON requested: ```")
 
+    def test_payload_and_fixture_helpers_cover_fallbacks(self) -> None:
+        raw = """
+        preface
+        ```
+        {"candidates":[{"name":"Vantora"}]}
+        ```
+        suffix
+        """
+        self.assertEqual(
+            ideation.extract_json_object(raw),
+            '{"candidates":[{"name":"Vantora"}]}',
+        )
+        self.assertIsNone(ideation.extract_json_object("no dict here"))
+        self.assertIsNone(ideation._load_candidate_payload(""))
+        self.assertEqual(
+            ideation._load_candidate_payload(raw),
+            {"candidates": [{"name": "Vantora"}]},
+        )
+        self.assertEqual(ideation._candidate_source({"candidates": ["alpha"]}), ["alpha"])
+        self.assertEqual(ideation._candidate_source({"names": ["beta"]}), ["beta"])
+        self.assertEqual(ideation._candidate_source(["gamma"]), ["gamma"])
+        self.assertEqual(ideation._candidate_source("nope"), [])
+        self.assertEqual(
+            ideation.extract_candidate_names(
+                '{"names":["Alpha", {"candidate":"Beta"}, {"name":"Gamma"}, {"ignored":1}]}'
+            ),
+            ["Alpha", "Beta", "Gamma"],
+        )
+        self.assertEqual(
+            ideation.parse_candidate_payload('["Vantora", "vantora", "ab", "Meridel"]'),
+            ["meridel", "vantora"],
+        )
+
+        self.assertEqual(ideation.extract_response_content({}), ("", {}, "missing_choices"))
+        self.assertEqual(
+            ideation.extract_response_content(
+                {
+                    "usage": {"prompt_tokens": 4},
+                    "choices": [{"message": {"content": [{"text": "Alpha"}, {"text": "Beta"}]}}],
+                }
+            ),
+            ("Alpha\nBeta", {"prompt_tokens": 4}, ""),
+        )
+        self.assertEqual(
+            ideation.extract_response_content({"choices": [{"message": {"content": 123}}]}),
+            ("123", {}, ""),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            self.assertEqual(
+                ideation.load_fixture_candidates_with_usage(root / "missing.json"),
+                ([], {}, "fixture_missing"),
+            )
+
+            read_error_path = root / "fixture_dir"
+            read_error_path.mkdir()
+            self.assertEqual(
+                ideation.load_fixture_candidates_with_usage(read_error_path),
+                ([], {}, "fixture_read_error"),
+            )
+
+            parse_fail_path = root / "parse_fail.json"
+            parse_fail_path.write_text(
+                json.dumps(
+                    {
+                        "usage": {"prompt_tokens": 9},
+                        "choices": [{"message": {"content": "not useful"}}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                ideation.load_fixture_candidates_with_usage(parse_fail_path),
+                ([], {"prompt_tokens": 9}, "candidate_parse_failed"),
+            )
+
+            fallback_path = root / "fallback.txt"
+            fallback_path.write_text("- Vantora\n- meridel\n- ab\n", encoding="utf-8")
+            self.assertEqual(
+                ideation.load_fixture_candidates_with_usage(fallback_path),
+                (["meridel", "vantora"], {}, ""),
+            )
+
+            empty_path = root / "empty.txt"
+            empty_path.write_text("###\n--\n", encoding="utf-8")
+            self.assertEqual(
+                ideation.load_fixture_candidates_with_usage(empty_path),
+                ([], {}, "fixture_no_candidates"),
+            )
+
     def test_openai_compat_includes_pseudoword_seed_pool_in_prompt(self) -> None:
         captured: dict[str, object] = {}
 
@@ -1110,6 +1329,216 @@ class IdeationTests(unittest.TestCase):
         self.assertEqual(report["roles"][0]["desired_target"], 2)
         self.assertEqual(report["roles"][0]["requested_target"], 4)
         self.assertEqual(report["overgenerate_factor"], 2.0)
+
+    def test_transport_and_provider_helpers_cover_edge_cases(self) -> None:
+        self.assertEqual(ideation._normalize_openai_compat_base_url(""), "https://api.openai.com/v1")
+        self.assertEqual(
+            ideation._normalize_openai_compat_base_url("127.0.0.1:1234/v1"),
+            "http://127.0.0.1:1234/v1",
+        )
+        self.assertEqual(
+            ideation._normalize_openai_compat_base_url("https://example.com/v1/"),
+            "https://example.com/v1",
+        )
+        self.assertEqual(
+            ideation._normalize_openai_compat_base_url("bad url"),
+            "https://api.openai.com/v1",
+        )
+        self.assertEqual(ideation._normalize_openrouter_http_referer(""), "")
+        self.assertEqual(
+            ideation._normalize_openrouter_http_referer('"example.com/brandpipe"'),
+            "https://example.com/brandpipe",
+        )
+        self.assertEqual(
+            ideation._normalize_openrouter_http_referer("https://app.example/path"),
+            "https://app.example/path",
+        )
+        self.assertEqual(ideation._normalize_openrouter_http_referer("bad referer value"), "")
+        self.assertEqual(ideation._temperature("oops"), 0.8)
+        self.assertEqual(ideation._temperature(-1.0), 0.0)
+        self.assertEqual(ideation._temperature(9.0), 2.0)
+        self.assertEqual(ideation._retry_delay_seconds(0), 0.25)
+        self.assertEqual(ideation._retry_delay_seconds(10), 2.0)
+        self.assertEqual(ideation._max_completion_tokens("google/gemini-3.1-pro", 4), 1024)
+        self.assertEqual(ideation._max_completion_tokens("openai/gpt-test", 2), 256)
+        self.assertEqual(
+            ideation._openrouter_reasoning_payload("moonshotai/kimi-k2.5"),
+            {"effort": "none", "exclude": True},
+        )
+        self.assertIsNone(ideation._openrouter_reasoning_payload(""))
+        self.assertEqual(
+            ideation._openrouter_response_modes("google/gemini-3.1-pro"),
+            ("json_object", "json_schema", "plain"),
+        )
+        self.assertEqual(
+            ideation._openrouter_response_modes("openai/gpt-test"),
+            ("json_schema", "json_object", "plain"),
+        )
+        self.assertEqual(ideation._response_preview("  too \n many \t spaces  ", limit=8), "too many")
+        self.assertEqual(ideation._response_preview("", limit=8), "")
+
+        self.assertEqual(
+            ideation._post_json(url="https://example.com", headers={}, payload={}, timeout_ms=0),
+            (None, "invalid_timeout"),
+        )
+        with mock.patch("brandpipe.ideation.request.urlopen", return_value=_FakeHttpResponse({"ok": True})):
+            response, err = ideation._post_json(
+                url="https://example.com",
+                headers={"X-Test": "1"},
+                payload={"hello": "world"},
+                timeout_ms=1000,
+            )
+        self.assertEqual(response, {"ok": True})
+        self.assertEqual(err, "")
+        with mock.patch("brandpipe.ideation.request.urlopen", return_value=_RawHttpResponse(b"not-json")):
+            self.assertEqual(
+                ideation._post_json(url="https://example.com", headers={}, payload={}, timeout_ms=1000),
+                (None, "response_json_decode_error"),
+            )
+        with mock.patch("brandpipe.ideation.request.urlopen", return_value=_RawHttpResponse(b"[]")):
+            self.assertEqual(
+                ideation._post_json(url="https://example.com", headers={}, payload={}, timeout_ms=1000),
+                (None, "response_invalid_root"),
+            )
+        with mock.patch(
+            "brandpipe.ideation.request.urlopen",
+            side_effect=error.HTTPError("https://example.com", 503, "boom", hdrs=None, fp=None),
+        ):
+            self.assertEqual(
+                ideation._post_json(url="https://example.com", headers={}, payload={}, timeout_ms=1000),
+                (None, "http_503"),
+            )
+        with mock.patch("brandpipe.ideation.request.urlopen", side_effect=error.URLError(socket.timeout("slow"))):
+            self.assertEqual(
+                ideation._post_json(url="https://example.com", headers={}, payload={}, timeout_ms=1000),
+                (None, "timeout"),
+            )
+        with mock.patch("brandpipe.ideation.request.urlopen", side_effect=error.URLError(OSError("no route"))):
+            self.assertEqual(
+                ideation._post_json(url="https://example.com", headers={}, payload={}, timeout_ms=1000),
+                (None, "network_error"),
+            )
+        with mock.patch("brandpipe.ideation.request.urlopen", side_effect=socket.timeout("slow")):
+            self.assertEqual(
+                ideation._post_json(url="https://example.com", headers={}, payload={}, timeout_ms=1000),
+                (None, "timeout"),
+            )
+        with mock.patch("brandpipe.ideation.request.urlopen", side_effect=http.client.HTTPException("bad")):
+            self.assertEqual(
+                ideation._post_json(url="https://example.com", headers={}, payload={}, timeout_ms=1000),
+                (None, "network_error"),
+            )
+
+        explicit_roles = (
+            IdeationRoleConfig(model="alpha", role="creative_divergence", temperature=0.3),
+            IdeationRoleConfig(model="beta", role="recombinator", temperature=0.5),
+        )
+        self.assertEqual(
+            ideation._ideation_roles(IdeationConfig(provider="openrouter_http", roles=explicit_roles)),
+            explicit_roles,
+        )
+        model_role = ideation._ideation_roles(
+            IdeationConfig(provider="openrouter_http", model="llama", temperature=0.6)
+        )
+        self.assertEqual(len(model_role), 1)
+        self.assertEqual(model_role[0].model, "llama")
+        self.assertEqual(model_role[0].role, "creative_divergence")
+        self.assertEqual(model_role[0].temperature, 0.6)
+        self.assertEqual(ideation._ideation_roles(IdeationConfig(provider="openrouter_http")), ())
+        self.assertTrue(ideation._candidate_schema(True)["strict"])
+        self.assertFalse(ideation._candidate_schema(False)["strict"])
+        self.assertEqual(
+            ideation.estimate_usage_cost_usd(
+                usage={"cost": "1.234567891"},
+                in_price_per_1k=0.0,
+                out_price_per_1k=0.0,
+            ),
+            1.23456789,
+        )
+        self.assertEqual(
+            ideation.estimate_usage_cost_usd(
+                usage={"prompt_tokens": 500, "completion_tokens": 250},
+                in_price_per_1k=2.0,
+                out_price_per_1k=4.0,
+            ),
+            2.0,
+        )
+
+        role_cfg = IdeationRoleConfig(model="mistralai/mistral-small-creative", temperature=0.7)
+        config = IdeationConfig(provider="openrouter_http", api_key_env="BRANDPIPE_TEST_KEY", timeout_ms=500)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "missing env BRANDPIPE_TEST_KEY"):
+                ideation._call_provider_for_role(
+                    provider="openrouter_http",
+                    config=config,
+                    role_cfg=role_cfg,
+                    prompt="prompt",
+                    target_count=3,
+                )
+        with (
+            mock.patch.dict(os.environ, {"BRANDPIPE_TEST_KEY": "secret"}, clear=True),
+            mock.patch(
+                "brandpipe.ideation.call_openrouter_candidates",
+                side_effect=[
+                    ([], {}, "http_404"),
+                    (["vantora"], {"prompt_tokens": 11}, ""),
+                ],
+            ) as call_openrouter_mock,
+        ):
+            names, usage, err = ideation._call_provider_for_role(
+                provider="openrouter_http",
+                config=config,
+                role_cfg=role_cfg,
+                prompt="prompt",
+                target_count=3,
+            )
+        self.assertEqual(names, ["vantora"])
+        self.assertEqual(err, "")
+        self.assertEqual(usage["fallback_from"], "mistralai/mistral-small-creative")
+        self.assertEqual(usage["resolved_model"], "moonshotai/kimi-k2.5")
+        self.assertEqual(call_openrouter_mock.call_count, 2)
+
+        compat_config = IdeationConfig(provider="openai_compat", openai_base_url="http://127.0.0.1:1234/v1")
+        compat_role = IdeationRoleConfig(model="llama")
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch(
+                "brandpipe.ideation.call_openai_compat_candidates",
+                return_value=(["meridel"], {"prompt_tokens": 3}, ""),
+            ) as call_openai_mock,
+        ):
+            names, usage, err = ideation._call_provider_for_role(
+                provider="openai_compat",
+                config=compat_config,
+                role_cfg=compat_role,
+                prompt="prompt",
+                target_count=2,
+            )
+        self.assertEqual(names, ["meridel"])
+        self.assertEqual(err, "")
+        self.assertEqual(usage, {"prompt_tokens": 3})
+        self.assertEqual(call_openai_mock.call_args.kwargs["api_key"], "ollama")
+
+    def test_diversity_helpers_cover_family_extension_branches(self) -> None:
+        self.assertEqual(ideation._ending_family("solaria"), "aria")
+        self.assertEqual(ideation._ending_family("qq"), "qq")
+
+        current_names: list[str] = []
+        seen: set[str] = set()
+        family_counts = {"a": 1}
+        filtered_end_o, filtered_family = ideation._extend_diverse_names(
+            current_names=current_names,
+            seen=seen,
+            family_counts=family_counts,
+            round_names=["baltera", "neo", "meridel", "meridel", "solaria"],
+            per_family_cap=1,
+        )
+        self.assertEqual(filtered_end_o, 1)
+        self.assertEqual(filtered_family, 2)
+        self.assertEqual(current_names, ["meridel", "solaria"])
+        self.assertEqual(family_counts["el"], 1)
+        self.assertEqual(family_counts["aria"], 1)
+        self.assertEqual(seen, {"meridel", "solaria"})
 
 
 if __name__ == "__main__":
